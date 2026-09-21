@@ -1,0 +1,440 @@
+// The clip player's playback surface (task3520, round20 §2-1 B案 / §2-2).
+//
+// In B案 the *expanded tile is the player*: there is no overlay and no second
+// window, so this component is mounted inside the grid's raised copy
+// (`clips.slint`) at exactly the rectangle the tile grew into. It draws the
+// picture, takes the stage gestures, and carries the one bottom overlay round20
+// §2-2 fixes -- comment band, seek bar, control row -- plus the ✕ the same
+// section moved off that row and onto the surface's top right corner.
+//
+// Everything it shows comes off `ClipVm`, which the bin side fills from the
+// engine; the comment band is the exception and comes in as properties, because
+// it belongs to the *grid row* (the same `entry`, the same `editing-row` and the
+// same three callbacks `ClipTile` uses) and not to the player. Reusing the
+// pane's editor wiring rather than a second copy on the global is what makes
+// 「再生中にコメントを書ける」 fall out of what task2990 already built.
+//
+// Deliberately not copied from `ReviewStage`: the tap circle, the outcome
+// marks, the hold band and the loading ring. They are a second vocabulary to
+// keep in step and round20 §2-2 does not ask for them here.
+
+import { Dark, Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { InlineEdit, TransportBtn, VolumeSlider } from "controls.slint";
+import { ClipVm } from "clip_vm.slint";
+
+export component ClipStage inherits Rectangle {
+    // The grid row's own comment strip, passed through rather than read off
+    // `ClipVm`: the pane already owns `editing-row` and the three editor
+    // callbacks, and a second copy on the global would be a second answer to
+    // "what is this clip's comment" that has to be invalidated by the worker.
+    in property <string> comment;
+    in property <string> date;
+    in property <string> add-comment;
+    in property <bool> editing;
+    callback edit-requested();
+    callback comment-committed(string);
+    callback edit-cancelled();
+
+    // Same corner as the tile it replaces, so the swap moves no edge.
+    border-radius: Tokens.shape-m;
+    clip: true;
+    // The review stage's own ground (`ReviewStage`: not pure black, or a dark
+    // frame and the letterbox merge into one shape), always -- including the
+    // few frames before the engine publishes the first picture. It used to be
+    // transparent until then so the tile's thumbnail showed through the
+    // expansion, but the window's ground is see-through now (t260916-ebdb),
+    // so a transparent stage would show the desktop behind the window; the
+    // user ruled the stage stays opaque, and the cost is that the expansion
+    // shows this ground rather than the thumbnail until the first frame.
+    background: #05070a;
+
+    // The picture's drawn box inside this surface. `image-fit: contain` grows
+    // it until whichever axis runs out first, so this is that same min -- and
+    // the gestures are confined to it (task1010's rule, inherited whole): the
+    // black either side is not the video.
+    property <length> video-width: min(root.width, root.height * ClipVm.stage-aspect);
+    property <length> video-height: min(root.height, root.width / ClipVm.stage-aspect);
+    property <length> video-x: (root.width - root.video-width) / 2;
+    property <length> video-y: (root.height - root.video-height) / 2;
+
+    // How big the picture is really being drawn, so the engine resamples to it
+    // instead of handing skia a 1440p frame to minify (task990's rule). Rung on
+    // both axes because either can move on its own -- a window resize moves the
+    // width, a new clip's aspect moves the height -- and the Rust side ignores a
+    // target it already has.
+    //
+    // Only ever one of these exists: `clips.slint` mounts this under an `if` on
+    // the row actually playing, so there is no second copy to fight over
+    // `display_target`.
+    init => {
+        ClipVm.stage-size-changed(root.video-width, root.video-height);
+    }
+    changed video-width => {
+        ClipVm.stage-size-changed(root.video-width, root.video-height);
+    }
+    changed video-height => {
+        ClipVm.stage-size-changed(root.video-width, root.video-height);
+    }
+
+    if ClipVm.stage-has-frame: Image {
+        width: 100%;
+        height: 100%;
+        image-fit: contain;
+        source: ClipVm.stage-frame;
+    }
+
+    // ---------- gestures (round20 追記「ステージ挙動」) ----------
+    // Centre tap = play/pause, left/right quarter = ∓10s, two quick centre taps
+    // = full screen, centre hold = x2. None of that is decided here: the press
+    // goes to Rust with its position inside the *picture*, and
+    // `ui_state::playback`'s `stage_hit` / `stage_zone` / `stage_double_press` /
+    // `stage_hold_rate` -- the review's own, tested there -- answer it.
+    //
+    // No `double-clicked`: slint fires it on the second *release*, a whole
+    // press-and-hold after the user asked for full screen (task1010).
+    stage-touch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down || event.kind == PointerEventKind.move) {
+                ClipVm.activity();
+            }
+            // A press on the picture is a press that is not in the comment
+            // field, and this app's rule for that is discard (task3430). The
+            // same line `ClipTile`'s own `touch` carries, for the same reason.
+            if (event.kind == PointerEventKind.down
+                && event.button == PointerEventButton.left
+                && root.editing) {
+                root.edit-cancelled();
+            }
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                ClipVm.stage-pressed(
+                    self.mouse-x - root.video-x,
+                    self.mouse-y - root.video-y,
+                    root.video-width,
+                    root.video-height,
+                );
+            }
+            if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                ClipVm.stage-released();
+            }
+        }
+    }
+
+    // ---------- the ±10s hover bands (`ReviewStage`'s, verbatim) ----------
+    property <float> hover-ratio: (stage-touch.mouse-x - root.video-x) / root.video-width;
+    property <bool> zone-hover-armed: stage-touch.has-hover
+        && !stage-touch.pressed
+        && root.video-width > 0
+        && stage-touch.mouse-y >= root.video-y
+        && stage-touch.mouse-y < root.video-y + root.video-height;
+
+    Rectangle {
+        x: root.video-x;
+        y: root.video-y;
+        width: Math.clamp(root.video-width * 0.25, 44px, 320px);
+        height: root.video-height;
+        opacity: (root.zone-hover-armed && root.hover-ratio >= 0 && root.hover-ratio < 0.25)
+            ? 1.0 : 0.0;
+        animate opacity { duration: 160ms; }
+        background: @linear-gradient(90deg, #0000004d 0%, #00000000 100%);
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+            HorizontalLayout {
+                alignment: center;
+                AppIcon {
+                    commands: Icons.seek;
+                    stroke-color: #ffffffdb;
+                    size: 20px;
+                }
+            }
+            Text {
+                text: ClipVm.zone-seconds;
+                horizontal-alignment: center;
+                font-size: 11px;
+                font-weight: 600;
+                color: #ffffffdb;
+            }
+        }
+    }
+
+    Rectangle {
+        x: root.video-x + root.video-width - self.width;
+        y: root.video-y;
+        width: Math.clamp(root.video-width * 0.25, 44px, 320px);
+        height: root.video-height;
+        opacity: (root.zone-hover-armed && root.hover-ratio > 0.75 && root.hover-ratio < 1)
+            ? 1.0 : 0.0;
+        animate opacity { duration: 160ms; }
+        background: @linear-gradient(90deg, #00000000 0%, #0000004d 100%);
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+            HorizontalLayout {
+                alignment: center;
+                AppIcon {
+                    commands: Icons.seek-forward;
+                    stroke-color: #ffffffdb;
+                    size: 20px;
+                }
+            }
+            Text {
+                text: ClipVm.zone-seconds;
+                horizontal-alignment: center;
+                font-size: 11px;
+                font-weight: 600;
+                color: #ffffffdb;
+            }
+        }
+    }
+
+    // ---------- ✕ (round20 §2-2: on the surface, not on the control row) ----
+    // It goes out with the bar, which round20 allows because Esc and the click
+    // outside stay: the exit is never actually lost.
+    Rectangle {
+        x: parent.width - self.width - 8px;
+        y: 8px;
+        width: 26px;
+        height: 26px;
+        border-radius: 4px;
+        opacity: ClipVm.controls-visible ? 1.0 : 0.0;
+        animate opacity { duration: 160ms; }
+        background: close-touch.has-hover ? #080a0ce0 : #080a0c9e;
+
+        close-touch := TouchArea {
+            mouse-cursor: pointer;
+            // Dead along with the paint, or an invisible 26px square in the
+            // corner would still swallow a press meant for the picture.
+            enabled: ClipVm.controls-visible;
+            clicked => {
+                ClipVm.close-requested();
+            }
+        }
+
+        AppIcon {
+            commands: Icons.close;
+            stroke-color: #e9edf3;
+            size: 12px;
+        }
+    }
+
+    // ---------- the one bottom overlay (mock's `.pbot`) ----------
+    // One scrim carrying all three bands, stacked `.pcmt` -> `.pseek` ->
+    // `.pctl`, with the mock's own 22px of top padding: the gradient has to
+    // start well above the comment or the text sits on the picture's own
+    // brightness.
+    Rectangle {
+        y: parent.height - self.height;
+        width: 100%;
+        height: bottom-bar.preferred-height;
+        background: @linear-gradient(180deg, #080a0c00 0%, #080a0ce0 100%);
+        opacity: ClipVm.controls-visible ? 1.0 : 0.0;
+        animate opacity { duration: 160ms; }
+
+        // While the bar is down nothing in it is a hit target -- the picture
+        // underneath takes the press, which is what makes "click to bring the
+        // bar back" the same gesture as play/pause rather than a dead click.
+        bar-touch := TouchArea {
+            enabled: ClipVm.controls-visible;
+            mouse-cursor: default;
+            // The pointer resting anywhere on the bar pins it (task151's rule,
+            // `controls_visible`'s `pinned`).
+            changed has-hover => {
+                ClipVm.controls-pinned = self.has-hover || seek-touch.pressed;
+            }
+        }
+
+        bottom-bar := VerticalLayout {
+            padding-top: 22px;
+            padding-left: 10px;
+            padding-right: 10px;
+            padding-bottom: 8px;
+            spacing: 4px;
+
+            // ---- `.pcmt`: the tile's own comment strip ----
+            HorizontalLayout {
+                height: 20px;
+                spacing: 6px;
+                alignment: stretch;
+
+                if !root.editing: Text {
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    text: root.comment == "" ? root.add-comment : root.comment;
+                    overflow: elide;
+                    font-size: 11.5px;
+                    color: root.comment == ""
+                        ? Dark.color-on-surface-variant
+                        : Dark.color-on-surface;
+                }
+
+                if !root.editing: Rectangle {
+                    width: 18px;
+                    height: 18px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Tokens.shape-xs;
+                    background: pen.has-hover ? #ffffff2e : transparent;
+
+                    pen := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.edit-requested();
+                        }
+                    }
+
+                    AppIcon {
+                        commands: Icons.pencil;
+                        stroke-color: Dark.color-on-surface;
+                        size: 11px;
+                    }
+                }
+
+                // Declared before the date for the same reason `ClipTile` does
+                // it (task3850): a layout places children in declaration order,
+                // so with this last the date would jump left as the editor
+                // opened.
+                if root.editing: InlineEdit {
+                    horizontal-stretch: 1;
+                    text: root.comment;
+                    hint: "Enter";
+                    init => {
+                        self.begin-edit();
+                    }
+                    committed(value) => {
+                        root.comment-committed(value);
+                    }
+                    cancelled => {
+                        if (root.editing) {
+                            root.edit-cancelled();
+                        }
+                    }
+                }
+
+                Text {
+                    vertical-alignment: center;
+                    text: root.date;
+                    font-size: 10px;
+                    color: Dark.color-on-surface-variant;
+                }
+            }
+
+            // ---- `.pseek`: track 3px / fill primary / knob 10px ----
+            // Not `ReviewTrackWrap`: that one carries the selection range, the
+            // markers and the gap spans, none of which a finished clip has.
+            Rectangle {
+                height: 12px;
+
+                Rectangle {
+                    y: (parent.height - 3px) / 2;
+                    height: 3px;
+                    border-radius: 1.5px;
+                    background: #ffffff38;
+                }
+
+                Rectangle {
+                    x: 0;
+                    y: (parent.height - 3px) / 2;
+                    width: parent.width * ClipVm.played-percent / 100;
+                    height: 3px;
+                    border-radius: 1.5px;
+                    background: Dark.color-primary;
+                }
+
+                Rectangle {
+                    x: parent.width * ClipVm.played-percent / 100 - 5px;
+                    y: (parent.height - 10px) / 2;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: Dark.color-primary;
+                }
+
+                seek-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    // A drag pins the bar as surely as a hover does, and the
+                    // pointer can leave the 12px strip mid-drag.
+                    changed pressed => {
+                        ClipVm.controls-pinned = self.pressed || bar-touch.has-hover;
+                    }
+                    pointer-event(event) => {
+                        if ((event.kind == PointerEventKind.down
+                                && event.button == PointerEventButton.left)
+                            || (event.kind == PointerEventKind.move && self.pressed)) {
+                            ClipVm.seek(max(0.0, min(1.0, self.mouse-x / self.width)));
+                        }
+                    }
+                }
+            }
+
+            // ---- `.pctl`: round20 §2-2's five, plus the repeat toggle the user
+            // asked for on 2026-09-16 (t260916-0ee4), and no more ------------
+            HorizontalLayout {
+                height: 30px;
+                spacing: 6px;
+
+                TransportBtn {
+                    icon: ClipVm.playing ? Icons.pause : Icons.play;
+                    filled: !ClipVm.playing;
+                    tint: #e9edf3;
+                    clicked => {
+                        ClipVm.play-toggled();
+                    }
+                }
+
+                Text {
+                    vertical-alignment: center;
+                    text: (ClipVm.position-text == "" ? "0:00" : ClipVm.position-text)
+                        + " / " + (ClipVm.total-text == "" ? "0:00" : ClipVm.total-text);
+                    font-size: 11px;
+                    font-family: "ui-monospace";
+                    color: #e9edf3;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                // First of the right-hand group, which puts it left of full
+                // screen -- where the review screen also keeps its own repeat,
+                // among the right-hand controls rather than beside play. The
+                // design mock has no loop button on `.pctl` at all, so this
+                // placement is t260916-0ee4's own decision, not the mock's.
+                TransportBtn {
+                    icon: Icons.repeat;
+                    on: ClipVm.repeat-enabled;
+                    tint: #e9edf3;
+                    clicked => {
+                        ClipVm.repeat-toggled();
+                    }
+                }
+
+                TransportBtn {
+                    icon: ClipVm.muted ? Icons.volume-muted : Icons.volume;
+                    tint: ClipVm.muted ? Dark.color-on-surface-variant : #e9edf3;
+                    clicked => {
+                        ClipVm.mute-toggled();
+                    }
+                }
+
+                VolumeSlider {
+                    ratio: ClipVm.volume-ratio;
+                    muted: ClipVm.muted;
+                    ratio-changed(value) => {
+                        ClipVm.volume-changed(value);
+                    }
+                }
+
+                TransportBtn {
+                    icon: ClipVm.fullscreen ? Icons.fullscreen-exit : Icons.fullscreen;
+                    tint: #e9edf3;
+                    clicked => {
+                        ClipVm.fullscreen-toggled();
+                    }
+                }
+            }
+        }
+    }
+}

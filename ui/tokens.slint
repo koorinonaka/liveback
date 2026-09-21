@@ -1,0 +1,419 @@
+// Ported 1:1 from the React-era src/styles/tokens.css, which went away with the
+// React app in task131 -- this file is the source of truth now. The design-side
+// reference is the mock, .agents/docs/design/mock/liveback-mock.html, whose
+// `html[data-theme="c"]` block carries the dark values and whose
+// `html[data-theme="l"]` block carries the light ones (see
+// .agents/docs/design/README.md). Slint has no `oklch()` and no CSS custom
+// properties, so every ramp entry was resolved to sRGB and each value keeps its
+// original expression in a trailing comment -- that comment is the thing to
+// diff against when the mock's tokens change, not the hex.
+//
+// round16 added the light theme. The two halves live in two globals:
+//
+//   `Dark`   -- the 1c 藍鉄 constants, addressable on their own.
+//   `Tokens` -- what the app reads. Every role that differs between the themes
+//               is `light ? <light value> : Dark.<role>`; everything else is a
+//               plain constant, because round16 §2 of the styleguide says a
+//               token absent from the mapping table is shared by both themes.
+//
+// `Tokens.light` is written from Rust (the theme setting: system / light /
+// dark). The "dark island" -- the video stage and everything drawn on it, plus
+// the badges that sit on a thumbnail -- reads `Dark` directly and so stays dark
+// in either theme (round16 §2).
+//
+// oklch values were resolved through the same canvas readback the design side
+// used for its own hex column, so a light hex here is what the mock paints, not
+// what a different oklch->sRGB rounding would give.
+export global Dark {
+    out property <color> color-primary: #41bae4;                    // oklch(74% 0.12 225) -- round13 1c 藍鉄
+    out property <color> color-on-primary: #001a2a;                 // oklch(20% 0.06 225)
+    out property <color> color-primary-container: #004256;          // oklch(35% 0.07 225)
+    out property <color> color-on-primary-container: #bce6f7;       // oklch(90% 0.05 225)
+
+    out property <color> color-secondary-container: #384355;        // var(--s30)
+    out property <color> color-on-secondary-container: #d3dbe8;     // var(--s90)
+
+    out property <color> color-tertiary: #eca338;                   // oklch(77% 0.145 72) -- round13 1c 藍鉄
+
+    out property <color> color-error: #f1645f;                      // oklch(68% 0.175 25) -- round13 1c 藍鉄
+    // The capture REC dot only. `color-error` is 2.73:1 over the agent-run
+    // rail pill (`chrome-selected` over `chrome-rail-agent` = #514e26), under
+    // the 3:1 for non-text; same hue, lightness lifted until it clears 3:1.
+    // t260916-057d first took the minimum lift (#fa6c67, 3.0012) but that
+    // leaves 0.0012 of headroom, so a nudge to any ground token breaks it;
+    // user ruling 2026-09-17 lifted it one step to 3.0675 on #514e26.
+    out property <color> color-rec-dot: #fc6e68;                    // oklch(71% 0.175 25)
+    out property <color> color-error-container: #7c1117;            // var(--e30)
+    out property <color> color-on-error-container: #ffccc7;         // var(--e90)
+
+    out property <color> color-success: #54c088;                    // oklch(73% 0.13 158) -- round13 1c 藍鉄
+    out property <color> color-success-container: #154f27;          // var(--su30)
+    out property <color> color-on-success-container: #c4e5ca;       // var(--su90)
+
+    out property <color> color-warning: #f7a97c;                    // var(--w80)
+
+    out property <color> color-surface: #171c24;                    // round13 1c: content
+    out property <color> color-surface-dim: #0d1015;                // round13 1c: titlebar/rail
+    out property <color> color-on-surface: #e9edf3;                 // round13 1c
+    out property <color> color-on-surface-variant: #96a2b2;         // round13 1c
+    out property <color> color-outline: #64707f;                    // round13 1c
+
+    out property <color> chrome-titlebar: #0d1015;                  // round13 1c 藍鉄
+    out property <color> chrome-rail: #0d1015;                      // round13 1c 藍鉄
+    // agent-run rail (t260913-c4db). Both tones are yellows of the same hue
+    // (54deg); the light theme swaps them, so the pair is declared once here.
+    out property <color> chrome-rail-agent: #3a3400;                // olive
+    out property <color> on-chrome-rail-agent: #fff9c4;             // pale
+    out property <color> chrome-sidebar: #12161d;                   // round13 1c 藍鉄
+    out property <color> chrome-content: #171c24;                   // round13 1c 藍鉄
+    out property <color> chrome-inset: #07090c;                     // round13 1c 藍鉄
+    // Lines and state layers are a blue-white (#c7d6eb = rgb(199,214,235)),
+    // not pure white -- round13 §1. Alpha byte = round(alpha * 255).
+    out property <color> chrome-hairline: #c7d6eb26;                // blue-white 15%
+    out property <color> chrome-hairline-strong: #c7d6eb3d;         // blue-white 24%
+    out property <color> chrome-hover: #c7d6eb12;                   // blue-white 7%
+    out property <color> chrome-active: #c7d6eb1f;                  // blue-white 12%
+    out property <color> chrome-selected: #c7d6eb29;                // blue-white 16%
+
+    out property <color> color-surface-container-lowest: #07090c;   // round13 1c: inset
+    out property <color> color-surface-container-low: #12161d;      // round13 1c: sidebar
+    out property <color> color-surface-container: #171c24;          // round13 1c: content
+    out property <color> color-surface-container-high: #1f2530;     // round13 1c
+    out property <color> color-surface-container-highest: #28303c;  // round13 1c
+}
+
+export global Tokens {
+    // round16: false = the 1c 藍鉄 dark theme, true = its light mapping. Written
+    // from Rust once at start-up, from the `theme` setting (system / light /
+    // dark); "system" reads `AppsUseLightTheme`. Flipping the OS theme while the
+    // app runs does not repaint it -- same known limitation the tray icon has
+    // carried since task2220.
+    in-out property <bool> light;
+
+    // ---------- the window's resize band, as the layout sees it (task4320) ----
+    // The band's width in **logical** px. Set from Rust
+    // (`ui_state::shell::RESIZE_BAND_LOGICAL_PX`); the 8px here is the fallback
+    // if that setter never runs, exactly like `AppWindow.resize-band-width`'s.
+    //
+    // Since slint 1.18 this holds the same number as
+    // `AppWindow.resize-band-width` -- 1.18 scales the window's supply itself,
+    // so both sides of the edge finally speak logical px. Kept separate anyway:
+    // a global takes no binding from outside itself, the panes cannot see the
+    // window's properties, and the two have different owners. **Do not
+    // re-point either at `resize_band_physical_px`** -- a `length` in a layout
+    // is logical, so the physical number would pull the lane 12 logical px in
+    // at 150%, and handing it to the window would bring back the squared
+    // scale factor 1.18 introduced.
+    in-out property <length> resize-band-logical: 8px;
+    // How far a flush-right `AppScroll` moves its lane in from the window edge:
+    // the band, or nothing while the window is maximized or full screen (where
+    // `AppWindow.resize-border-width` is 0 and there is no band to dodge).
+    // Pushed from `app.slint`, which owns those two flags. Its `init` always
+    // overwrites this before first paint, and since t260919-ee8c put the panes
+    // on a panel with `panel-right` + `panel-border` (8 + 1 = 9px) of window
+    // ground to their right, that push always computes 0 -- the panel's own
+    // margin already clears the 8px band. 0px here is that steady state, not
+    // a fallback; it only stops matching if the band widens or the margin
+    // shrinks.
+    in-out property <length> resize-band-inset: 0px;
+
+    // ---------- Semantic roles ----------
+    out property <color> color-primary: light ? #007496 : Dark.color-primary;                             // light: oklch(52% 0.105 225)
+    out property <color> color-on-primary: light ? #eef7fa : Dark.color-on-primary;                       // light: oklch(97% 0.01 225)
+    out property <color> color-primary-container: light ? #b5dff1 : Dark.color-primary-container;         // light: oklch(88% 0.05 225)
+    out property <color> color-on-primary-container: light ? #00394d : Dark.color-on-primary-container;   // light: oklch(32% 0.07 225)
+
+    out property <color> color-secondary: #b3bfd2;                  // var(--s80) -- both themes
+    out property <color> color-on-secondary: #252e3d;               // var(--s20) -- both themes
+    // Light's tab selection does not use this (round16 §3-2 lifts the tab onto a
+    // white plate instead); the role stays mapped for everything else.
+    out property <color> color-secondary-container: light ? #d5deeb : Dark.color-secondary-container;
+    out property <color> color-on-secondary-container: light ? #334052 : Dark.color-on-secondary-container;
+
+    out property <color> color-tertiary: light ? #a96b00 : Dark.color-tertiary;   // light: oklch(58% 0.13 72)
+    out property <color> color-on-tertiary: #442600;                // var(--t20) -- both themes
+    out property <color> color-tertiary-container: #633600;         // var(--t30) -- both themes
+    out property <color> color-on-tertiary-container: #fed397;      // var(--t90) -- both themes
+
+    // Light's error is the same #be2323 the light taskbar badge already ships
+    // (round14 §2-1), so the red matches inside and outside the window.
+    out property <color> color-error: light ? #be2323 : Dark.color-error;
+    // Light's pill is 4.35:1 already, so only dark needs the lifted red.
+    out property <color> color-rec-dot: light ? #be2323 : Dark.color-rec-dot;
+    out property <color> color-on-error: #551112;                   // var(--e20) -- both themes
+    out property <color> color-error-container: light ? #f7d9d5 : Dark.color-error-container;
+    out property <color> color-on-error-container: light ? #8a1512 : Dark.color-on-error-container;
+
+    out property <color> color-success: light ? #007a4b : Dark.color-success;   // light: oklch(51% 0.12 158)
+    out property <color> color-on-success: #14361d;                 // var(--su20) -- both themes
+    out property <color> color-success-container: light ? #d6ecdc : Dark.color-success-container;
+    out property <color> color-on-success-container: light ? #14522e : Dark.color-on-success-container;
+
+    out property <color> color-warning: light ? #a95f23 : Dark.color-warning;   // light: oklch(56% 0.12 55)
+    out property <color> color-on-warning: #4c1f00;                 // var(--w20) -- both themes
+    out property <color> color-warning-container: #6e2b00;          // var(--w30) -- both themes
+    out property <color> color-on-warning-container: #fdd0b8;       // var(--w90) -- both themes
+
+    // ---------- task159: theme candidate B, "lifted dark" ----------
+    // Measuring the old values turned the complaint around: the text was never
+    // the problem (body was 13.9:1, captions 7.3:1). What had collapsed was
+    // everything *between* things -- the hairline sat at 1.19:1 and the
+    // rail-to-content surface step at 1.07:1, so nothing had an edge and no
+    // pane separated from its neighbour. Disabled text (2.25:1), `outline`
+    // (2.65:1) and the gap hatch (4.15:1) were the only three that missed
+    // their targets outright.
+    //
+    // This raises the whole ladder off pure black and strengthens the edges,
+    // while keeping the accents exactly as they were -- the point was never a
+    // new colour scheme, it was making the structure visible. Measured against
+    // `#1c1f23`: body 13.1:1, captions 7.6:1, hairline 1.71:1, disabled
+    // 3.3:1, outline 3.5:1, gap hatch 4.8:1.
+    //
+    // round13 replaced the surfaces and the text ladder with the "1c 藍鉄"
+    // theme below; the ratios measured above belong to the old graphite set.
+    out property <color> color-surface: light ? #f5f7fb : Dark.color-surface;
+    out property <color> color-surface-dim: light ? #e6eaf1 : Dark.color-surface-dim;
+    out property <color> color-surface-bright: #313a48;             // round14 §3: 1c neutral (oklch h225, C~0.012)
+    out property <color> color-on-surface: light ? #1a222d : Dark.color-on-surface;
+    out property <color> color-surface-variant: #242c38;            // round14 §3: 1c neutral, same as outline-variant / gap-bg
+    out property <color> color-on-surface-variant: light ? #4e5b6b : Dark.color-on-surface-variant;
+    out property <color> color-outline: light ? #74818f : Dark.color-outline;
+    out property <color> color-outline-variant: #242c38;            // round14 §3: 1c neutral
+
+    // The empty-state glyph's tint (round20 §8-(7)(8), task3800). The mock
+    // writes it as `color-mix(in oklab, var(--primary) 55%, #39424e)`.
+    //
+    // Dark keeps the alpha translation `review.slint` already uses: the ground
+    // there *is* about #39424e, so 55% of the primary over it lands on the
+    // mixed colour. Light cannot do that -- 55% alpha over the light ground is
+    // a pale smear, not "one step sunk into the ground, cooler than it". So
+    // light carries the mix precomputed against `#93a0ae`, the light-side
+    // neutral slate the round names as the counterpart of dark's `#39424e`:
+    //
+    //   color-mix(in oklab, #007496 55%, #93a0ae) = #5688a1
+    //
+    // The round allows +-10% on that ratio if it floats or sinks on real
+    // hardware, and **light takes the -10% step: 45%, `#628da4`** (user
+    // decision, 2026-09-09). 55% (`#5688a1`) and 65% (`#4a849f`) are the other
+    // two steps, kept here so the ladder stays readable.
+    //
+    // Why light moved and dark did not: measured on the real machine at 45%
+    // (2026-09-09, history pane, light) the glyph's darkest pixel reads luma
+    // 131.1 against the `outline` sub-caption's 126.7, so the glyph is finally
+    // *weaker* than the text under it. At 55% it read 124.2 against the same
+    // 126.7 -- equal within a couple of points, and on the wrong side of it,
+    // which is why task3800 had to buy the "quieter" requirement with a 1.4px
+    // stroke and chroma instead of with brightness. Dark keeps 55%: there the
+    // alpha translation lands on the mix exactly and nothing was equal.
+    //
+    // Both numbers are the *minimum over a full 4.2s breathe cycle* -- the
+    // glyph animates its opacity, so one frame measures whatever phase it
+    // caught (`evidence-3800-empty-states/measurements.txt` §5).
+    out property <color> color-empty-glyph: light ? #628da4 : Dark.color-primary.with-alpha(0.55);
+
+    // ---------- App chrome surfaces ----------
+    // Discord/Slack style pane hierarchy: title bar darkest, content
+    // brightest, 1px hairline borders. Light inverts the elevation, not the
+    // order: content is the *lightest* ground, chrome sinks below it, and the
+    // floating surfaces go white (round16 §1).
+    //
+    // These three are the window's visible ground and are translucent so the
+    // desktop behind shows through (t260916-ebdb, the user 2026-09-18): 55 %
+    // in dark, 60 % in light -- down from round25's 85 / 92 (the user
+    // 2026-09-19: 「リキッドグラスを指示したが背面が見えない」; stacked, the panel
+    // read 97.75 % opaque and the blur behind it never showed). Since round25 (§1, §4-1,
+    // t260919-ee8c) the layering is deliberate and has exactly two steps:
+    // `chrome-rail` is the window ground, one layer under the whole client
+    // (app.slint's full-window rectangle; the rail itself is `transparent`),
+    // and `chrome-content` is the pane *panel* on top of it -- a second layer
+    // on purpose, which is what makes the panel read as a panel. Nothing else
+    // may add a third: the window background and the pane roots stay
+    // `transparent`. `Dark.*` keeps the opaque values for the stage overlays
+    // that read them raw.
+    // No `chrome-titlebar` here any more: round25 §4-1 (t260919-fd3d) took
+    // the bar's fill away, so the bar is the window ground below. The stage
+    // overlays keep reading `Dark.chrome-titlebar` raw.
+    out property <color> chrome-rail: (light ? #e6eaf1 : Dark.chrome-rail).with-alpha(light ? 0.6 : 0.55);
+    // The agent-run rail is a yellow of its own (the user, 2026-09-13), so a
+    // window started with `LIVEBACK_BUFFER_ROOT` never passes for the everyday
+    // one. Each theme takes the yellow the rail's own glyph colors can sit on
+    // (light: pale, dark: olive), and the `AGENT` badge takes the other
+    // theme's ground -- which is why `on-` mirrors the pair.
+    out property <color> chrome-rail-agent: light ? Dark.on-chrome-rail-agent : Dark.chrome-rail-agent;
+    out property <color> on-chrome-rail-agent: light ? Dark.chrome-rail-agent : Dark.on-chrome-rail-agent;
+    out property <color> chrome-sidebar: light ? #edf0f6 : Dark.chrome-sidebar;
+    out property <color> chrome-content: (light ? #f5f7fb : Dark.chrome-content).with-alpha(light ? 0.6 : 0.55);
+    out property <color> chrome-inset: light ? #e0e5ec : Dark.chrome-inset;
+    // The ground inside a free-entry field on the settings page -- 保持期間 の
+    // 数値, フォルダのパス, ホットキー (the user, 2026-09-20). `chrome-inset` is
+    // #07090c, a near-black that was fine on an opaque page and reads as a hole
+    // punched through the glass one; this is the same well, a few steps up into
+    // grey. Only those fields: `chrome-inset` stays where black is the point
+    // (the stage letterbox, a thumbnail's ground).
+    out property <color> chrome-field: light ? #e8ecf2 : #1a1f28;
+    // Light flips the state-layer base from the blue-white to a deep navy
+    // (#1f2a3a = rgb(31,42,58)) and takes 1-2pt off each step, so the layers
+    // read at the same strength on a bright ground (round16 §1).
+    out property <color> chrome-hairline: light ? #1f2a3a29 : Dark.chrome-hairline;                // light: navy 16%
+    out property <color> chrome-hairline-strong: light ? #1f2a3a45 : Dark.chrome-hairline-strong;  // light: navy 27%
+    out property <color> chrome-hover: light ? #1f2a3a0f : Dark.chrome-hover;                      // light: navy 6%
+    out property <color> chrome-active: light ? #1f2a3a1a : Dark.chrome-active;                    // light: navy 10%
+    out property <color> chrome-selected: light ? #1f2a3a24 : Dark.chrome-selected;                // light: navy 14%
+
+    // round16 §3-1: on a bright ground a plain hairline dissolves, so every
+    // outlined control (ghost button, chip, sbtn, path box, search field, the
+    // toast's action) steps up to hairline-strong in light. One token rather
+    // than a ternary at each call site.
+    out property <color> chrome-control-border: light ? chrome-hairline-strong : chrome-hairline;
+
+    // The pane panel's 1px frame (round25 §4-2, t260919-ee8c): the mock's
+    // `color-mix(in srgb, var(--hairline-strong) 60%, var(--outline))`.
+    // Written as literals because CSS color-mix interpolates premultiplied
+    // (alpha = .6*a1 + .4*a2, channels weighted by their alpha), while slint's
+    // `Color.mix` follows Sass's alpha-distance weighting and gives another
+    // colour. Worked out:
+    //   dark:  hairline-strong rgb(199,214,235) a.24, outline #64707f
+    //          a = .6*.24 + .4 = .544 -> 0x8b
+    //          r = (.144*199 + .4*100)/.544 = 126.2 -> 7e
+    //          g = (.144*214 + .4*112)/.544 = 139.0 -> 8b
+    //          b = (.144*235 + .4*127)/.544 = 155.6 -> 9c
+    //   light: hairline-strong rgb(31,42,58) a.27, outline #74818f
+    //          a = .6*.27 + .4 = .562 -> 0x8f
+    //          r = (.162*31 + .4*116)/.562 = 91.5 -> 5b
+    //          g = (.162*42 + .4*129)/.562 = 103.9 -> 68
+    //          b = (.162*58 + .4*143)/.562 = 118.5 -> 76
+    out property <color> chrome-panel-border: light ? #5b68768f : #7e8b9c8b;
+
+    // round16 §3-3: floating surfaces keep a shadow in both themes, but light
+    // tints it navy and halves the density -- black at 45-60% reads as dirt on
+    // a white ground. Call sites keep their own dark value and swap to these.
+    out property <color> shadow-float: #141e2d38;                   // light: rgba(20,30,45,.22)
+    out property <color> shadow-window: #141e2d47;                  // light: rgba(20,30,45,.28)
+
+    out property <color> color-surface-container-lowest: light ? #e0e5ec : Dark.color-surface-container-lowest;
+    out property <color> color-surface-container-low: light ? #edf0f6 : Dark.color-surface-container-low;
+    out property <color> color-surface-container: light ? #f5f7fb : Dark.color-surface-container;
+    out property <color> color-surface-container-high: light ? #fbfcfe : Dark.color-surface-container-high;
+    // Pure white, and only for surfaces that float. Never a ground (round16 §6).
+    out property <color> color-surface-container-highest: light ? #ffffff : Dark.color-surface-container-highest;
+
+    out property <color> color-inverse-surface: #e9edf3;            // round13 1c: tracks on-surface
+    out property <color> color-inverse-on-surface: #20262f;         // round14 §3: 1c neutral (was var(--n20))
+    // The wash behind a modal. Carries its own alpha, and is read rather than
+    // repeated at the two call sites since round16 gave the two themes
+    // different values (§3-3: light is a navy at 42%, not black at 66% --
+    // black that heavy over a bright page reads as the lights going out).
+    out property <color> color-scrim: light ? #0f17286b : #000000a8;   // light: rgba(15,23,40,.42)
+    out property <color> color-shadow: #000000;                     // oklch(0% 0 260)
+
+    // gap regions: deliberately NOT error. "absence", not "failure".
+    // The hatch is thin, and a thin line needs the ratio a body of text would:
+    // 4.02:1 against its own ground (round14 §3 1c pair; the graphite pair
+    // measured 4.76:1, the one before it 4.15:1).
+    out property <color> color-gap-fg: #7e8a9b;                     // round14 §3: 1c neutral
+    out property <color> color-gap-bg: #242c38;                     // round14 §3: 1c neutral, same as surface-variant
+
+    // ---------- State layer opacities ----------
+    out property <float> state-hover-opacity: 0.08;
+    out property <float> state-focus-opacity: 0.10;
+    out property <float> state-pressed-opacity: 0.10;
+    out property <float> state-dragged-opacity: 0.16;
+
+    // ---------- Shape scale ----------
+    // One step smaller than M3, for desktop chrome. No large radii.
+    out property <length> shape-none: 0px;
+    out property <length> shape-xs: 3px;
+    out property <length> shape-s: 4px;
+    out property <length> shape-m: 6px;
+    out property <length> shape-l: 8px;
+    out property <length> shape-full: 999px;
+
+    // ---------- Spacing (4dp/8dp grid) ----------
+    out property <length> space-1: 4px;
+    out property <length> space-2: 8px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-5: 20px;
+    out property <length> space-6: 24px;
+    out property <length> space-7: 28px;
+    out property <length> space-8: 32px;
+    out property <length> space-10: 40px;
+    out property <length> space-12: 48px;
+
+    // ---------- Desktop control density ----------
+    out property <length> control-height-xs: 24px;
+    out property <length> control-height-s: 28px;
+    out property <length> control-height-m: 32px;
+    out property <length> row-height: 30px;
+    // task2880: the width every settings row's trailing control group is pinned
+    // to, so 「システム」 lands in the same column on the language row and the
+    // theme row. The number is the language combo's own pin (task1470): a width
+    // rather than a floor, so 日本語/English does not shuffle the row. Measured
+    // against the theme row's widest option chip -- 「ライト」 is 53px (3 kana at
+    // 11px plus the chip's 2x10px padding), and two of those with the 6px gap
+    // need 112px, so 116px clears it with 2px per chip to spare.
+    out property <length> settings-trailing-width: 116px;
+    out property <length> titlebar-height: 32px;
+    // round22 / task4370: the bar is an overlay that is only out while the
+    // pointer is up there, and these three are the hot zone and the motion that
+    // brings it in and out. The mock (`.tb` / `.tbhot`) is the source:
+    // `height:12px`, `transform .24s cubic-bezier(.2,.75,.25,1)` with no delay
+    // on the way in and `.3s` on the way out. The curve itself is
+    // `motion-curve` in the Motion section below (t260914-f561).
+    //
+    // 20px, one step out from the mock's 12 (ユーザー指摘 2026-09-13: 12 は狭い).
+    // The whole band is usable: the window's resize band (8 logical px at
+    // dpi=96) was suspected of eating the hover the way it eats presses, and it
+    // does not -- winit forwards `CursorMoved` through the band and only
+    // swallows the press (measured 2026-09-12,
+    // `evidence/4370-titlebar-collapse/`).
+    //
+    // The ceiling is 24px, not the bar's 32: this zone eats presses, and 24 is
+    // where the 履歴 / クリップ search field now starts (`sessions.slint` /
+    // `clips.slint`, same day). 20 leaves 4px of margin under that.
+    out property <length> titlebar-hot-zone: 20px;
+    out property <duration> titlebar-slide-duration: 240ms;
+    out property <duration> titlebar-collapse-delay: 300ms;
+    // round2 §2-2: 76px, not the 52px the design copy still carries -- the rail
+    // buttons are 68x54 with a label. Do not copy this back from the design side.
+    out property <length> rail-width: 76px;
+    // The air between the rail's right edge and the target picker's panel
+    // (round21 §2-1 `left: 88px` = 76 + 12). One source for the panel's `x`
+    // (`picker_modal.slint`) and for the title-bar hot zone that steps
+    // around the panel while the picker is open (`tbhot`, app.slint,
+    // t260917-099c).
+    out property <length> picker-rail-gap: 12px;
+
+    // ---------- Motion ----------
+    // t260914-f561: the mock's own curve (`transform .24s
+    // cubic-bezier(.2,.75,.25,1)`), read by the titlebar slide, the live
+    // capsule, the clip tiles, `AppScroll` and the 確認画面 right panel. It
+    // costs one warning per build -- `Properties of type easing are not
+    // supported yet for public API` (`passes/check_public_api.rs`), because
+    // `Tokens` is an exported global and `easing` cannot be exposed; `private
+    // property` would not be importable, so there is no way around it. Paying
+    // that one warning is ユーザー裁定済み (2026-09-14).
+    out property <easing> motion-curve: cubic-bezier(0.2, 0.75, 0.25, 1);
+    out property <duration> motion-duration-short: 100ms;
+    out property <duration> motion-duration-medium: 200ms;
+    out property <duration> motion-duration-long: 350ms;
+
+    // ---------- Type ----------
+    // Yu Gothic UI / Meiryo, no web fonts. Tracking 0 (kana distorts with M3's
+    // default latin tracking).
+    out property <string> font-family: "Noto Sans JP";                // round7: bundled, see ui/app.slint
+    out property <length> type-display-size: 28px;
+    out property <int> type-display-weight: 600;
+    out property <length> type-headline-size: 18px;
+    out property <int> type-headline-weight: 600;
+    out property <length> type-title-size: 14px;
+    out property <int> type-title-weight: 600;
+    out property <length> type-body-size: 13px;
+    out property <int> type-body-weight: 400;
+    out property <length> type-label-size: 12px;
+    out property <int> type-label-weight: 600;
+    out property <length> type-caption-size: 11px;
+    out property <int> type-caption-weight: 400;
+    out property <length> type-section-size: 11px;
+    out property <int> type-section-weight: 700;
+}

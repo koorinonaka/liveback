@@ -1,0 +1,166 @@
+// What the window shows while a file is held over it (task870, round7 §2-13).
+//
+// The drop itself has worked since task600, but nothing said so while the file
+// was still in the air: the window looked as inert as any other. This is the
+// missing half -- accept and refuse, told apart at a glance.
+//
+// Window-wide, like the drop it announces: a `.lvb` may land anywhere, so
+// restricting the mark to the review pane would only invite a miss.
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+
+// Set from `accept_dropped_sessions` in the bin; `active` false means no file
+// is over the window. Strings come from `ui_state::shell` -- nothing
+// user-visible is spelled here.
+export global DropVm {
+    in property <bool> active;
+    in property <bool> accepted;
+    // The dragged file's name, and only for one we can open (see `drop_hint`).
+    in property <string> name;
+    in property <string> accept-title;
+    in property <string> reject-title;
+    in property <string> reject-detail;
+}
+
+// A dashed rectangle, written out as its dashes: slint's `Path` has no dash
+// array (the same reason `Icons.empty-record` spells its ring out as arcs), and
+// this frame follows the window's size, so a fixed path could not have been
+// stretched to fit either.
+//
+// ponytail: square corners, where the mock rounds them by 10px -- a dash that
+// bends around a corner would need a path per corner arc. Give the frame a
+// radius only if the squared corners ever read as wrong.
+component DashedFrame {
+    in property <color> color;
+    in property <length> thickness: 2px;
+    // 7 on 5 at 2px thick, which is about what a browser draws for
+    // `border: 2px dashed`.
+    property <length> dash: 7px;
+    property <length> period: 12px;
+
+    // The last dash of a run is clipped rather than dropped, so the frame keeps
+    // its full length whatever the window is sized to. Every edge spells out
+    // both coordinates: slint centres a child that names neither, which turns a
+    // missing `y: 0` into a dashed line across the middle of the window.
+    for i in Math.ceil(root.width / root.period): Rectangle {
+        x: i * root.period;
+        y: 0;
+        width: Math.min(root.dash, root.width - i * root.period);
+        height: root.thickness;
+        background: root.color;
+    }
+    for i in Math.ceil(root.width / root.period): Rectangle {
+        x: i * root.period;
+        y: root.height - root.thickness;
+        width: Math.min(root.dash, root.width - i * root.period);
+        height: root.thickness;
+        background: root.color;
+    }
+    for i in Math.ceil(root.height / root.period): Rectangle {
+        x: 0;
+        y: i * root.period;
+        width: root.thickness;
+        height: Math.min(root.dash, root.height - i * root.period);
+        background: root.color;
+    }
+    for i in Math.ceil(root.height / root.period): Rectangle {
+        x: root.width - root.thickness;
+        y: i * root.period;
+        width: root.thickness;
+        height: Math.min(root.dash, root.height - i * root.period);
+        background: root.color;
+    }
+}
+
+export component DropOverlay inherits Rectangle {
+    // Both states dim the window; only the frame and the card tell them apart.
+    background: #05070894;
+
+    // No TouchArea: nothing here is aimed at, and a scrim that swallowed clicks
+    // would take the window with it if a `HoveredFileCancelled` ever went
+    // missing.
+    DashedFrame {
+        x: 14px;
+        y: 14px;
+        width: parent.width - 28px;
+        height: parent.height - 28px;
+        color: DropVm.accepted ? Tokens.color-primary.with-alpha(0.55) : Tokens.chrome-hairline-strong;
+    }
+
+    // The accepted frame is filled as well as drawn; the refusal is hairline
+    // only, so the two never read as the same mark in the corner of the eye.
+    if DropVm.accepted: Rectangle {
+        x: 14px;
+        y: 14px;
+        width: parent.width - 28px;
+        height: parent.height - 28px;
+        background: Tokens.color-primary.with-alpha(0.05);
+    }
+
+    VerticalLayout {
+        alignment: center;
+
+        HorizontalLayout {
+            alignment: center;
+
+            VerticalLayout {
+                spacing: 5px;
+                alignment: center;
+
+                // A row of its own: the column is as wide as the name line, and
+                // a fixed-width child of a VerticalLayout sits at its left edge
+                // rather than in the middle of it.
+                HorizontalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 56px;
+                        height: 56px;
+                        // Not a token: the plate is 10px in the mock, between
+                        // `shape-l` and the radii the app has.
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Tokens.chrome-hairline-strong;
+                        background: Tokens.color-surface-container-high;
+
+                        AppIcon {
+                            commands: DropVm.accepted ? Icons.drop-file : Icons.drop-file-rejected;
+                            stroke-color: DropVm.accepted ? Tokens.color-primary : Tokens.color-outline;
+                            size: 26px;
+                        }
+                    }
+                }
+
+                // 12 below the plate, 5 between the two lines (the layout's own
+                // spacing carries the 5).
+                Rectangle {
+                    height: 7px;
+                }
+
+                Text {
+                    horizontal-alignment: center;
+                    text: DropVm.accepted ? DropVm.accept-title : DropVm.reject-title;
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: DropVm.accepted ? Tokens.color-on-surface : Tokens.color-on-surface-variant;
+                }
+
+                Text {
+                    horizontal-alignment: center;
+                    // The name only while it is one we can open: a refusal is
+                    // about the extension, so it names that instead.
+                    text: DropVm.accepted ? DropVm.name : DropVm.reject-detail;
+                    font-size: 11.5px;
+                    color: Tokens.color-on-surface-variant;
+                    // Pinned rather than sized to its content: a long name has
+                    // to elide somewhere, and a Text that may elide reports no
+                    // width of its own for the column to grow to.
+                    overflow: elide;
+                    min-width: 420px;
+                    max-width: 420px;
+                }
+            }
+        }
+    }
+}

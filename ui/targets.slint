@@ -1,0 +1,53 @@
+// The picker's row model (task124, reduced to a model file by task170).
+//
+// `TargetsPane` used to live here: a whole screen with its own toolbar, alert
+// row and grid, reached from the rail. Round5 §5 made target selection a modal
+// instead, so the tile and the search moved to `picker_modal.slint` and what is
+// left is the struct the Rust side fills in -- the same split
+// `sessions_model.slint` already uses.
+//
+// All strings and all "which of these two nothings is it" decisions come from
+// Rust (`ui_state`), which is where the tests are; the `.slint` side only maps
+// them onto elements.
+
+export enum TileMedia {
+    // Waiting for the first thumbnail request to come back.
+    loading,
+    // The request came back with nothing, and always will for this window.
+    none,
+    ready,
+}
+
+export struct TargetTile {
+    id: string,
+    // The badge caption: a window's title, or a screen's W-10 name with the
+    // resolution split off into `resolution` (the two are drawn in opposite
+    // corners of the tile).
+    title: string,
+    resolution: string,
+    // "" when there is no pill. Top-right = why you cannot pick this one;
+    // top-left = a state it happens to be in (round2 §5).
+    blocked-reason: string,
+    state-label: string,
+    disabled: bool,
+    // The target being recorded right now: it wears the W-12 pill, and its
+    // hover button stops the recording instead of starting one (task175).
+    recording: bool,
+    // `ui_state::targets::TileAction`: 0 none / 1 capture / 2 stop.
+    action: int,
+    // The primary display, which earns the W-11 badge.
+    primary: bool,
+    media: TileMedia,
+    thumbnail: image,
+    // Asked of Rust rather than derived from `app-icon` here: an empty `image`
+    // has no property the `.slint` side can test that also reads as intent.
+    has-icon: bool,
+    app-icon: image,
+    // task1980, round13 §1: whether this target's executable is registered for
+    // auto-capture, and what its badge says. A screen has no process behind it
+    // and so is never registered, which is what keeps the badge off a monitor
+    // tile. Registering is done on the review panel now, not here -- this pair
+    // is read-only state.
+    auto-capture: bool,
+    auto-capture-label: string,
+}

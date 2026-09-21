@@ -1,0 +1,447 @@
+// The review timeline's track (round5 §4-B, task171): one thin bar, a
+// selection that dims everything outside it, seams where the recording has
+// holes, coloured marker rules, and the hover preview.
+//
+// It replaced a row of segment rectangles with a 45deg hatch over the gaps.
+// The hatch is gone -- E1 made real gaps rare, and a striped block advertised
+// them as a feature of the recording rather than a seam in it. Everything
+// stateful lives on the ReviewVm global; this file only draws it and forwards
+// the same pointer callbacks the wiring already answers.
+
+// round16 §2: the track lives on the video stage, which stays dark in both
+// themes, so its colours come from `Dark` rather than the themed `Tokens`.
+// `Tokens` is still here for the shape/space scale, which both themes share.
+import { Dark, Tokens } from "tokens.slint";
+import { ReviewVm } from "review_vm.slint";
+
+export component ReviewTrackWrap inherits Rectangle {
+    // Rung when a press lands on the track and key focus should return to
+    // the pane's FocusScope.
+    callback request-focus();
+
+    // The hit band, unchanged: a 4px bar is not a 4px target (task091).
+    height: 38px;
+
+    // Grown, not moved: the bar keeps its centre line so the playhead does not
+    // jump when the pointer arrives.
+    property <bool> active: touch.has-hover || ReviewVm.dragging;
+
+    // Task194-C: this used to be a child of the 4px `track`, so the wrap's 38px
+    // hit band was decorative -- the real target was the bar itself (measured at
+    // 6px), and outside it the bar never grew, the playhead knob never appeared
+    // and the range handles were unreachable. Declared first so everything drawn
+    // inside `track` -- the markers and the range handles, which carry their own
+    // TouchAreas -- still sits above it and still wins the hit test.
+    // `track.x` is 0 and `track.width` is the wrap's width, so `mouse-x` keeps
+    // the same origin and scale the handlers below already divide by.
+    touch := TouchArea {
+        mouse-cursor: pointer;
+
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.request-focus();
+                ReviewVm.track-pressed(touch.mouse-x / track.width);
+            }
+            if (event.kind == PointerEventKind.up) {
+                ReviewVm.track-released(touch.mouse-x / track.width);
+            }
+            if (event.kind == PointerEventKind.move) {
+                ReviewVm.track-moved(touch.mouse-x / track.width, touch.has-hover);
+            }
+            if (event.kind == PointerEventKind.cancel) {
+                // `track-exited` alone left `dragging` stuck true, which
+                // froze the playhead (pump ignores the engine position
+                // while dragging) until the next press.
+                ReviewVm.track-cancelled();
+            }
+        }
+
+        scroll-event(event) => {
+            if (ReviewVm.track-wheel(
+                touch.mouse-x / track.width, event.delta-y / 1px,
+                event.modifiers.control, event.modifiers.shift)) {
+                return accept;
+            }
+            return reject;
+        }
+
+        double-clicked => {
+            ReviewVm.track-double-clicked();
+        }
+
+        changed has-hover => {
+            if (!self.has-hover) {
+                ReviewVm.track-exited();
+            }
+        }
+    }
+
+    track := Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: parent.width;
+        height: root.active ? 7px : 4px;
+        animate height { duration: Tokens.motion-duration-short; }
+        // Square, deliberately: rounded ends are a slider's grammar, and this
+        // is a video scrubber.
+        border-radius: 0px;
+        background: #ffffff33;
+
+        // Rust decides how each gap is drawn, and it needs the pixels to do it.
+        // `changed` says nothing about the value the property starts at, so the
+        // first paint of a freshly loaded session used to run with a width of 0
+        // (task380). `init` reports whatever is known by then; the Rust side no
+        // longer draws a wrong answer if that is still 0.
+        init => {
+            ReviewVm.track-resized(self.width / 1px);
+        }
+
+        changed width => {
+            ReviewVm.track-resized(self.width / 1px);
+        }
+
+        // Recorded time, one shade up from the empty track.
+        Rectangle {
+            x: 0;
+            width: track.width * ReviewVm.buffered-percent / 100;
+            height: 100%;
+            background: #ffffff4d;
+        }
+
+        // `.played`: what lies behind the playhead. A fill now, not a scrim --
+        // the bar reads left-to-right like every other player.
+        Rectangle {
+            x: 0;
+            width: track.width * ReviewVm.played-percent / 100;
+            height: 100%;
+            background: Dark.color-primary;
+        }
+
+        // ---------- seams ----------
+        // The gap is cut out of everything above rather than painted over it,
+        // so what shows through is the pane behind the bar.
+        for g in ReviewVm.gaps: Rectangle {
+            x: g.single
+                ? track.width * g.left / 100 - 1px
+                : track.width * g.left / 100;
+            width: g.single ? 2px : max(2px, track.width * g.width / 100);
+            height: 100%;
+            background: g.single ? Dark.chrome-hairline-strong : Dark.chrome-content;
+
+            // Two rules with the cut-away span between them. Below 4px the
+            // pair has no room and Rust already collapsed it to the single
+            // rule this branch skips.
+            if !g.single: Rectangle {
+                x: 0;
+                width: 2px;
+                height: 100%;
+                background: Dark.chrome-hairline-strong;
+            }
+            if !g.single: Rectangle {
+                x: parent.width - 2px;
+                width: 2px;
+                height: 100%;
+                background: Dark.chrome-hairline-strong;
+            }
+        }
+
+        // ---------- markers ----------
+        // Above the fill and below the selection dimmer, so a marker outside
+        // the selection sinks with everything else it sits among.
+        for m in ReviewVm.markers: Rectangle {
+            x: track.width * m.left / 100 - 1.5px;
+            y: -2px;
+            width: 3px;
+            height: parent.height + 4px;
+            background: m.color-index == 0
+                ? Dark.color-tertiary
+                : m.color-index == 1
+                    ? Dark.color-success
+                    : m.color-index == 2
+                        ? Dark.color-primary
+                        : m.color-index == 3
+                            ? Dark.color-error
+                            : m.color-index == 4
+                                ? Dark.color-warning
+                                : #c2a5f5;
+        }
+
+        // ---------- selection ----------
+        // Always on once a range exists (round5 §4-B): the panel's numbers and
+        // this band are the same fact, so one must not appear without the
+        // other. Outside the selection everything above is pushed down a step
+        // rather than hidden -- you can still see where you are, it just stops
+        // competing with the part you chose.
+        if ReviewVm.has-range: Rectangle {
+            x: 0;
+            width: track.width * ReviewVm.range-start-percent / 100;
+            height: 100%;
+            background: #080a0c99;
+        }
+        if ReviewVm.has-range: Rectangle {
+            x: track.width * ReviewVm.range-end-percent / 100;
+            width: track.width * (100 - ReviewVm.range-end-percent) / 100;
+            height: 100%;
+            background: #080a0c99;
+        }
+        // The band itself is drawn last, at the end of `track`: round8 §2 puts
+        // it above the markers and above the playhead, and in slint the order
+        // of declaration *is* the order of both painting and hit testing.
+
+        if ReviewVm.live-visible: Rectangle {
+            x: ReviewVm.live-pinned
+                ? track.width - 2px
+                : track.width * ReviewVm.live-percent / 100;
+            y: -4px;
+            width: 2px;
+            height: parent.height + 8px;
+            background: Dark.color-success;
+
+            Rectangle {
+                x: -2px;
+                y: -3px;
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: Dark.color-success;
+            }
+        }
+
+        // The playhead knob, hover/drag only -- at rest the fill's leading edge
+        // is the position, which is the whole point of a 4px bar.
+        if ReviewVm.playhead-visible && root.active: Rectangle {
+            x: track.width * ReviewVm.playhead-percent / 100 - 6px;
+            y: (parent.height - 12px) / 2;
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: Dark.color-primary;
+        }
+
+        // The two knobs, hover-only and now purely decorative: round8 §2 sinks
+        // them under the markers and under the band, so what actually resizes
+        // the range is the band's own end grab zones (below). They still say where
+        // the ends are while the pointer is over the track.
+        //
+        // Hover-only as *opacity*, never as existence: `root.active` is
+        // `touch.has-hover`, and an `if` on it used to delete the element
+        // mid-press so the wrap's `touch` inherited the gesture as a scrub
+        // (task194-C, second pass).
+        if ReviewVm.has-range && ReviewVm.range-start-handle-visible: Rectangle {
+            // Held up for the whole of the mode the ends belong to: in it they
+            // are what you are working on, not something the pointer happens to
+            // be near. That mode was 「範囲を編集」 (task1060); since task3860
+            // it is the 確定ステップ, and `clip-editing` is the same flag the
+            // panel's rows and `sel-touch` below now read. **The look is
+            // unchanged** -- round19 §1 asks for the old ON appearance exactly,
+            // so the app never grows a second vocabulary for one state.
+            opacity: (root.active || ReviewVm.clip-editing) ? 1 : 0;
+            x: track.width * ReviewVm.range-start-percent / 100 - 4px;
+            y: (parent.height - 14px) / 2;
+            width: 8px;
+            height: 14px;
+            border-radius: 3px;
+            background: Dark.color-primary;
+        }
+        if ReviewVm.has-range && ReviewVm.range-end-handle-visible: Rectangle {
+            opacity: (root.active || ReviewVm.clip-editing) ? 1 : 0;
+            x: track.width * ReviewVm.range-end-percent / 100 - 4px;
+            y: (parent.height - 14px) / 2;
+            width: 8px;
+            height: 14px;
+            border-radius: 3px;
+            background: Dark.color-primary;
+        }
+
+        // Markers sit above the track's TouchArea so a click jumps to one
+        // instead of seeking to wherever the pointer happened to land -- and
+        // under the band, which is what round8 §2's order asks for. A marker
+        // inside the selection is therefore not clickable; the panel's marker
+        // list is the way to it.
+        for m in ReviewVm.markers: Rectangle {
+            x: track.width * m.left / 100 - 4px;
+            y: -2px;
+            width: 8px;
+            height: parent.height + 4px;
+            background: transparent;
+
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    ReviewVm.marker-clicked(m.row);
+                }
+            }
+        }
+
+        // ---------- the selection band (round8 §2) ----------
+        // Last, so it paints and hit-tests above everything else on the track.
+        // Its own ends resize; the middle drags the whole range along at
+        // its length. A press that never moves is handed back to the track's
+        // seek path -- the default selection is the *whole* recording, and a
+        // band that swallowed clicks would take click-to-seek away from every
+        // session the moment it loaded.
+        if ReviewVm.has-range: sel := Rectangle {
+            // Half the width of an end's grab zone. The zone *straddles* the
+            // edge (see `sel-touch`), so each end answers to 20px of track,
+            // 10px of it outside the band -- which is where the pointer
+            // actually is when you aim at the knob, since the knob itself is
+            // drawn centred on the edge. It used to be 7px on the inside only,
+            // and grabbing an end meant hitting a sliver that sat next to what
+            // you were looking at rather than on it.
+            property <length> edge: 10px;
+            // Ratio of the pointer within the band at press, so a middle drag
+            // keeps the grab point under the pointer.
+            property <float> grab-offset;
+            property <bool> moved;
+            // 0 = start edge, 1 = end edge, 2 = the middle.
+            property <int> mode;
+
+            x: track.width * ReviewVm.range-start-percent / 100;
+            width: track.width * (ReviewVm.range-end-percent - ReviewVm.range-start-percent) / 100;
+            height: 100%;
+            // color-mix(in oklch, var(--color-primary), transparent 80%)
+            background: Dark.color-primary.with-alpha(0.2);
+
+            Rectangle { x: 0; width: 2px; height: 100%; background: Dark.color-primary; }
+            Rectangle {
+                x: parent.width - 2px;
+                width: 2px;
+                height: 100%;
+                background: Dark.color-primary;
+            }
+
+            sel-touch := TouchArea {
+                // Only while the boundaries are editable -- range-edit mode in
+                // task1060, the 確定ステップ since task3860. Disabled, the
+                // events go straight through to the track's own TouchArea
+                // underneath, so a click inside the selection seeks exactly as
+                // one outside it does -- which is what the press-through below
+                // did by hand.
+                //
+                // task3860: this area takes the drag without raising
+                // `request-focus`, so the comment field keeps key focus and the
+                // step it belongs to survives the gesture. That is what makes
+                // the range editable *inside* the step rather than instead of
+                // it.
+                enabled: ReviewVm.clip-editing;
+                // Reaches past the band's own 4px height for the same reason
+                // the track's band does: a 4px grab target is not a target.
+                y: -6px;
+                height: parent.height + 12px;
+                // ...and past its two ends, for the same reason again. `mx` is
+                // the offset from the band's own left edge, which is what
+                // `mouse-x` was before this area grew outwards -- every
+                // position below is read through it and nothing else changes.
+                x: -sel.edge;
+                width: parent.width + 2 * sel.edge;
+                property <length> mx: self.mouse-x - sel.edge;
+                mouse-cursor: (self.mx < sel.edge || self.mx > sel.width - sel.edge)
+                    ? MouseCursor.ew-resize
+                    : self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        sel.moved = false;
+                        sel.mode = self.mx < sel.edge
+                            ? 0
+                            : self.mx > sel.width - sel.edge ? 1 : 2;
+                        sel.grab-offset = (sel.x + self.mx) / track.width
+                            - ReviewVm.range-start-percent / 100;
+                        // task3160: the mode is settled, so Rust can pause
+                        // and know which end it will be following.
+                        ReviewVm.range-drag-changed(true, sel.mode);
+                    }
+                    if (event.kind == PointerEventKind.move && self.pressed) {
+                        sel.moved = true;
+                        if (sel.mode == 2) {
+                            ReviewVm.range-panned(
+                                (sel.x + self.mx) / track.width - sel.grab-offset);
+                        } else {
+                            ReviewVm.handle-moved(sel.mode,
+                                (sel.x + self.mx) / track.width);
+                        }
+                    }
+                    // task3160. `-1` for a gesture that never moved, so the
+                    // press-through below is the only thing that seeks. A
+                    // cancelled pointer never sends `up`, so it lands here
+                    // too -- the same abandon the track's own area does with
+                    // `track-cancelled`. A cancel that arrives *after* moves
+                    // still reports its mode: the range was really edited, so
+                    // the release still owes it a precise settle, and a
+                    // cancelled 終了端 drag must not resume playback the way
+                    // the `-1` branch does.
+                    if (event.kind == PointerEventKind.up
+                        || event.kind == PointerEventKind.cancel) {
+                        ReviewVm.range-drag-changed(false,
+                            sel.moved ? sel.mode : -1);
+                    }
+                    if (event.kind == PointerEventKind.up && !sel.moved) {
+                        // Press-through: the same pair the track's own
+                        // TouchArea sends, so a click inside the selection
+                        // seeks exactly as a click outside it does.
+                        ReviewVm.track-pressed((sel.x + self.mx) / track.width);
+                        ReviewVm.track-released((sel.x + self.mx) / track.width);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- `.hover-preview` ----------
+    if ReviewVm.hover-visible: Rectangle {
+        x: root.width * ReviewVm.hover-anchor / 100 - self.width / 2;
+        y: -self.height - 6px;
+        width: 124px;
+        height: hover-layout.preferred-height;
+
+        hover-layout := VerticalLayout {
+            spacing: 3px;
+            alignment: center;
+
+            Rectangle {
+                width: 120px;
+                height: 68px;
+                border-radius: Tokens.shape-s;
+                border-width: 1px;
+                border-color: Dark.chrome-hairline-strong;
+                background: Dark.chrome-inset;
+                clip: true;
+
+                // No thumbnail yet (segment not finalized / write failed): a
+                // plain inset panel, since the hatch that used to fill it left
+                // with the track's (round5 §4-B).
+                //
+                // Unconditional, with the flag driving opacity rather than
+                // existence (task183): this is the conditional-child quirk the
+                // round5 MD warns about (task127), and a preview that only
+                // ever showed its time badge is exactly what that quirk looks
+                // like. An empty `image` draws nothing on its own, so the
+                // no-thumbnail case still shows the bare inset.
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    image-fit: cover;
+                    source: ReviewVm.hover-thumbnail;
+                    opacity: ReviewVm.hover-has-thumbnail ? 1.0 : 0.0;
+                }
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: time-text.preferred-width + 12px;
+                    height: 18px;
+                    border-radius: Tokens.shape-xs;
+                    border-width: 1px;
+                    border-color: Dark.chrome-hairline-strong;
+                    background: Dark.chrome-titlebar;
+
+                    time-text := Text {
+                        text: ReviewVm.hover-time;
+                        font-size: 11px;
+                        color: Dark.color-on-surface;
+                    }
+                }
+            }
+        }
+    }
+}

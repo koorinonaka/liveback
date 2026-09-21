@@ -1,0 +1,286 @@
+[package]
+name = "livia"
+version = "0.9.0"
+description = "Windows x64 replay capture review shell"
+authors = ["Liveback"]
+edition = "2021"
+repository = "https://github.com/koorinonaka/liveback"
+homepage = "https://github.com/koorinonaka/liveback"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "livia"
+# Was ["staticlib", "cdylib", "rlib"] from the Tauri template, for its
+# android/ios targets. This Windows-x64-only project never built those, and
+# linking slint+skia into a staticlib/cdylib crashes rustc 1.97.1 with
+# STATUS_ACCESS_VIOLATION anyway (task120).
+crate-type = ["rlib"]
+
+[[bin]]
+name = "liveback"
+
+# The measurement probes under `examples/`. `.agents/tools/README.md` says a
+# measuring tool must stay out of the Rust build, because `cargo clippy
+# --all-targets` -- the quality gate -- would otherwise compile it on every task.
+# These three cannot follow that rule: they drive `livia`'s own API and the
+# `windows` crate, so `rustc` on a single file (what `anim-target.rs` and
+# friends do) cannot build them. `required-features` buys the same thing a
+# different way: the gate runs with no features, so cargo skips these targets
+# entirely, and a sweep that wants them asks for `--features insight`.
+[[example]]
+name = "wgc_rate_probe"
+required-features = ["insight"]
+
+[[example]]
+name = "capture_rate_bench"
+required-features = ["insight"]
+
+[[example]]
+name = "gpu_readback_probe"
+required-features = ["insight"]
+
+[build-dependencies]
+slint-build = "1.18"
+# Icon and version resource. tauri-build used to emit these through
+# tauri-winres; without a replacement the exe would show the generic Windows
+# icon in the taskbar, on the shortcut and in Explorer (task131).
+winresource = "0.1"
+
+[features]
+# Scope timing (task205). Off by default, so the installer's
+# `cargo build --release` compiles none of `src/insight.rs` and none of the
+# `insight_scope!` call sites -- the shipped exe is the one it always was.
+# `run.bat` turns it on; a build with it on still measures nothing until the
+# process is started with `--insight`.
+insight = []
+# The scripted control surface for the four operations a verification sweep
+# cannot otherwise drive (task3750). Off by default, so the installer's
+# `cargo build --release` compiles neither the drain tick's receiver nor
+# `--liveback-control`'s sender -- the shipped exe is the one it always was, and
+# answers that argument the way it answers any second launch. A sweep builds
+# `cargo build --release --features control`.
+control = []
+
+[dependencies]
+# `unstable-winit-030` re-exports the winit backend (task600): dropping a file on
+# the window is a winit `WindowEvent`, and reading it there is a few safe lines
+# instead of a Win32 subclass with `WM_DROPFILES`.
+slint = { version = "1.18", features = [
+    "renderer-skia",
+    "raw-window-handle-06",
+    "unstable-winit-030",
+    # `require_wgpu_30` (t260916-ebdb): the only way to hand wgpu the DX12
+    # presentation system that can carry a see-through window.
+    "unstable-wgpu-30",
+] }
+# Directory picker for the settings screen (task126), replacing
+# tauri-plugin-dialog.
+rfd = "0.15"
+# Two of the three crates Tauri's own plugins wrapped (task130): they replace
+# tauri-plugin-global-shortcut / -autostart. The third, -notification, was
+# tauri-winrt-notification until task4220 -- it is two calls on `windows`, which
+# is already a dependency here, so `desktop::toast` makes them itself.
+global-hotkey = "0.8"
+auto-launch = "0.5"
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = "0.3"
+crossbeam-channel = "0.5"
+# `png` is the slint bin's screenshot encoder (task129): the WebView build got
+# its PNG bytes from a canvas, which the native build has no equivalent of.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+windows = { version = "0.61", features = [
+  "Foundation",
+  # task1790: QueryDisplayConfig / DISPLAYCONFIG_SDR_WHITE_LEVEL, for the SDR
+  # content white level the HDR tone map has to land on output white.
+  "Win32_Devices_Display",
+  "Graphics_Capture",
+  "Graphics_DirectX",
+  "Graphics_DirectX_Direct3D11",
+  # task4220: the toast `desktop::toast` hands to Windows on stop, replacing
+  # tauri-winrt-notification -- `Data_Xml_Dom` builds the payload,
+  # `UI_Notifications` shows it.
+  "Data_Xml_Dom",
+  "UI_Notifications",
+  "Win32_Foundation",
+  # task1150: `GetUserDefaultUILanguage`, for the `system` language setting.
+  "Win32_Globalization",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D_Fxc",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
+  "Win32_Media_Audio",
+  "Win32_Media_MediaFoundation",
+  "Win32_Security",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Ole",
+  # SetUnhandledExceptionFilter and the EXCEPTION_POINTERS it hands back: the
+  # only way a `windows_subsystem = "windows"` build leaves a note behind when
+  # it dies of a native fault (task750). LibraryLoader turns the faulting
+  # address into a module path, which is the datum that says whether it was our
+  # code or a driver.
+  # `Win32_System_Kernel` is not optional here: both SetUnhandledExceptionFilter
+  # and EXCEPTION_POINTERS sit behind it in windows 0.61.
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Kernel",
+  "Win32_System_LibraryLoader",
+  # GetProcessMemoryInfo, for the `--insight` heartbeat's working set (task205).
+  # `Win32_System_Threading` next to it already covers its GetProcessTimes,
+  # plus OpenThread/GetThreadTimes/GetThreadDescription for the per-thread
+  # breakdown (task211). ToolHelp is only there to enumerate the threads to
+  # ask about; LocalFree, for the name, is already in `Win32_Foundation`.
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_ProcessStatus",
+  # task2220: `SystemUsesLightTheme`, the taskbar's own light/dark setting, for
+  # picking which tray icon asset to show.
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_System_SystemInformation",
+  # Session ids carry a UTC epoch; FILETIME -> local SYSTEMTIME turns one into a
+  # readable date without a date crate (task125).
+  "Win32_System_Time",
+  "Win32_System_Variant",
+  "Win32_System_WinRT",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
+  "Win32_Storage_FileSystem",
+  # FSCTL_SET_SPARSE / FSCTL_SET_ZERO_DATA and the DeviceIoControl that carries
+  # them: the session container gives pruned bytes back to the volume without
+  # moving the records that follow them (task401).
+  "Win32_System_Ioctl",
+  "Win32_System_IO",
+  "Win32_Storage_Xps",
+  # SHCreateMemStream: feeds a leased segment's bytes to a Source Reader
+  # without touching the filesystem path (task128).
+  # ReleaseCapture, for handing a title-bar drag back to Windows (task123).
+  # Reached this list in task131: until then Tauri's own `windows` dependency
+  # was enabling it through feature unification.
+  # GetDpiForWindow: the resize band has to be handed to slint in physical
+  # pixels, so it needs the window's own dpi (task4120).
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  # ITEMIDLIST, for the `SHOpenFolderAndSelectItems` reveal (task130).
+  "Win32_UI_Shell_Common",
+  # task2960: `SHGetPropertyStoreFromParsingName` / `IPropertyStore`, the shell
+  # property store an exported mp4 carries its comment in. `PKEY_Comment`
+  # itself lives under `Win32_Storage_EnhancedStorage`.
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_Storage_EnhancedStorage",
+  "Win32_UI_WindowsAndMessaging",
+] }
+# Not referenced by name anywhere in this package -- every `windows::core::...`
+# path goes through the `windows` re-export. It is still a required direct
+# dependency: the `#[implement]` macro expands to `::windows_core::` paths that
+# resolve in the crate root, so dropping this line breaks `loopback.rs` and
+# `export_writer.rs` with E0433 (measured 2026-09-20, task t260920-cfc0).
+windows-core = "0.61"
+signalsmith-stretch = "0.1.3"
+livia-pixels = { path = "crates/livia-pixels" }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+
+[workspace]
+members = [".", "crates/livia-pixels", "crates/lvb-thumb"]
+# `vendor/` holds patched copies of crates.io packages (`[patch.crates-io]`
+# below). A path dependency inside the workspace directory would otherwise
+# join the workspace as a member, and fmt/clippy would hold third-party code
+# to this repository's rules.
+exclude = ["vendor"]
+# With a root package, a bare `cargo build`/`cargo test` covers only that
+# package -- and the installer ships `lvb_thumb.dll` (task710), which nothing in
+# `livia` depends on, so `cargo build --release` would leave the NSIS `File`
+# line pointing at a path that does not exist. Naming it here builds it with
+# everything else; its own test suite (fast, and green) joins `cargo test` too.
+#
+# `livia-pixels` is here for the second half of that reason only: `livia` depends
+# on it, so it was always *built*, but its tests never ran under a bare
+# `cargo test` -- the scaler and `nv12_*` suites sat unexecuted until task1690
+# noticed. Nothing about the installer needs it named here; being tested does.
+default-members = [".", "crates/livia-pixels", "crates/lvb-thumb"]
+
+# Never put an opt-level override on package `livia` itself, however tempting:
+# an override applies to every target in the package, and compiling the
+# slint+skia `liveback` binary with *any* optimization crashes rustc on this
+# toolchain (STATUS_ACCESS_VIOLATION) -- the same failure the `crate-type` note
+# above records for task120.
+#
+# Correction (task3910): `cargo test` no longer leaves that binary alone --
+# `src/bin/liveback/` now carries three `#[cfg(test)]` tests, so the bin is
+# compiled as its own test harness. The override stays forbidden for the reason
+# in the sentence above; what changed is that a crash from it would now surface
+# in `cargo test` too, instead of the suite staying green while the app could
+# not be built at all.
+#
+# The sanctioned pattern is below: put the hot code in its own leaf package and
+# optimize *that*. An override names one package, so nothing it depends on --
+# slint included -- changes how it compiles. `run.bat` starts the app with
+# `cargo run`, so this is the build the user actually gets, and per-pixel work
+# over a 1080p frame is 3.5x faster optimized (5.87ms -> 1.69ms, task200).
+# Generic code counts as the leaf's own: building slint's pixel buffer there
+# rather than in the binary is 38.6ms -> 1.06ms a frame (task205).
+# wgpu-hal 30.0.1 with one fix (t260916-ebdb): its DX12 `Surface::configure`
+# sets the swapchain's `AlphaMode` only when it creates the swapchain, and
+# slint's first configure asks for `Opaque` -- so the `PreMultiplied` that
+# slint asks for afterwards on a transparent window never reached DXGI and the
+# window could not see through. The fix recreates the swapchain when the alpha
+# mode changes (`vendor/wgpu-hal/src/dx12/mod.rs`, search "Vendored fix").
+# 30.0.1 was the newest 30.0.x on crates.io on 2026-09-18. Drop this patch once
+# the slint in use depends on a wgpu-hal that has the same fix upstream.
+# Dependencies are built without debug info (task t260920-2be2). Adding `ureq`
+# and its 13 crates pushed the debug build past what `link.exe` 14.50 will take:
+# every link -- the bin and the test harness alike -- ended in `LNK1103:
+# デバッグ情報が壊れています`, with LNK4209 warnings naming objects from `ureq`,
+# `rustls` and `livia` itself. Measured 2026-09-20: dropping third-party debug
+# info links cleanly and leaves `livia`'s own symbols intact, which is what a
+# backtrace through this code actually needs.
+[profile.dev.package."*"]
+debug = false
+
+[patch.crates-io]
+wgpu-hal = { path = "vendor/wgpu-hal" }
+
+[profile.dev.package.livia-pixels]
+opt-level = 2
+
+# The same pattern for the time-stretcher (task1540). `signalsmith-stretch`
+# compiles a header-only templated C++ DSP library through `cc`, which takes its
+# `/O` flag from this profile's `OPT_LEVEL` -- so a dev build was stretching
+# audio with `/Od`, at ~1.5-2ms per 21ms block.
+#
+# That cost is invisible at 1x, which bypasses the stretcher entirely, and it is
+# also invisible tick to tick at any other rate. It only lands at a segment
+# crossing: the outgoing segment's audio runs out ~200ms before the video does,
+# the endpoint queue drains to 10-13ms at x2, and the first tick that can read
+# the incoming segment refills the whole `AUDIO_BUFFER` in one go -- ~19 blocks
+# at x2. Measured through `--insight`, that made `playback_pump_audio` cost
+# 25-44ms once per crossing against an 8.3ms frame budget, which is the ~3
+# dropped frames per crossing task630's drop-before-swizzle then charged for it.
+# The same crossings at 1x cost 0.8-1.4ms.
+[profile.dev.package.signalsmith-stretch]
+opt-level = 2
+
+# Same pattern again for the JPEG encoder behind every thumbnail (task2810).
+# `image` 0.25 implements the encoder itself -- the `zune-jpeg` it depends on is
+# the decoder -- so one line covers what `encode_segment_thumbnail` actually
+# spends its time in.
+#
+# Measured through `--insight` on a real capture (2026-09-03),
+# `thumbnail_encode_container` per segment: mean 26.3-29.9ms -> 13.4-13.8ms.
+# Release is 2.1-2.5ms; the rest of the gap is `targets::bgra_to_rgba`, which
+# is livia's own code and therefore still `opt-level = 0` here. Not worth
+# moving to `livia-pixels` for 11ms a segment on a dev build -- if that number
+# ever grows, that is the next step.
+#
+# Before task2820 shrank the readback this was 1.1-1.4 *seconds* per segment,
+# because the CPU was resizing a full 4K frame; that is why the profile entry
+# reads as a small win now.
+[profile.dev.package.image]
+opt-level = 2

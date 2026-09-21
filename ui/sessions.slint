@@ -1,0 +1,671 @@
+// The session history screen (task125, rebuilt for round5 §6 by task172).
+//
+// What the screen used to be: a toolbar of filters and sort chips, a collapsed
+// group of unreadable directories, and four buttons on every row. Task164's
+// sweep removed the states those served, so what is left is a search box, a
+// view toggle, a count, and rows -- with the actions in a right-click menu and
+// the selection's actions in a floating card.
+//
+// Every decision about *which* rows exist, what they say and what a click
+// selects comes from Rust (`ui_state::sessions`), where the tests are.
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { Alert, Btn, IconBtn, Chip, ConfirmDialog, EmptyState, ContextMenu, MenuEntry, AppScroll, Tooltip, SearchField } from "controls.slint";
+import { SessionLabels, SessionRow } from "sessions_model.slint";
+import { SessionTile } from "sessions_tile.slint";
+export { SessionLabels, SessionRow }
+
+// One cell of `.viewtg`. Not the shared `Chip`: that one is a pill with a
+// label and its own rounded edge, and two of them side by side cannot make the
+// single bordered box the mock draws.
+component ViewToggleCell inherits Rectangle {
+    in property <string> icon;
+    in property <string> tip;
+    in property <bool> on;
+    callback clicked;
+
+    // Readable from outside so the pane's tooltip layer knows which cell the
+    // pointer is on -- same shape as `IconBtn.has-hover` (task290).
+    out property <bool> hovered: touch.has-hover;
+
+    width: 30px;
+    height: 26px;
+    background: root.on
+        ? Tokens.chrome-selected
+        : touch.has-hover ? Tokens.chrome-hover : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    AppIcon {
+        commands: root.icon;
+        stroke-color: root.on ? Tokens.color-on-surface : Tokens.color-on-surface-variant;
+        size: 14px;
+    }
+}
+
+export component SessionsPane inherits Rectangle {
+    in property <[SessionRow]> rows;
+    in property <bool> thumbnail-view;
+    in property <string> error-text;
+    in property <string> empty-text;
+    // The empty state's second caption line, used only by the "no sessions at
+    // all" nothing (task3800).
+    in property <string> empty-sub-text;
+    // *Which* nothing, and not the same question as `empty-text != ""`: the
+    // screen shows an empty state for "no sessions at all" and for "nothing
+    // matches the search", and only the first one takes the toolbar down with
+    // it. Hiding the toolbar on `empty-text` would take the search field away
+    // the moment a query stopped matching -- with the query still applied and
+    // no way left to clear it.
+    in property <bool> no-sessions;
+    // Which row, if any, is being edited in place, and in which field.
+    in property <int> editing-row: -1;
+    in property <bool> editing-note;
+    // The right-click menu: its entries and whether it is up. *Where* it goes
+    // is this file's business (task1400): the press arrives in the scroll
+    // viewport's content space, and only here are the two offsets that turn
+    // that into pane coordinates -- `scroll`'s own position under the toolbar
+    // and the scroll amount -- in scope. Rust used to be handed the raw
+    // content coordinates and add a constant 12px, which put the menu ~26px
+    // above the pointer unscrolled and drifted by the scroll amount below it.
+    in property <[MenuEntry]> menu-entries;
+    in property <bool> menu-open;
+    // Dialog. Open when the title is non-empty, same "" -- absent convention
+    // the picker uses for its empty state.
+    in property <string> confirm-title;
+    in property <string> confirm-lead;
+    in property <string> confirm-protected;
+
+    // Coordinates plus the geometry that produced them, not a row id: the
+    // hit-test lives in Rust (where it is tested), but the numbers it needs
+    // travel with the event rather than being mirrored there -- a mirrored copy
+    // silently drifts a whole row the moment anything above the grid changes
+    // height.
+    //   (x, y, first-row-top, cell-height, columns, shift, ctrl)
+    callback pressed(length, length, length, length, int, bool, bool);
+    callback marquee(length, length, length, length, length, length, int);
+    callback marquee-ended();
+    // Same hit-test, different verb: double-click loads, right-click opens the
+    // menu. (x, y, top, cell-height, columns)
+    callback row-activated(length, length, length, length, int);
+    callback row-menu-requested(length, length, length, length, int);
+    callback menu-selected(int);
+    callback menu-dismissed();
+    callback search-changed(string);
+    // F2 on the list: opens the selected row's note, no index to hit-test.
+    // It renamed the row until the title stopped being editable (2026-09-19).
+    callback note-edit-selected();
+    // Delete on the list: discards the whole selection, no index to hit-test.
+    // Routes into the same confirm screen the menu's `破棄` opens.
+    callback discard-selected();
+    // Ctrl+A on the list: every row the list is showing (follow-up of
+    // t260916-5568, mirroring the clip screen's).
+    callback select-all();
+    callback note-edit-requested(int);
+    callback note-committed(int, string);
+    callback edit-cancelled();
+    /// The open editor's current text, on every keystroke (task1340). The
+    /// caller keeps it so a re-render that tears the editor down still knows
+    /// what was typed.
+    callback edit-draft-changed(string);
+    callback protect-toggled(int);
+    /// task2030: the LIVE row's 22px stop button, by row index.
+    callback stop-requested(int);
+    callback set-view(bool);
+    callback confirm-accepted();
+    callback confirm-cancelled();
+    // (first tile index, tile count). Rust uses this to fetch thumbnails for
+    // what is on screen instead of all 400 rows (task188). It must not trigger
+    // a re-render: rebuilding every `SessionRow` on each scroll step would
+    // cost more than the thumbnails it saves.
+    callback visible-range-changed(int, int);
+
+    // The content face in app.slint is this pane's ground; a second
+    // 85 % layer here would make it opaque (t260916-ebdb).
+    background: transparent;
+
+    property <int> columns: root.thumbnail-view
+        ? Math.max(1, Math.floor((root.width - 36px) / 230px))
+        : 1;
+    property <length> cell-width: (root.width - 36px - (root.columns - 1) * 10px) / root.columns;
+    // Full-bleed 16:9, as the mock's `.htile .th` is: the tile clips, so the
+    // picture runs to its edges and needs no inset of its own (task244).
+    property <length> media-height: Math.max(0px, root.cell-width * 9 / 16);
+    // Round5 §6-A pins the list row at 56px: a 64x36 thumbnail plus 10px of
+    // breathing room above and below it.
+    // 50px is what the caption actually occupies -- 7px of padding, the
+    // name's line, 2px, the date's line, 7px -- measured, not summed from
+    // font sizes: the lines are taller than 12px / 10.5px, and the 47px this
+    // used to say let the band hang ~3px below the tile (t260916-a2a3). The
+    // band now fills whatever this leaves, so a font that measures otherwise
+    // moves only its bottom padding. The old 74px left ~27px of nothing under
+    // every tile, which is the "wasted area" task244 is about.
+    property <length> cell-height: root.thumbnail-view
+        ? root.media-height + 50px
+        : 56px;
+    property <int> row-count: Math.ceil(root.rows.length / root.columns);
+    // Windowing (task181). Slint's `for` is eager and `ScrollView` only clips,
+    // so 400 sessions meant 400 live `SessionTile`s -- thousands of items, a
+    // layout pass over all of them, and every `hovered` binding going dirty on
+    // each pointer move. The grid is absolutely positioned instead, and only
+    // the visible rows (plus 2 of overscan) are instantiated.
+    //
+    // 12px padding and the 10px gap are the same constants the Rust hit test
+    // uses (`SESSION_GRID_PADDING` / `SESSION_GRID_GAP` in `history.rs`), so
+    // `grid_rects` stays the single source of truth for row geometry.
+    property <length> row-pitch: root.cell-height + 10px;
+    // 12 + 12 of padding minus the trailing gap of 10.
+    property <length> content-height: root.row-count * root.row-pitch + 14px;
+
+    // Which half of the view toggle the pointer is on, republished from the
+    // toolbar (task3800). The tooltip layer at the bottom of this file used to
+    // read the two cells' `hovered` directly, which stopped compiling when the
+    // toolbar became a conditional child: an `if` block's ids are private to it.
+    property <bool> list-hovered;
+    property <bool> tile-hovered;
+
+    // Where the right-click menu goes, in the pane's own coordinates
+    // (task1400). Written by the grid surface's right press, which is the only
+    // place `scroll` is in scope; read by the `ContextMenu` at the bottom of
+    // the pane. Not `in`: Rust decides *whether* the menu is open, never where.
+    property <length> menu-px;
+    property <length> menu-py;
+
+    // Clicking the pane's own chrome -- toolbar background, empty
+    // space -- closes the open menu (task1230). Declared *first*, so
+    // everything else in the pane is above it and keeps its own hit test:
+    // the grid surface's right-down still reopens the menu elsewhere and its
+    // left-down still starts a marquee (task1120), and toolbar controls still
+    // work. Only the bare ground between them falls through to here.
+    //
+    // `pointer-event` rather than `clicked`, for two reasons: `clicked` is
+    // left-button only, and a menu should be gone on press, not on release.
+    if root.menu-open: TouchArea {
+        width: 100%;
+        height: 100%;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.menu-dismissed();
+            }
+        }
+    }
+
+    VerticalLayout {
+        // ---------- toolbar: one row, and only what a list needs ----------
+        // Absent when there is nothing to search or lay out (task3800; the
+        // mock's `nothistempty`): a search field over an empty screen is a
+        // control with nothing behind it. `no-sessions`, not `empty-text`, for
+        // the reason on that property.
+        if !root.no-sessions: HorizontalLayout {
+            padding: 12px;
+            padding-bottom: 0px;
+            // 24px, not the mock's 12 (ユーザー指摘 2026-09-13). round22
+            // (task4370) took the 32px title bar out of the vertical stack, so
+            // this field, which used to sit 12px *below the bar*, now sits 12px
+            // below the window's own top edge -- which is where the bar slides
+            // back over it on the way to the hot zone. 24 is the user's own
+            // number: it does not clear the 33px the revealed bar covers and is
+            // not meant to, it buys back the breathing room the bar used to give.
+            padding-top: Tokens.space-6;
+            spacing: Tokens.space-2;
+
+            // Same field as the picker's, deliberately (task194-B, and now
+            // task3810's shared `SearchField` in controls.slint): two
+            // searches that look different read as two different kinds of
+            // search. History passes no `plate` -- it is the picker's
+            // light-theme-only override (round16 §3-1), not history's.
+            //
+            // **That sameness only actually holds in dark (measured
+            // 2026-09-09).** `plate` has two arms, and only the background one
+            // is gated on `Tokens.light`; the border arm is not. But in dark
+            // `chrome-control-border` *is* `chrome-hairline`
+            // (`tokens.slint`), so there the flag changes nothing and the two
+            // fields are identical. In light it changes both: a
+            // `hairline-strong` edge and a `#ffffff` plate against history's
+            // `chrome-sidebar`. So in light these two searches **do** look
+            // different, which is the thing the paragraph above says not to
+            // let happen. Whether the picker's light plate should reach
+            // history too is a design question, not a repo one -- it is asked
+            // in `.agents/docs/design/round22-repo-followup.md`. Do not
+            // "fix" it by passing `plate` here.
+            SearchField {
+                placeholder: SessionLabels.search-placeholder;
+                search-changed(text) => {
+                    root.search-changed(text);
+                }
+            }
+
+            // `.viewtg`: one bordered pair of 30x26 cells, glyph only. The
+            // words moved to the tooltips -- at two options the icons are the
+            // faster read, and the labels were costing the search field width
+            // it could not spare (task242).
+            Rectangle {
+                width: 60px;
+                height: 26px;
+                y: (parent.height - self.height) / 2;
+                border-radius: Tokens.shape-s;
+                border-width: 1px;
+                border-color: Tokens.chrome-hairline;
+                clip: true;
+
+                HorizontalLayout {
+                    // The two `changed hovered` lines republish the hover to
+                    // the pane (task3800): the toolbar is a conditional child
+                    // now, and slint puts an `if` block's ids out of reach of
+                    // the tooltip layer at the bottom of this file.
+                    list-cell := ViewToggleCell {
+                        icon: Icons.view-list;
+                        tip: SessionLabels.view-list;
+                        on: !root.thumbnail-view;
+                        changed hovered => {
+                            root.list-hovered = self.hovered;
+                        }
+                        clicked => {
+                            root.set-view(false);
+                        }
+                    }
+
+                    tile-cell := ViewToggleCell {
+                        icon: Icons.view-grid;
+                        tip: SessionLabels.view-thumbnail;
+                        on: root.thumbnail-view;
+                        changed hovered => {
+                            root.tile-hovered = self.hovered;
+                        }
+                        clicked => {
+                            root.set-view(true);
+                        }
+                    }
+                }
+            }
+        }
+
+        // A failed discard / rename / recover, and a listing that would not
+        // read (task1520). The pane took `error-text` and drew nothing with
+        // it, so every one of those failures was silent -- a discard the
+        // engine refused looked exactly like a discard that worked, minus the
+        // row disappearing. Above the list, because the rows it is about are
+        // still sitting there.
+        if root.error-text != "": HorizontalLayout {
+            padding: 12px;
+            padding-bottom: 0px;
+            Alert {
+                icon: Icons.warning;
+                label: root.error-text;
+                error: true;
+            }
+        }
+
+        // The clock rather than the rail's books (task3800): an empty history
+        // is time that has not passed yet. The search's own nothing keeps the
+        // same glyph -- it is still the history that is showing nothing --
+        // and simply has no second line.
+        if root.empty-text != "": EmptyState {
+            vertical-stretch: 1;
+            icon: Icons.clock;
+            label: root.empty-text;
+            sub: root.empty-sub-text;
+        }
+
+        // The context menu advertises `F2` as the note accelerator, so the key
+        // has to actually do it (task172). Zero-sized and a sibling rather than
+        // a wrapper: the rows below place themselves absolutely, and a
+        // FocusScope around them would have to re-derive that geometry. It
+        // takes focus when a row is pressed, and loses it to the search field
+        // or an open InlineEdit the moment either of those is clicked, so it
+        // only ever sees keys meant for the list.
+        //
+        // task3430 leans on the first half of that: `surface` calls
+        // `keys.focus()` on every press, so a press anywhere on the list blurs
+        // an open editor -- which is now a cancel. This screen therefore needs
+        // no ground area of its own; what it needed was for Rust to stop
+        // committing the draft on the way into the handler (`history.rs`'s
+        // `discard_open_edit`).
+        keys := FocusScope {
+            height: 0px;
+            key-pressed(event) => {
+                if (event.text == Key.F2) {
+                    root.note-edit-selected();
+                    return EventResult.accept;
+                }
+                // The menu advertises `Delete` beside `破棄`, so the key has to
+                // actually do it -- same rule F2 follows above. It opens the
+                // confirm screen rather than discarding: these are multi-GB
+                // recordings and the destructive step stays deliberate.
+                if (event.text == Key.Delete) {
+                    root.discard-selected();
+                    return EventResult.accept;
+                }
+                // Ctrl+A selects what the list shows, as it does on the clip
+                // screen. Only while the list holds the focus: the search
+                // field keeps its own Ctrl+A for its text.
+                if (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+                    root.select-all();
+                    return EventResult.accept;
+                }
+                // The right-click menu had no keyboard way out: it closed on a
+                // press elsewhere or on a re-targeting right-click, and Escape
+                // -- the one key every menu answers to -- did nothing. Only
+                // swallowed while the menu is up, so Escape stays free for
+                // whatever else wants it when it is not.
+                if (event.text == Key.Escape && root.menu-open) {
+                    root.menu-dismissed();
+                    return EventResult.accept;
+                }
+                return EventResult.reject;
+            }
+        }
+
+        if root.empty-text == "": scroll := AppScroll {
+            vertical-stretch: 1;
+            // Flush against the client's right edge -- see `settings.slint`
+            // (task4320). `cell-width`'s `root.width - 36px` above is left
+            // alone on purpose: the tiles do not move, so the Rust hit test
+            // (`history.rs::session_row_rects`, which mirrors the same 36) stays
+            // exact. What narrows is the empty padding trailing the last column.
+            right-inset: Tokens.resize-band-inset;
+            viewport-width: scroll.visible-width;
+            // The rows' own height, or the whole visible area when there are
+            // too few rows to fill it (task680). `surface` below only exists
+            // inside the viewport, so a viewport that stopped at the last row
+            // left the empty space beneath it dead: a click there selected
+            // nothing and a drag started no marquee, which is not how any file
+            // list behaves. Taking the larger of the two changes nothing once
+            // the rows overflow -- `content-height` wins from then on, so the
+            // scroll range and the visible-row window are untouched.
+            viewport-height: Math.max(root.content-height, scroll.visible-height);
+
+            // Declared before the grid so it sits *under* it: the row's own
+            // small controls (the pencils, the protect toggle) keep their hit
+            // test, and everything else -- row bodies, gaps, the padding around
+            // the list -- falls through to here, which is what selects and what
+            // starts a marquee (task079).
+            //
+            // Sized to the viewport explicitly: a bare TouchArea takes the
+            // Flickable's *visible* height, which is the very thing task680
+            // needed it to outgrow.
+            surface := TouchArea {
+                x: 0;
+                y: 0;
+                width: scroll.viewport-width;
+                height: scroll.viewport-height;
+                // The hand over a tile or row body, as the clips grid shows
+                // it; the arrow over the gaps, the padding and the blank cells
+                // (t260916-cf5f). Kept on during a marquee too: the question
+                // is only what lies under the pointer.
+                mouse-cursor: grid.on-tile ? MouseCursor.pointer : MouseCursor.default;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down
+                        && event.button == PointerEventButton.left) {
+                        // Closing is not the whole gesture (task1120): the
+                        // press goes on to select and to arm the marquee, so a
+                        // click-drag out of an open menu behaves as it would
+                        // have with no menu up.
+                        if (root.menu-open) {
+                            root.menu-dismissed();
+                        }
+                        keys.focus();
+                        root.pressed(
+                            surface.mouse-x,
+                            surface.mouse-y,
+                            grid.y + 12px,
+                            root.cell-height,
+                            root.columns,
+                            event.modifiers.shift,
+                            event.modifiers.control,
+                        );
+                    }
+                    // Re-targets rather than closes: Rust re-runs the hit test
+                    // and either opens over the new row or, off any row, sets
+                    // no menu at all -- which is the close (task1120).
+                    if (event.kind == PointerEventKind.down
+                        && event.button == PointerEventButton.right) {
+                        // Taken on the right press too, not just the left one:
+                        // a right-click on a row nobody had selected yet left
+                        // the key focus wherever it was, so the Escape the
+                        // menu now answers to never reached this scope.
+                        keys.focus();
+                        // Before the callback, not after: Rust answers it by
+                        // setting `menu-open`, which instantiates the
+                        // `ContextMenu` that reads these.
+                        root.menu-px = scroll.x + scroll.viewport-x + surface.mouse-x;
+                        root.menu-py = scroll.y + scroll.viewport-y + surface.mouse-y;
+                        root.row-menu-requested(
+                            surface.mouse-x,
+                            surface.mouse-y,
+                            grid.y + 12px,
+                            root.cell-height,
+                            root.columns,
+                        );
+                    }
+                    if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                        root.marquee-ended();
+                    }
+                }
+                moved => {
+                    if (surface.pressed) {
+                        root.marquee(
+                            surface.pressed-x,
+                            surface.pressed-y,
+                            surface.mouse-x,
+                            surface.mouse-y,
+                            grid.y + 12px,
+                            root.cell-height,
+                            root.columns,
+                        );
+                    }
+                }
+                // Loading is the double-click now that the row has no button
+                // to press (round5 §6-A).
+                double-clicked => {
+                    root.row-activated(
+                        surface.mouse-x,
+                        surface.mouse-y,
+                        grid.y + 12px,
+                        root.cell-height,
+                        root.columns,
+                    );
+                }
+            }
+
+            // A plain container rather than a layout: the tiles place
+            // themselves so that only the visible ones need to exist. It stays
+            // at the viewport origin, which is what keeps `grid.y + 12px`
+            // correct for the four callbacks above.
+            grid := Rectangle {
+                x: 0;
+                y: 0;
+                width: scroll.visible-width;
+                height: root.content-height;
+                background: transparent;
+
+                // The window itself. `viewport-y` goes negative as the view
+                // scrolls down, hence the sign. These live here rather than on
+                // the pane because `scroll` is only in scope inside the `if`.
+                property <int> first-visible-row: Math.max(
+                    0,
+                    Math.floor((-scroll.viewport-y - 12px) / root.row-pitch),
+                );
+                property <int> visible-count:
+                    (Math.ceil(scroll.visible-height / root.row-pitch) + 2) * root.columns;
+
+                // Same window, reported once per event loop iteration so the
+                // thumbnail queue can follow it (task188).
+                changed first-visible-row => {
+                    root.visible-range-changed(
+                        self.first-visible-row * root.columns, self.visible-count);
+                }
+                changed visible-count => {
+                    root.visible-range-changed(
+                        self.first-visible-row * root.columns, self.visible-count);
+                }
+
+                // Which row the pointer is on, taken from the marquee
+                // surface's own position rather than a TouchArea per row --
+                // see `SessionTile.hovered` for why the row cannot own one.
+                // Both coordinates are already in the viewport's space and the
+                // grid starts at its origin, so only the padding comes off.
+                // Deliberately not gated on `!surface.pressed` (task690): the
+                // press turned every hover decoration off for as long as the
+                // button was down, so a plain click made the row background,
+                // the pencils and the padlock blink. Explorer keeps its hover
+                // row lit while a marquee drags too.
+                property <int> hovered-row: surface.has-hover
+                    ? Math.floor((surface.mouse-y - 12px) / (root.cell-height + 10px)) * root.columns
+                        + Math.floor((surface.mouse-x - 12px) / (root.cell-width + 10px))
+                    : -1;
+
+                // Whether the pointer is inside a real tile's rectangle, for
+                // `surface`'s cursor. `hovered-row` counts each gap with the
+                // tile before it and never looks at the padding, which is right
+                // for the hover it lights but not for the cursor, so the cell
+                // and the offset inside it are taken again here.
+                property <length> ptr-x: surface.mouse-x - 12px;
+                property <length> ptr-y: surface.mouse-y - 12px;
+                property <int> pointer-col: Math.floor(self.ptr-x / (root.cell-width + 10px));
+                property <int> pointer-row: Math.floor(self.ptr-y / root.row-pitch);
+                property <bool> on-tile: surface.has-hover
+                    && self.ptr-x >= 0px && self.ptr-y >= 0px
+                    && self.pointer-col < root.columns
+                    && self.ptr-x - self.pointer-col * (root.cell-width + 10px) < root.cell-width
+                    && self.ptr-y - self.pointer-row * root.row-pitch < root.cell-height
+                    && self.pointer-row * root.columns + self.pointer-col < root.rows.length;
+
+                for i in grid.visible-count: cell := SessionTile {
+                    property <int> index: grid.first-visible-row * root.columns + i;
+                    x: 12px + Math.mod(cell.index, root.columns) * (root.cell-width + 10px);
+                    y: 12px + Math.floor(cell.index / root.columns) * root.row-pitch;
+                    width: root.cell-width;
+                    blank: cell.index >= root.rows.length;
+                    // Overscan runs past the last row, and unlike the old
+                    // `for row in row-count` this `for` still produces cells
+                    // when the model is momentarily empty -- hence the extra
+                    // floor at 0. `blank` is what actually hides them.
+                    entry: root.rows[Math.max(0, Math.min(cell.index, root.rows.length - 1))];
+                    thumbnail-view: root.thumbnail-view;
+                    media-height: root.media-height;
+                    cell-height: root.cell-height;
+                    hovered: cell.index == grid.hovered-row;
+                    editing-note: root.editing-row == cell.index && root.editing-note;
+                    note-edit-requested => { root.note-edit-requested(cell.index); }
+                    note-committed(value) => { root.note-committed(cell.index, value); }
+                    edit-cancelled => { root.edit-cancelled(); }
+                    edit-draft-changed(value) => { root.edit-draft-changed(value); }
+                    protect-toggled => { root.protect-toggled(cell.index); }
+                    stop-requested => { root.stop-requested(cell.index); }
+                }
+            }
+
+            // ---------- marquee band (round7 section 2-12) ----------
+            // The rubber band itself: the drag has selected rows since
+            // task079, but nothing ever drew the rectangle doing it. Sibling
+            // of `grid` so it shares the viewport's coordinates -- the same
+            // ones the callbacks above report -- and it carries no TouchArea,
+            // so it cannot take the drag it is drawing.
+            if surface.pressed: Rectangle {
+                x: Math.min(surface.pressed-x, surface.mouse-x);
+                y: Math.min(surface.pressed-y, surface.mouse-y);
+                width: Math.abs(surface.mouse-x - surface.pressed-x);
+                height: Math.abs(surface.mouse-y - surface.pressed-y);
+                background: Tokens.color-primary.with-alpha(0.08);
+                border-width: 1px;
+                border-color: Tokens.color-primary.with-alpha(0.55);
+            }
+        }
+    }
+
+    // The bottom-right selection popup is gone (2026-08-17): it said the same
+    // three things the right-click menu says, and the menu now takes the whole
+    // selection when the row it opened over is part of one.
+
+    // ---------- right-click menu (round5 §6-D) ----------
+    // No scrim (task1120). A TouchArea grabs the mouse on press and only
+    // reports `clicked` for the left button, so a full-pane one swallowed
+    // every right-click and every drag while the menu was up: a second
+    // right-click did nothing at all, and a left drag started no marquee. The
+    // grid's own surface handles both now -- it closes the menu on a left
+    // press and carries straight on into the selection, and hands a right
+    // press back through `row-menu-requested` so the menu re-opens where the
+    // pointer is. The menu itself absorbs what lands inside it.
+    if root.menu-open: ContextMenu {
+        x: Math.clamp(root.menu-px, 4px, root.width - self.width - 4px);
+        y: Math.clamp(root.menu-py, 4px, root.height - self.height - 4px);
+        entries: root.menu-entries;
+        chosen(index) => {
+            root.menu-selected(index);
+        }
+    }
+
+    // ---------- discard confirmation (round5 §6-D) ----------
+    // The frame is the shared `ConfirmDialog` (task1100). Cancel first and on
+    // the safe side: the destructive button must be reached deliberately,
+    // never landed on (task116).
+    if root.confirm-title != "": ConfirmDialog {
+        cancel-label: SessionLabels.confirm-cancel;
+        ok-label: SessionLabels.confirm-ok;
+        ok-icon: Icons.discard;
+        danger: true;
+        cancelled => {
+            root.confirm-cancelled();
+        }
+        accepted => {
+            root.confirm-accepted();
+        }
+
+        Text {
+            text: root.confirm-title;
+            wrap: word-wrap;
+            font-size: 14.5px;
+            font-weight: 600;
+            color: Tokens.color-on-surface;
+        }
+
+        // What is about to go, and how much of it. The list of names is gone:
+        // the selection was the previous gesture, and re-reading it back adds
+        // words, not certainty.
+        Text {
+            text: root.confirm-lead;
+            wrap: word-wrap;
+            font-size: 12px;
+            color: Tokens.color-on-surface-variant;
+        }
+
+        if root.confirm-protected != "": Text {
+            text: root.confirm-protected;
+            wrap: word-wrap;
+            font-size: 12px;
+            color: Tokens.color-warning;
+        }
+    }
+
+    // ---------- tooltip layer (task290) ----------
+    // Last child of the pane, so it draws over the scroll area and the toolbar
+    // that are declared above it. The rate-menu's trick of hanging out of its
+    // parent does not work here: that one opens *upwards* over siblings drawn
+    // before it, and this one opens downwards into the list.
+    //
+    // Positioned from the toolbar's own constants rather than
+    // `absolute-position` -- reading a layout sibling's window coordinates is
+    // what put a popup off screen in task148. The toolbar pads 12px and the
+    // toggle sits at its right edge, so the tip hangs 6px under that row and
+    // right-aligns with it, clamped so a narrow window pushes it inwards
+    // instead of off screen.
+    Tooltip {
+        x: Math.max(12px, root.width - 12px - self.width);
+        y: 12px + Tokens.control-height-s + 6px;
+        // `no-sessions` as well, because the toolbar the tip belongs to is not
+        // drawn then -- and a hover that was live when the last session left
+        // would otherwise leave the tip armed over an empty screen.
+        armed: !root.no-sessions && (root.list-hovered || root.tile-hovered);
+        // Swapped in place while the pointer slides across the pair: the two
+        // cells touch, so `armed` never drops and re-serving the delay between
+        // them would read as a flicker rather than a new tooltip.
+        label: root.list-hovered ? SessionLabels.view-list : SessionLabels.view-thumbnail;
+    }
+}

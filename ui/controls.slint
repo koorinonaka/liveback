@@ -1,0 +1,2291 @@
+// Shared controls, transcribed from the React-era src/styles/chrome.css and
+// src/App.css the same way tokens.slint was transcribed from tokens.css. All
+// three CSS files went away with the React app in task131 -- this file is the
+// source of truth now, and the design-side reference is the mock,
+// .agents/docs/design/mock/liveback-mock.html (see .agents/docs/design/README.md).
+// The transcription rule still holds: `color-mix(in oklch, X, transparent N%)`
+// becomes `X.with-alpha(1 - N)` with the original expression in a comment.
+
+import { Dark, Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+
+// A run of static text the user can select and copy (task2380). `Text` has no
+// selection at all in slint, so this is a read-only `TextInput` -- which
+// brings mouse drag, double-click for a word, triple-click for the line and
+// Ctrl+C with it, and needs no keyboard handling of its own.
+//
+// Not for text that sits inside a click target: a selection drag on a chip, a
+// key cap or a button fights the click it lives in. Those stay `Text`.
+//
+// `single-line: false` so a caller can just set `wrap: word-wrap`; with the
+// default `no-wrap` it still draws as one line. `overflow: elide` has no
+// equivalent here -- a caller that needs the box to cut the run sets `clip` on
+// the box (recorded as a deliberate diff: the ellipsis is gone, the text is
+// reachable by dragging instead).
+export component SelText inherits TextInput {
+    read-only: true;
+    single-line: false;
+    // Nothing to type at, so no caret -- only the selection is drawn.
+    text-cursor-width: 0px;
+    // The pair every `TextInput` in the app carries (task1140).
+    selection-background-color: Tokens.color-primary;
+    selection-foreground-color: Tokens.color-on-primary;
+}
+
+// `.btn` / `.btn-primary`.
+export component Btn inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> primary;
+    // `.btn-danger`: the mock's thin plate in error, same grammar as `primary`
+    // -- 14% ground, 1.5px 50% edge, error lettering. What the round dropped is
+    // the *solid* `error-container` fill (#7c1117 under #ffccc7), which sinks
+    // into a dark dialog; `error-container` is now for small accents only
+    // (styleguide §4). A neutral ground was the other way out and it reads as
+    // cancel's equal, so the ground keeps the error tint (task2230).
+    in property <bool> danger;
+    in property <bool> disabled;
+    callback clicked;
+
+    // Off the shared 28px control token: styleguide's `.btn` is 30px. task1220
+    // settled on 28px only because the design side was unreachable; round11 §0-3
+    // scoped that settlement to the settings controls (`.sbtn` etc.), which
+    // keep the 28px token, and confirmed `.btn` stays 30px (task2290).
+    height: 30px;
+    // A button next to a stretching Text must not be handed the whole leftover
+    // row -- but that only ever wanted stretch 0, not a pinned width. Pinning
+    // it also killed `horizontal-stretch: 1` at the use site, which is dead
+    // code twice over in this repo (task300's range chips, the settings
+    // confirmation footer). `min-width` keeps the content floor; a caller that
+    // asks to stretch now gets to (task330).
+    min-width: layout.preferred-width;
+    horizontal-stretch: 0;
+    opacity: root.disabled ? 0.45 : 1.0;  // .sbtn.dis (task2160)
+
+    // round16 §1: the plate's ground keeps its percentage in both themes, but
+    // the edge goes 50% -> 55% in light -- the same alpha over a bright ground
+    // reads thinner than it does over a dark one.
+    property <float> plate-edge: Tokens.light ? 0.55 : 0.5;
+    property <color> tint: root.primary
+        ? Tokens.color-primary
+        : root.danger ? Tokens.color-error : Tokens.color-on-surface;
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        // A disabled TouchArea never sets the cursor at all, so the pointer
+        // needs no `disabled` guard: it reverts to the arrow by itself.
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // The paint lives on a child plate, not on the root. It carried the press
+    // squash too until task3300 dropped it (ユーザー判断 2026-09-07:
+    // クリックアニメーション廃止); the press is colour only again.
+    plate := Rectangle {
+        border-radius: Tokens.shape-s;
+        // `.btn.primary` and `.btn-danger` carry a 1.5px edge, everything else 1px.
+        border-width: root.primary || root.danger ? 1.5px : 1px;
+        border-color: root.primary
+            ? Tokens.color-primary.with-alpha(root.plate-edge)
+            : root.danger
+                ? Tokens.color-error.with-alpha(root.plate-edge)
+                : Tokens.chrome-hairline-strong;
+        // round7 §2-4 undoes task183's solid plate: a filled primary button reads
+        // as a web button, and the round put the one solid primary back where it
+        // belongs -- the picker's hover chip, which is not a `Btn`. What is left
+        // here is the mock's thin plate: 14% ground, 50% edge, primary lettering.
+        // `danger` runs the same 14 / 22 / 28 ladder in error.
+        background: root.primary
+            ? (touch.pressed
+                ? Tokens.color-primary.with-alpha(0.28)
+                : touch.has-hover
+                    ? Tokens.color-primary.with-alpha(0.22)
+                    : Tokens.color-primary.with-alpha(0.14))
+            : root.danger
+                ? (touch.pressed
+                    ? Tokens.color-error.with-alpha(0.28)
+                    : touch.has-hover
+                        ? Tokens.color-error.with-alpha(0.22)
+                        : Tokens.color-error.with-alpha(0.14))
+                : (touch.pressed
+                    ? Tokens.chrome-selected
+                    : touch.has-hover ? Tokens.chrome-active : Tokens.chrome-hover);
+
+        layout := HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 6px;
+            alignment: center;
+
+            if root.icon != "": AppIcon {
+                commands: root.icon;
+                stroke-color: root.tint;
+                size: 16px;
+                // The mock draws the primary button's glyph a touch heavier so it
+                // holds its own against the lettering now that both are primary.
+                weight: root.primary ? 1.8px : 1.5px;
+                y: (parent.height - self.height) / 2;
+            }
+
+            Text {
+                text: root.label;
+                vertical-alignment: center;
+                font-size: Tokens.type-label-size;
+                font-weight: root.primary ? 500 : Tokens.type-label-weight;
+                color: root.tint;
+            }
+        }
+    }
+}
+
+// `.sbtn` / `.sbtn.icon`: the settings form's button. Not a `Btn` variant --
+// `.sbtn` differs from `.btn` in ground (a solid `container-high` plate, not a
+// hover-only tint), edge, size and weight, so folding it into `Btn` would be
+// all branch and no reuse (round11 §1 / task2240).
+//
+// An empty `label` is the `.sbtn.icon` form: the same box, squared off, glyph
+// only. The mock defines no `:active`, so once task3300 dropped the plate's
+// press squash the press had no feedback of its own; task3550 gave it a colour
+// instead.
+//
+// **No longer a placeholder (checked 2026-09-09).** task3550 picked
+// `color-surface-container` as a repo-side choice while round20 §4-A(3) was
+// outstanding; the answer has since arrived and **specifies the same value** --
+// `round20-design-response.md` §8-(3) 「押下 = `color-surface-container`（hover の
+// `-highest` から基底面へ一段沈む）」, mirrored into the repo by `e7139ad`
+// (2026-09-08). So the ladder below is the design's ladder, not a guess, and
+// there is nothing left to swap. It goes *darker* rather than
+// brighter because light's `container-highest` is already `#ffffff`: there is
+// no room above hover, so the ladder runs container (press) /
+// container-high (rest) / container-highest (hover) and moves the same
+// direction in both themes.
+export component SBtn inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> disabled;
+    callback clicked;
+
+    // Readable from outside so a caller can keep the button on screen while the
+    // pointer is on it -- same reason `IconBtn` carries one. The folder rows'
+    // 既定に戻す fades in with the row and ORs this in (task3070).
+    out property <bool> has-hover: touch.has-hover;
+
+    property <bool> icon-only: root.label == "";
+
+    height: Tokens.control-height-s;
+    // `flex:none`: the row's stretch belongs to the path plate beside it.
+    width: root.icon-only ? Tokens.control-height-s : layout.preferred-width;
+    horizontal-stretch: 0;
+    opacity: root.disabled ? 0.45 : 1.0;  // .sbtn.dis
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // Child plate carrying the paint -- see `Btn`.
+    plate := Rectangle {
+        border-radius: Tokens.shape-s;
+        border-width: 1px;
+        border-color: Tokens.chrome-control-border;
+        background: touch.pressed
+            ? Tokens.color-surface-container
+            : touch.has-hover
+                ? Tokens.color-surface-container-highest
+                : Tokens.color-surface-container-high;
+
+        layout := HorizontalLayout {
+            padding-left: root.icon-only ? 0 : 12px;
+            padding-right: root.icon-only ? 0 : 12px;
+            spacing: 6px;
+            alignment: center;
+
+            if root.icon != "": AppIcon {
+                commands: root.icon;
+                stroke-color: Tokens.color-on-surface-variant;
+                size: 15px;
+                y: (parent.height - self.height) / 2;
+            }
+
+            if !root.icon-only: Text {
+                text: root.label;
+                vertical-alignment: center;
+                font-size: 11.5px;
+                font-weight: 400;
+                color: Tokens.color-on-surface;
+            }
+        }
+    }
+}
+
+// `.icon-btn`.
+// `danger` colours the hover and pressed states only. A destructive row action
+// that is red at rest turns the whole list into a warning; red on touch tells
+// you what the button is at the moment you are about to press it.
+export component IconBtn inherits Rectangle {
+    in property <string> icon;
+    /// The solid half of a glyph that mixes outline and mass, passed straight
+    /// through to `AppIcon.fill-commands` (task3870: the marker row's
+    /// 「前後30秒を範囲に」 is two brackets with a filled dot between them).
+    /// It takes the icon's own colour, hover included, because `AppIcon` fills
+    /// this layer with `stroke-color`.
+    in property <string> fill-icon;
+    in property <length> icon-size: 16px;
+    in property <length> box: Tokens.control-height-s;
+    in property <bool> danger;
+    // Same shape as `Btn`'s (task310): the settings screen's reset buttons are
+    // icon-only now, and the buffer one still has to die while a capture runs.
+    in property <bool> disabled;
+    callback clicked;
+
+    // Readable from outside so a caller can keep the button on screen while the
+    // pointer is on it. A row whose hover is computed somewhere else needs this:
+    // see the pencils in `sessions_tile.slint` (task184).
+    out property <bool> has-hover: touch.has-hover;
+
+    property <bool> lit: touch.has-hover || touch.pressed;
+
+    width: root.box;
+    height: root.box;
+    opacity: root.disabled ? 0.45 : 1.0;  // .sbtn.dis (task2160)
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // Child plate carrying the paint -- see `Btn`.
+    plate := Rectangle {
+        border-radius: Tokens.shape-s;
+        background: (root.lit && root.danger)
+            ? Tokens.color-error.with-alpha(0.10)
+            : touch.pressed
+                ? Tokens.chrome-active
+                : touch.has-hover ? Tokens.chrome-hover : transparent;
+
+        AppIcon {
+            commands: root.icon;
+            fill-commands: root.fill-icon;
+            stroke-color: root.lit
+                ? (root.danger ? Tokens.color-error : Tokens.color-on-surface)
+                : Tokens.color-on-surface-variant;
+            size: root.icon-size;
+        }
+    }
+}
+
+// The hover label an icon-only control needs to keep the word it gave up.
+//
+// Slint 1.17 has no built-in tooltip, so this is a plain Rectangle and the
+// caller is responsible for placing it. Two shapes were tried and rejected
+// (task290): `PopupWindow` takes the input inside its own window while open, so
+// the very button being labelled stops being clickable; and `absolute-position`
+// anchoring put a popup off screen once already (the rate-menu comment in
+// `review.slint`, task148). Place this as the **last child of the pane** so it
+// draws over the siblings declared before it, and compute its position from the
+// containing layout's own constants.
+//
+// It carries no `TouchArea` on purpose: a tooltip is never a click target, and
+// a TouchArea inside a hover-conditional element destroys itself on press and
+// eats the click (task194-B's quirk).
+export component Tooltip inherits Rectangle {
+    in property <string> label;
+    // The caller's hover. The tip appears `delay` after this goes true and
+    // vanishes the instant it goes false, so the caller needs no timer.
+    in property <bool> armed;
+    in property <duration> delay: 500ms;
+
+    // Cleared on every edge of `armed` so a second hover waits out the delay
+    // again instead of flashing up on contact: the timer restarts when
+    // `running` goes true, but it would otherwise find `elapsed` still set from
+    // the previous hover.
+    property <bool> elapsed;
+    property <bool> shown: root.armed && root.elapsed;
+
+    changed armed => {
+        root.elapsed = false;
+    }
+
+    Timer {
+        interval: root.delay;
+        running: root.armed;
+        triggered => {
+            root.elapsed = true;
+        }
+    }
+
+    width: layout.preferred-width;
+    // Fixed, as in the mock (round7 §2-9): the plate is a label holder, and a
+    // height that follows the font makes two tips of different text sit at
+    // different heights.
+    height: 22px;
+    border-radius: Tokens.shape-s;
+    border-width: 1px;
+    border-color: Tokens.chrome-hairline-strong;
+    background: Tokens.color-surface-container-highest;
+    drop-shadow-blur: 16px;
+    drop-shadow-offset-y: 6px;
+    drop-shadow-color: Tokens.light ? Tokens.shadow-float : #00000073;
+    opacity: root.shown ? 1.0 : 0.0;
+    animate opacity {
+        duration: 120ms;
+    }
+
+    layout := HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+
+        Text {
+            text: root.label;
+            font-size: 11px;
+            color: Tokens.color-on-surface;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// `.pill` and its role variants. Deliberately non-interactive -- anything
+// pressable is a `Btn`. Every pill carries its 12px icon: the variants differ by
+// hue, so colour alone would be the only signal for anyone who cannot separate
+// them (task111).
+export enum PillVariant { neutral, primary, success, warning, error }
+
+export component Pill inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <PillVariant> variant;
+    // round16 §2-2: a pill that sits on a thumbnail is on the video, not on the
+    // page, and stays in the dark set in either theme. The caller says so --
+    // the same pill is used in the history tile's *caption* row, which is page
+    // and follows the theme.
+    in property <bool> on-thumbnail;
+    // A heavier wash for the one pill that has to be found at a glance -- the
+    // history's LIVE (the user, 2026-09-19: 背景薄めでやや見えにくい).
+    in property <bool> strong;
+
+    height: 18px;
+    width: layout.preferred-width;
+    border-radius: Tokens.shape-xs;
+    border-width: 1px;
+
+    property <color> role:
+        root.variant == PillVariant.primary
+            ? (root.on-thumbnail ? Dark.color-primary : Tokens.color-primary)
+        : root.variant == PillVariant.success
+            ? (root.on-thumbnail ? Dark.color-success : Tokens.color-success)
+        : root.variant == PillVariant.warning
+            ? (root.on-thumbnail ? Dark.color-warning : Tokens.color-warning)
+        : root.variant == PillVariant.error
+            ? (root.on-thumbnail ? Dark.color-error : Tokens.color-error)
+        : (root.on-thumbnail
+            ? Dark.color-on-surface-variant
+            : Tokens.color-on-surface-variant);
+
+    // color-mix(in oklch, role, transparent 86% / 62%)
+    background: root.variant == PillVariant.neutral
+        ? (root.on-thumbnail ? Dark.chrome-hover : Tokens.chrome-hover)
+        : root.role.with-alpha(root.strong ? 0.30 : 0.14);
+    border-color: root.variant == PillVariant.neutral
+        ? (root.on-thumbnail ? Dark.chrome-hairline-strong : Tokens.chrome-hairline-strong)
+        : root.role.with-alpha(root.strong ? 0.70 : 0.38);
+
+    layout := HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 6px;
+        spacing: 4px;
+        alignment: center;
+
+        AppIcon {
+            commands: root.icon;
+            stroke-color: root.role;
+            size: 12px;
+            y: (parent.height - self.height) / 2;
+        }
+
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            font-size: 10px;
+            font-weight: 600;
+            color: root.role;
+        }
+    }
+}
+
+// A vertical hairline between groups in a row (round 4 §3). Both dimensions are
+// explicit: a Rectangle-derived component that leaves its height to the parent
+// renders as nothing at all.
+export component RuleV inherits Rectangle {
+    in property <length> rule-height: 12px;
+
+    width: 1px;
+    height: root.rule-height;
+    background: Tokens.chrome-hairline-strong;
+}
+
+// `.view-mode-chip`: a segmented toggle, not a button -- `on` is a state, not a
+// press.
+//
+// `quiet` splits what `on` means. Coloured `on` says "this chip is hiding data";
+// quiet `on` says "this is the one of the set you picked" -- a sort order, where
+// picking a different one hides nothing. The quiet form is `TimelineChip`'s.
+export component Chip inherits Rectangle {
+    in property <string> label;
+    // Optional (task144): the view toggles earn one because list-vs-grid is a
+    // shape, not a word. The sort chips deliberately stay text-only -- five
+    // glyphs in a row would out-shout the thing they sort.
+    in property <string> icon;
+    in property <bool> on;
+    in property <bool> quiet;
+    callback clicked;
+
+    height: Tokens.control-height-xs;
+    // Content floor rather than a pinned width, for the same reason as `Btn`'s
+    // (task330).
+    min-width: layout.preferred-width;
+    horizontal-stretch: 0;
+    border-radius: Tokens.shape-s;
+    border-width: (root.on && root.quiet) ? 0px : 1px;
+    border-color: (root.on && !root.quiet)
+        ? Tokens.color-primary.with-alpha(0.4)
+        : Tokens.chrome-control-border;
+    background: root.on
+        ? (root.quiet ? Tokens.chrome-selected : Tokens.color-primary.with-alpha(0.12))
+        : (touch.pressed ? Tokens.chrome-active : touch.has-hover ? Tokens.chrome-hover : transparent);
+
+    layout := HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 5px;
+        alignment: center;
+
+        property <color> tint: root.on
+            ? (root.quiet ? Tokens.color-on-surface : Tokens.color-primary)
+            : Tokens.color-on-surface-variant;
+
+        if root.icon != "": AppIcon {
+            commands: root.icon;
+            stroke-color: layout.tint;
+            size: 14px;
+            y: (parent.height - self.height) / 2;
+        }
+
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            font-size: Tokens.type-caption-size;
+            // `.chip.on` is 600 whichever ground it wears -- the quiet variant
+            // only overrides background and colour. The weight had been tied to
+            // `quiet`, so dropping `quiet` from the preset chips (task2160)
+            // would have unbolded them.
+            font-weight: root.on ? 600 : Tokens.type-body-weight;
+            color: layout.tint;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// `.sw`: 36x20 track, 16px knob that slides 16px and recolours. ON is the
+// *container* pair -- dark teal track, bright teal knob -- not the inverse the
+// implementation carried until task2160. The CSS transitions background and
+// transform over motion-duration-short; the knob's x runs longer with an
+// `ease-out-back` so it overshoots its stop by ~1.5px and settles (the track
+// has 2px of margin, so it never leaves the box).
+export component Switch inherits Rectangle {
+    in property <bool> checked;
+    callback toggled;
+
+    width: 36px;
+    height: 20px;
+    border-radius: Tokens.shape-full;
+    background: root.checked ? Tokens.color-primary-container : Tokens.chrome-hairline-strong;
+    // round16 §3-4: light's `primary-container` track is pale enough to melt
+    // into the row it sits on, so the track gets an edge. Drawn as a border
+    // rather than the mock's inset box-shadow -- slint has no inset shadow, and
+    // a border paints inside the box, so the 36x20 is unchanged either way.
+    border-width: Tokens.light ? 1px : 0px;
+    border-color: root.checked
+        ? Tokens.color-primary.with-alpha(0.45)
+        : Tokens.chrome-hairline-strong;
+    animate background { duration: Tokens.motion-duration-short; }
+
+    Rectangle {
+        x: root.checked ? 18px : 2px;
+        y: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: root.checked ? Tokens.color-primary : Tokens.color-on-surface-variant;
+        animate x { duration: Tokens.motion-duration-medium; easing: ease-out-back; }
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+// `.alert` + `.alert.info`: a 2px role-coloured rule on the leading edge, not a
+// filled banner.
+export component Alert inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> error;
+    // The form-row scale (task1100). `settings_rows.slint` carried a second
+    // copy of this component -- same leading rule, same tinted fill, one step
+    // smaller -- purely because a form row's alert has to sit under a 40px row
+    // without dominating it. One property says that instead.
+    in property <bool> compact;
+    callback action-clicked;
+    in property <string> action;
+    in property <string> action-icon;
+
+    border-radius: Tokens.shape-s;
+    // .alert.error background: color-mix(in oklch, var(--color-error), transparent 90%)
+    background: root.error ? Tokens.color-error.with-alpha(0.1) : Tokens.chrome-hover;
+
+    property <color> tint: root.error ? Tokens.color-error : Tokens.color-primary;
+
+    Rectangle {
+        x: 0;
+        width: 2px;
+        background: root.tint;
+    }
+
+    layout := HorizontalLayout {
+        padding: root.compact ? 6px : 8px;
+        padding-left: 10px;
+        spacing: root.compact ? 6px : Tokens.space-2;
+
+        AppIcon {
+            commands: root.icon;
+            stroke-color: root.tint;
+            size: root.compact ? 13px : 16px;
+            y: (parent.height - self.height) / 2;
+        }
+
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            wrap: word-wrap;
+            font-size: root.compact ? 11px : 12px;
+            color: Tokens.color-on-surface;
+        }
+
+        if root.action != "": Btn {
+            label: root.action;
+            // Supplied by the caller: only the targets pane's capturing
+            // notice wants a stop glyph here.
+            icon: root.action-icon;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                root.action-clicked();
+            }
+        }
+    }
+}
+
+// The scrim-and-card confirmation (round5 §6-D). Three screens had their own
+// copy of this markup -- identical down to the 44px shadow -- which is three
+// places to keep a dialog looking like a dialog (task1100). The body is
+// `@children` because what each one has to say differs; the frame does not.
+//
+// Cancel first and on the safe side, as the history's dialog established.
+export component ConfirmDialog inherits Rectangle {
+    in property <string> cancel-label;
+    in property <string> ok-label;
+    in property <string> ok-icon;
+    /// The confirmed action cannot be undone: the OK button goes error-red.
+    in property <bool> danger;
+    callback cancelled();
+    callback accepted();
+
+    // `backdrop-filter: blur()` has no slint equivalent, so the scrim is a
+    // flat translucent black (same trade recorded in task123).
+    background: Tokens.color-scrim;
+
+    // Swallows anything aimed at the screen behind it.
+    TouchArea { }
+
+    Rectangle {
+        width: Math.min(420px, root.width - 48px);
+        height: dialog.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: Tokens.shape-l;
+        border-width: 1px;
+        border-color: Tokens.chrome-hairline-strong;
+        background: Tokens.color-surface-container-high;
+        clip: true;
+        drop-shadow-blur: 44px;
+        drop-shadow-offset-y: 20px;
+        drop-shadow-color: Tokens.light ? Tokens.shadow-window : #00000099;
+
+        dialog := VerticalLayout {
+            // Body and footer as two blocks, which is what a native dialog
+            // looks like -- the old one was a single padded box with two small
+            // buttons floating at its right edge.
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+
+                @children
+            }
+
+            Rectangle {
+                height: footer.preferred-height;
+                background: Tokens.color-surface-container;
+
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Tokens.chrome-hairline;
+                }
+
+                footer := HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    padding-top: 12px;
+                    padding-bottom: 14px;
+                    spacing: 10px;
+
+                    // `Btn` binds its own width to its content, so each cell
+                    // has to hand it one. The cell carries the height for the
+                    // same reason -- a bare `Rectangle` has no preferred height,
+                    // so dropping it collapses the footer around the buttons.
+                    // 30px is `Btn`'s own default (round12 §5: the confirm
+                    // footer joins the height ladder instead of sitting above
+                    // it at 32).
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 30px;
+
+                        Btn {
+                            width: parent.width;
+                            label: root.cancel-label;
+                            clicked => {
+                                root.cancelled();
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 30px;
+
+                        Btn {
+                            width: parent.width;
+                            label: root.ok-label;
+                            icon: root.ok-icon;
+                            danger: root.danger;
+                            primary: !root.danger;
+                            clicked => {
+                                root.accepted();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The one empty state, for every list that can be empty (task3800, round20
+// §8-(7)): a bare 26px glyph in a primary tint, with a two-line caption that
+// fades in. No glow under the glyph (round25 response §4-4, 2026-09-19).
+// The round5 `.confirmation-empty` frame -- a 34px bordered box around a 20px
+// glyph -- is gone; it was the last screen-specific empty treatment, and task3330's `plain` flag existed only to
+// let the clips screen out of it. With every caller on the same look the flag
+// has nothing left to select, so it went too.
+//
+// The vocabulary is the review screen's `ReviewEmpty` minus its waves, which
+// belong to the screen the video will appear on rather than to a list.
+export component EmptyState inherits Rectangle {
+    in property <string> icon;
+    // The caption's first line: 13.5px/600. `sub` is the second, 11.5px, and
+    // a caller with nothing to add there gets no second line rather than an
+    // empty one (the mock's clips entry is a title alone, its history entry a
+    // title and a sub -- `mock/liveback-mock.html:1003-1006, 1106-1109`).
+    in property <string> label;
+    in property <string> sub;
+    in property <string> action;
+    in property <string> action-icon;
+    callback action-clicked;
+
+    // The whole block fades in (`.cm`'s `emptyfade .6s`). `EmptyState` is
+    // always created by an `if`, so `init` runs exactly when the state
+    // appears; the mock's 6px rise is dropped, since sliding a centred block
+    // inside a layout means animating a padding rather than a transform.
+    opacity: 0;
+    init => {
+        self.opacity = 1;
+    }
+    animate opacity {
+        duration: 600ms;
+        easing: ease-out;
+    }
+
+    // Centred on both axes (task144). The rows used to be `alignment: start`
+    // inside a vertically-centred column, which read as "centred, then shoved
+    // left" -- the odd layout the review and targets screens both showed off.
+    VerticalLayout {
+        alignment: center;
+        padding-left: Tokens.space-4;
+        padding-right: Tokens.space-4;
+        spacing: 16px;
+
+        HorizontalLayout {
+            alignment: center;
+
+            // The glyph's own cell. It held the radial glow until round25
+            // §4-4 took the glow out (2026-09-19).
+            Rectangle {
+                width: 26px;
+                height: 26px;
+
+                // The mock's `breathe 4.2s` is not run (task3940). It was an
+                // `iteration-count: -1` opacity loop, and an animation that
+                // never ends keeps slint's window marked as animating
+                // (`i-slint-core-1.17.1/properties/properties_animations.rs`
+                // sets the flag while one runs), which the winit loop turns
+                // into a `request_redraw()` on every iteration
+                // (`i-slint-backend-winit-1.17.1/event_loop.rs:638`) -- one
+                // empty list anywhere on screen was worth 60 presents a second
+                // forever. Held at the bright end of the loop; the root's own
+                // 600ms fade-in below still runs, because it terminates.
+                //
+                // `Tokens.` and not `Dark.`: the mock writes the tint as
+                // `color-mix(in oklab, var(--primary) 55%, #39424e)`, and the
+                // ground here is `chrome-content`, which follows the theme --
+                // so the tint has to as well (`Tokens.color-empty-glyph`).
+                AppIcon {
+                    commands: root.icon;
+                    stroke-color: Tokens.color-empty-glyph;
+                    size: 26px;
+                    weight: 1.4px;
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 9px;
+
+            Text {
+                text: root.label;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+                font-size: 13.5px;
+                font-weight: 600;
+                letter-spacing: 0.04 * 13.5px;
+                color: Tokens.color-on-surface-variant;
+            }
+
+            // No second line when there is nothing for it: an empty Text still
+            // takes a row's height and the 9px above it.
+            if root.sub != "": Text {
+                text: root.sub;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+                font-size: 11.5px;
+                letter-spacing: 0.02 * 11.5px;
+                color: Tokens.color-outline;
+            }
+        }
+
+        // No action, no button: an empty-labelled Btn still paints its
+        // frame and fires an unwired callback. The picker's "clear the
+        // filter" button is the one caller that uses this (task3800 kept it
+        // through the frame's removal).
+        if root.action != "": HorizontalLayout {
+            alignment: center;
+            Btn {
+                label: root.action;
+                icon: root.action-icon;
+                primary: true;
+                clicked => {
+                    root.action-clicked();
+                }
+            }
+        }
+    }
+}
+
+// ---- round5 primitives (task168, design §8) ----
+//
+// Every dimension below is a design literal on purpose: round5 specifies these
+// in px for one component each, and `tokens.slint` is for values more than one
+// component shares. The task's rule for this batch is a zero-line diff there.
+
+export enum ToastVariant { info, success, error, warning }
+
+// §3-C. The one place a transient status line lives now: bottom-right, one at a
+// time, six seconds unless it is an error -- which stays until dismissed,
+// because an error the user missed is the one that mattered. Two rows, and the
+// second only exists when there is something to do, so a plain message is not
+// as tall as a question.
+export component Toast inherits Rectangle {
+    in property <string> title;
+    // Second line: the path, the count, whatever qualifies the headline. A path
+    // wants its *tail* kept, and slint elides from the right, so the caller
+    // shortens the front before sending it here.
+    in property <string> detail;
+    in property <ToastVariant> variant: ToastVariant.info;
+    in property <string> action;
+    callback action-clicked();
+    callback dismissed();
+
+    min-width: 300px;
+    max-width: 400px;
+    // `max-width` alone does not bind the box: the width below is what the
+    // layout is told, so the clamp has to be in it. Without this a long
+    // headline -- the capacity sweep's, for one -- ran the card off the mock's
+    // 400px instead of wrapping inside it (round7 §2-11).
+    width: Math.clamp(body.preferred-width, root.min-width, root.max-width);
+    height: body.preferred-height;
+    border-radius: 8px;
+    // 2px on every variant (round7 §2-11): at 1px the card's edge disappeared
+    // into its own shadow on the graphite ground. round16 §3-3 puts light back
+    // to 1px -- on a white ground the shadow is what separates the card, and a
+    // 2px edge over that reads as a frame.
+    border-width: Tokens.light ? 1px : 2px;
+    border-color: root.variant == ToastVariant.error
+        ? Tokens.color-error.with-alpha(0.45)
+        : Tokens.chrome-hairline-strong;
+    // round16 §4-1 derives the error ground from the role instead of burning
+    // in a near-black red: `color-mix(in oklab, error 9%, container-high)`,
+    // resolved per theme here because slint mixes in sRGB and the mock does not.
+    // The normal card rises to the white plate in light (§3-3): container-high
+    // is close to the ground there, so a floating card needs the step above it.
+    background: root.variant == ToastVariant.error
+        ? (Tokens.light ? #f9eaea : #312c35)
+        : (Tokens.light
+            ? Tokens.color-surface-container-highest
+            : Tokens.color-surface-container-high);
+    drop-shadow-blur: 32px;
+    drop-shadow-offset-y: 14px;
+    drop-shadow-color: Tokens.light ? Tokens.shadow-float : #0000008c;
+
+    // Only the icon carries the variant (round7 §2-11): the warning card is a
+    // normal card with an amber glyph, not an amber card. The error one keeps
+    // its own ground because a red glyph alone under-reads at this size.
+    property <color> tint: root.variant == ToastVariant.error
+        ? Tokens.color-error
+        : root.variant == ToastVariant.success
+            ? Tokens.color-primary
+            : root.variant == ToastVariant.warning
+                ? Tokens.color-warning
+                : Tokens.color-on-surface-variant;
+
+    body := VerticalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        padding-left: 14px;
+        padding-right: 12px;
+        spacing: 9px;
+
+        HorizontalLayout {
+            spacing: 9px;
+
+            AppIcon {
+                commands: root.variant == ToastVariant.error
+                    ? Icons.error
+                    : root.variant == ToastVariant.success
+                        ? Icons.success
+                        : root.variant == ToastVariant.warning ? Icons.discard : Icons.info;
+                stroke-color: root.tint;
+                size: 15px;
+                y: 1px;
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+
+                Text {
+                    text: root.title;
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    // Regular, not 600: the mock separates the headline from the
+                    // detail by colour (on-surface over on-surface-variant), and
+                    // bolding it as well made the card shout at 12px.
+                    color: Tokens.color-on-surface;
+                }
+
+                if root.detail != "": Text {
+                    text: root.detail;
+                    overflow: elide;
+                    font-size: 11px;
+                    color: Tokens.color-on-surface-variant;
+                }
+            }
+
+            IconBtn {
+                icon: Icons.close;
+                box: 22px;
+                icon-size: 13px;
+                clicked => {
+                    root.dismissed();
+                }
+            }
+        }
+
+        if root.action != "": HorizontalLayout {
+            alignment: end;
+            Btn {
+                label: root.action;
+                clicked => {
+                    root.action-clicked();
+                }
+            }
+        }
+    }
+}
+
+// The settings screen's number box: a plain 88px field (`.freein`).
+//
+// Task310 had welded the unit onto its right edge, to match クリップ保存の長さ's
+// box; that row died with task1090, and the 2026-08-23 mock puts the unit back
+// outside, in the same 26px column every other settings row ends in. So the
+// weld is gone again (task1490) and the caller states its own unit.
+export component NumberField inherits Rectangle {
+    in property <string> value;
+    // Shown while the field is empty; the accepted range, on the chip rows.
+    in property <string> placeholder;
+    // A row whose setting is switched off keeps its number visible -- it is
+    // what the row goes back to -- but nothing in it answers (task1490).
+    in property <bool> enabled: true;
+    // The mock's `.freein.err`: the draft is out of range, so it was refused
+    // and the box says so while it keeps showing what was typed.
+    in property <bool> error;
+    // The chip rows commit on Enter, not on every keystroke.
+    callback accepted(string);
+
+    // Task194-A: typing overwrites `field.text` and drops the binding to
+    // `value` for good, so a number the Rust side clamped on save (5000 ->
+    // 2000) would keep showing what was typed. This puts it back.
+    changed value => {
+        if (field.text != root.value) {
+            field.text = root.value;
+        }
+    }
+
+    width: 88px;
+    height: 28px;
+
+    // `.freein.err`'s `box-shadow: 0 0 0 3px`. Drawn as a rectangle behind the
+    // box rather than a thicker border: a border would move the text inside.
+    // The root does not clip, so it may reach outside its own 88x28.
+    if root.error: Rectangle {
+        x: -3px;
+        y: -3px;
+        width: 94px;
+        height: 34px;
+        border-radius: Tokens.shape-s + 3px;
+        background: Tokens.color-error.with-alpha(0.14);
+    }
+
+    Rectangle {
+        x: 0;
+        width: 88px;
+        height: 28px;
+        background: Tokens.chrome-field;
+        border-width: 1px;
+        border-color: root.error
+            ? Tokens.color-error
+            : field.has-focus ? Tokens.color-primary : Tokens.chrome-hairline;
+        border-radius: Tokens.shape-s;
+
+        // Declared before the input, like the targets search field: the
+        // TextInput wins the hit test where they overlap and keeps
+        // click-to-place-caret, so this only covers the 8px padding --
+        // where the box still has to read as a field.
+        TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: text;
+            clicked => {
+                field.focus();
+            }
+        }
+
+        field := TextInput {
+            text: root.value;
+            enabled: root.enabled;
+            x: 8px;
+            width: parent.width - 16px;
+            height: 100%;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            single-line: true;
+            input-type: number;
+            font-size: 12px;
+            color: Tokens.color-on-surface;
+            selection-background-color: Tokens.color-primary;
+            selection-foreground-color: Tokens.color-on-primary;
+            accepted => {
+                root.accepted(self.text);
+            }
+            // Losing focus discards, exactly as the titlebar's rename field
+            // does (task3430): this box commits on Enter only, so a draft that
+            // was never entered is not a value -- leaving it in the box after
+            // the caret has gone says the setting changed when it did not.
+            // What takes the focus away when the click lands on empty page is
+            // the settings pane's own `FocusScope`; a `TouchArea` cannot.
+            //
+            // Taking the focus does the opposite end of the same thing
+            // (2026-09-13, the user): the number in the box is selected, so
+            // the next keystroke replaces it instead of landing beside it.
+            changed has-focus => {
+                if (self.has-focus) {
+                    self.select-all();
+                } else if (self.text != root.value) {
+                    self.text = root.value;
+                }
+            }
+        }
+
+        // Over the field, not beside it: inside a layout the placeholder would
+        // be handed a column of its own and push the input sideways.
+        if root.placeholder != "" && field.text == "" && field.preedit-text == "": Text {
+            x: 8px;
+            width: parent.width - 16px;
+            height: 100%;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            text: root.placeholder;
+            overflow: elide;
+            font-size: 12px;
+            color: Tokens.color-outline;
+        }
+    }
+}
+
+// task3810. Was two hand-written copies -- history (`sessions.slint`) and the
+// target picker (`picker_modal.slint`) -- with a comment on the history one
+// insisting they read as the same control. In dark theme they always were
+// pixel-identical; the two differences below are light-theme-only overrides
+// the picker picked up in round16 §3-1 ("the field sits on the white plate
+// instead of the sunk chrome ground there") that history never got. Rather
+// than force one screen to move, both are kept as an opt-in: history passes
+// nothing, the picker passes `plate: true`. Same field as the clips search
+// (task3820) will be: round20 §9 names history's `SearchField` as its
+// primitive/dimension reference.
+export component SearchField inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text <=> field.text;
+    // round16 §3-1, picker-only (see the file comment above).
+    in property <bool> plate: false;
+    // Every keystroke, so callers can filter live.
+    callback search-changed(string);
+
+    public function focus-field() {
+        field.focus();
+    }
+
+    horizontal-stretch: 1;
+    height: Tokens.control-height-s;
+    border-radius: Tokens.shape-s;
+    border-width: 1px;
+    border-color: field.has-focus
+        ? Tokens.color-primary.with-alpha(0.55)
+        : field-touch.has-hover
+            ? Tokens.color-outline
+            : (root.plate ? Tokens.chrome-control-border : Tokens.chrome-hairline);
+    background: root.plate && Tokens.light
+        ? Tokens.color-surface-container-highest
+        : (field.has-focus ? Tokens.chrome-inset : Tokens.chrome-sidebar);
+
+    field-touch := TouchArea {
+        // Qualified: an unqualified `text` here would resolve to this
+        // component's own `text` property (shadowing the `MouseCursor` enum
+        // value), unlike every other `mouse-cursor: text;` call site in this
+        // file that has no same-named property to collide with.
+        mouse-cursor: MouseCursor.text;
+        clicked => {
+            field.focus();
+        }
+    }
+
+    AppIcon {
+        x: 8px;
+        commands: Icons.search;
+        stroke-color: Tokens.color-on-surface-variant;
+        size: 16px;
+    }
+
+    field := TextInput {
+        x: 30px;
+        width: parent.width - 60px;
+        height: 100%;
+        vertical-alignment: center;
+        single-line: true;
+        font-size: Tokens.type-body-size;
+        // round16 §3-1, picker-only: light wants on-surface-variant here.
+        color: root.plate && Tokens.light
+            ? Tokens.color-on-surface-variant
+            : Tokens.color-on-surface;
+        // Swapped out while an IME conversion is open, exactly as the inline
+        // editor does it (see `InlineEdit`'s own comment for why slint paints
+        // the preedit with the selection pair): unconverted kana in the search
+        // box read as a range selection (the user, 2026-09-20).
+        selection-background-color: self.preedit-text != ""
+            ? Tokens.color-primary.with-alpha(0.16)
+            : Tokens.color-primary;
+        selection-foreground-color: self.preedit-text != ""
+            ? Tokens.color-on-surface
+            : Tokens.color-on-primary;
+        edited => {
+            root.search-changed(self.text);
+        }
+    }
+
+    // `preedit-text` too, not just `text`: mid-conversion the IME draws its
+    // own uncommitted run in the field while `text` is still empty, and the
+    // placeholder would sit underneath it.
+    if field.text == "" && field.preedit-text == "": Text {
+        x: 30px;
+        vertical-alignment: center;
+        height: 100%;
+        text: root.placeholder;
+        font-size: Tokens.type-body-size;
+        color: Tokens.color-on-surface-variant;
+    }
+
+    // Task194-B: `if field.text != ""` used to gate this button, and the
+    // handler's first line clears `field.text` -- which destroys the very
+    // element running the handler, so `search-changed("")` and `focus()`
+    // never ran and the filter stayed applied. `visible` is the fix rather
+    // than opacity: an opacity-0 button still takes the click.
+    IconBtn {
+        visible: field.text != "";
+        x: parent.width - self.width - 2px;
+        y: (parent.height - self.height) / 2;
+        box: 24px;
+        icon-size: 14px;
+        icon: Icons.close;
+        clicked => {
+            field.text = "";
+            root.search-changed("");
+            field.focus();
+        }
+    }
+}
+
+// §7-B. A number the user picks rather than types: the chips are the answer for
+// almost everyone and the field is the escape hatch. Which chip is on -- and
+// whether none of them is -- is decided in `ui_state::settings`; this side only
+// paints what it is told.
+export component PresetRow inherits Rectangle {
+    in property <string> label;
+    in property <string> sub;
+    in property <[string]> presets;
+    // Index into `presets`, or -1 when the value is not one of them.
+    in property <int> selected: -1;
+    in property <string> value-text;
+    // Shown while the field is empty. §7-B puts the accepted range here, so
+    // the bound is visible before the user finds it by being corrected.
+    in property <string> placeholder;
+    in property <string> unit;
+    in property <bool> editable: true;
+    // round8 §3-1 / §3-2: a row whose setting is not in force right now. The
+    // mock's `.dimmed` is opacity .38, and the controls stop answering -- a
+    // dimmed row that still took clicks would be a lie about which of the two
+    // settings is deciding anything.
+    in property <bool> dimmed;
+    // Round2 7-2 and round6 3: the last draft typed here was out of range, so
+    // it was refused and the row shows the mock's `.errrow`. The decision is
+    // `ui_state::settings::preset_draft` -- the row only draws it.
+    in property <bool> range-error;
+    callback preset-clicked(int);
+    callback value-edited(string);
+
+    height: row.preferred-height;
+    opacity: root.dimmed ? 0.38 : 1.0;
+
+    row := HorizontalLayout {
+        spacing: 12px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+
+            SelText {
+                text: root.label;
+                // 12.5 / 10.5 to match `PathRow` and the mock's 38px settings
+                // row; the 13 / 11 of prose reads a size too big in here.
+                font-size: 12.5px;
+                color: Tokens.color-on-surface;
+            }
+
+            if root.sub != "": SelText {
+                text: root.sub;
+                wrap: word-wrap;
+                font-size: 10.5px;
+                color: Tokens.color-on-surface-variant;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: end;
+
+            for preset[index] in root.presets: Chip {
+                label: preset;
+                on: index == root.selected;
+                // Not `quiet` (task2160): the 「なし」 chip whose white ground
+                // that variant copied is gone from the mock, and every chip
+                // left in `.presets` is a plain `.chip.on` -- primary ground,
+                // primary edge, primary lettering.
+                height: 28px;
+                // A width, not a floor (task310). `min-width` never bit: `Chip`
+                // binds `width: layout.preferred-width` and an explicit width
+                // wins, so the chips stayed shrink-wrapped -- and since the
+                // selected one goes 600-weight, picking a chip *moved the row*.
+                // 44px holds the widest bold caption here (`120`) with room.
+                // Given per-instance rather than in `Chip`, whose width line
+                // task300 is rewriting for the review panel.
+                width: 44px;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    // Gated here rather than with a `disabled` flag on `Chip`:
+                    // the dimmed row already looks inert, and the chip's own
+                    // disabled styling would dim it a second time.
+                    if (!root.dimmed) {
+                        root.preset-clicked(index);
+                    }
+                }
+            }
+
+            if root.editable: NumberField {
+                value: root.value-text;
+                placeholder: root.placeholder;
+                // A dimmed row reads as inert, so it has to be inert: without
+                // this the field still took the caret and the keystrokes
+                // (task1490 -- the retention rows are the first dimmable rows
+                // that have one).
+                enabled: !root.dimmed;
+                y: (parent.height - self.height) / 2;
+                error: root.range-error;
+                accepted(text) => {
+                    // Every draft goes to Rust now, in range or not: refusing
+                    // one is a decision with a message attached, and both live
+                    // in `ui_state` where a test can see them.
+                    if (!root.dimmed) {
+                        root.value-edited(text);
+                    }
+                }
+            }
+
+            // Every row ends in the same unit column, editable or not
+            // (task1490 -- the mock took the unit back off the box). A row
+            // with no field carries the current value here too (task191),
+            // which is why this is not always just the unit word.
+            if root.unit != "": SelText {
+                text: root.unit;
+                // A floor, not a width: the unit carries the current value on
+                // rows that have no field to put it in (task191), and `15 分`
+                // does not fit the mock's 26px column. Every plain unit
+                // (`分` / `fps` / `GB` / `日`) is narrower than the floor, so
+                // the other rows do not move.
+                min-width: 26px;
+                height: 28px;
+                vertical-alignment: center;
+                y: (parent.height - self.height) / 2;
+                font-size: 11px;
+                color: Tokens.color-on-surface-variant;
+            }
+        }
+    }
+}
+
+// §5. Two or three peers where exactly one is true at a time -- a filter, a
+// mode -- drawn as one inset track rather than separate buttons, so the group
+// reads as a single control with a position in it.
+export component SegmentTabs inherits Rectangle {
+    in property <[string]> segments;
+    // One glyph per segment, in the same order (task186). Shorter than
+    // `segments`, or empty, means the rest go without -- the toolbar's tabs
+    // have no icons and should not have to pass empty strings to say so.
+    in property <[string]> icons;
+    in property <int> selected;
+    // Full-width segments: the track takes whatever width it is given and the
+    // segments split it evenly (round5 §5's picker tabs). Off by default, which
+    // is the toolbar case -- there the group has to stay as narrow as its words.
+    in property <bool> stretch;
+    callback selected-changed(int);
+
+    height: 36px;
+    width: track.preferred-width;
+    border-radius: Tokens.shape-s;
+    border-width: 1px;
+    border-color: Tokens.chrome-hairline;
+    background: Tokens.chrome-inset;
+    // The sliding plate overshoots its stop by a few px (`ease-out-back`), and
+    // at the last segment that would poke out of the track for a frame or two.
+    clip: true;
+
+    // The selected plate is one rectangle that slides between the segments
+    // rather than a fill each cell toggles, so a tab change reads as motion.
+    // Declared before `track` so it paints under the captions. Its x is the
+    // even split `stretch` produces -- the narrow (non-stretch) form has no
+    // caller, and there the cells paint their own plate as before.
+    indicator := Rectangle {
+        property <int> count: root.segments.length;
+        property <length> cell-width: (root.width - 6px - 3px * (self.count - 1)) / self.count;
+        visible: root.stretch && self.count > 0;
+        x: 3px + root.selected * (self.cell-width + 3px);
+        y: 3px;
+        width: self.cell-width;
+        height: 30px;
+        border-radius: Tokens.shape-xs;
+        // round16 §3-2: `secondary-container` sits too close to the inset
+        // ground in light and the selected tab sank into it. Light lifts
+        // the tab onto a white plate instead -- ring and shadow, not a
+        // fill -- while dark keeps the container it always had.
+        background: Tokens.light
+            ? Tokens.color-surface-container-highest
+            : Tokens.color-secondary-container;
+        border-width: Tokens.light ? 1px : 0px;
+        border-color: Tokens.chrome-hairline;
+        drop-shadow-blur: Tokens.light ? 3px : 0px;
+        drop-shadow-offset-y: Tokens.light ? 1px : 0px;
+        drop-shadow-color: #141e2d2e;                    // rgba(20,30,45,.18)
+        animate x { duration: Tokens.motion-duration-medium; easing: ease-out-back; }
+    }
+
+    track := HorizontalLayout {
+        padding: 3px;
+        spacing: 3px;
+
+        for segment[index] in root.segments: cell := Rectangle {
+            property <bool> on: index == root.selected;
+            // The cell paints the selected plate itself only when the sliding
+            // `indicator` above cannot (non-stretch).
+            property <bool> plate: self.on && !root.stretch;
+            height: 30px;
+            // Bounds rather than a fixed `width`: an explicit width is what
+            // tells the layout a child cannot stretch, so pinning both bounds
+            // together is how the narrow case stays narrow.
+            horizontal-stretch: root.stretch ? 1 : 0;
+            min-width: caption.preferred-width + 24px;
+            max-width: root.stretch ? 100000px : self.min-width;
+            border-radius: Tokens.shape-xs;
+            background: self.plate
+                ? (Tokens.light
+                    ? Tokens.color-surface-container-highest
+                    : Tokens.color-secondary-container)
+                : (segment-touch.pressed && !self.on)
+                    ? Tokens.chrome-active
+                    : (segment-touch.has-hover && !self.on) ? Tokens.chrome-hover : transparent;
+            border-width: (self.plate && Tokens.light) ? 1px : 0px;
+            border-color: Tokens.chrome-hairline;
+            drop-shadow-blur: (self.plate && Tokens.light) ? 3px : 0px;
+            drop-shadow-offset-y: (self.plate && Tokens.light) ? 1px : 0px;
+            drop-shadow-color: #141e2d2e;                    // rgba(20,30,45,.18)
+
+            caption := HorizontalLayout {
+                alignment: center;
+                spacing: 7px;
+
+                if index < root.icons.length && root.icons[index] != "": AppIcon {
+                    commands: root.icons[index];
+                    stroke-color: cell.on
+                        ? (Tokens.light
+                            ? Tokens.color-on-surface
+                            : Tokens.color-on-secondary-container)
+                        : Tokens.color-on-surface-variant;
+                    size: 16px;
+                    // The mock's `.tab svg { top: -.5px }`: a 16px glyph next
+                    // to 12px lettering sits optically low on the true centre.
+                    y: (parent.height - self.height) / 2 - 0.5px;
+                }
+
+                Text {
+                    text: segment;
+                    vertical-alignment: center;
+                    // 12px, not the 13px body size: this rides inside a 30px
+                    // segment and the mock sizes it for that box, not for prose.
+                    font-size: 12px;
+                    font-weight: cell.on ? 600 : Tokens.type-body-weight;
+                    color: cell.on
+                        ? (Tokens.light
+                            ? Tokens.color-on-surface
+                            : Tokens.color-on-secondary-container)
+                        : Tokens.color-on-surface-variant;
+                }
+            }
+
+            segment-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.selected-changed(index);
+                }
+            }
+        }
+    }
+}
+
+export struct MenuEntry {
+    label: string,
+    icon: string,
+    // Right-aligned accelerator hint (`F2`), or "" for none.
+    hint: string,
+    // Draws a rule above this entry. Cheaper than a separator entry, which
+    // would need its own kind and an index the caller has to skip.
+    separator-above: bool,
+    danger: bool,
+    // Listed but refused: the entry stays so the reason a door is shut is
+    // visible rather than merely absent (t260920-bb09). The Rust side has
+    // carried this decision since round5 (`SessionMenuItem.disabled`, and the
+    // handler's `if item.disabled { return; }`) but it never reached the
+    // drawing, so `load_disabled` -- and then the recording's 破棄 -- looked
+    // exactly like a live entry and did nothing when pressed.
+    disabled: bool,
+}
+
+// §6-D. Positioned by the caller, which is the half that knows where the
+// pointer was; this only draws and reports which row was chosen.
+export component ContextMenu inherits Rectangle {
+    in property <[MenuEntry]> entries;
+    callback chosen(int);
+
+    width: 196px;
+    height: items.preferred-height;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Tokens.chrome-hairline-strong;
+    background: Tokens.color-surface-container-high;
+    drop-shadow-blur: 32px;
+    drop-shadow-offset-y: 14px;
+    drop-shadow-color: Tokens.light ? Tokens.shadow-float : #0000008c;
+
+    // Stops a click on the menu's own padding or a separator from falling
+    // through to whatever is behind it (task1120). First child, so the entry
+    // rows below are declared after it and win the hit test.
+    TouchArea { }
+
+    items := VerticalLayout {
+        padding: 4px;
+
+        for entry[index] in root.entries: VerticalLayout {
+            if entry.separator-above: Rectangle {
+                height: 5px;
+                Rectangle {
+                    height: 1px;
+                    y: 2px;
+                    background: Tokens.chrome-hairline;
+                }
+            }
+
+            row := Rectangle {
+                property <color> tint: entry.danger ? Tokens.color-error : Tokens.color-on-surface;
+                // Dimmed rather than removed, and the row stops answering the
+                // pointer: no hover fill, no pressed fill, no hand cursor. The
+                // entry still takes the click (the `TouchArea` below is what
+                // keeps it from falling through to the grid) -- it just does
+                // not report it.
+                opacity: entry.disabled ? 0.38 : 1.0;
+                height: 28px;
+                border-radius: Tokens.shape-xs;
+                background: entry.disabled
+                    ? transparent
+                    : entry-touch.pressed
+                        ? Tokens.chrome-active
+                        : entry-touch.has-hover ? Tokens.chrome-hover : transparent;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 8px;
+
+                    if entry.icon != "": AppIcon {
+                        commands: entry.icon;
+                        stroke-color: row.tint;
+                        size: 14px;
+                        y: (parent.height - self.height) / 2;
+                    }
+
+                    Text {
+                        text: entry.label;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        // Same 12px as the segment captions: a menu row is 28px
+                        // tall and the mock sizes its label to the row.
+                        font-size: 12px;
+                        color: row.tint;
+                    }
+
+                    if entry.hint != "": Text {
+                        text: entry.hint;
+                        vertical-alignment: center;
+                        font-size: 10px;
+                        color: Tokens.color-on-surface-variant;
+                    }
+                }
+
+                entry-touch := TouchArea {
+                    mouse-cursor: entry.disabled ? default : pointer;
+                    clicked => {
+                        if (!entry.disabled) {
+                            root.chosen(index);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Where the one open inline editor is, in window coordinates (task3640).
+//
+// `app.slint` lays a full-window overlay while any inline edit is open and cuts
+// a hole in it for the field itself -- four frame rectangles around this rect,
+// so the field keeps its own clicks (caret, drag-select) while every press
+// beside it is taken by the overlay and ends the edit. The rect has to travel
+// through a global because every editor lives inside an `if`, and a conditional
+// element cannot be named from outside its own subtree.
+//
+// Only one editor is ever open at a time, so one rect is enough: whichever
+// field is alive owns these four values. Written by `InlineEdit` below and by
+// `app.slint`'s hand-built titlebar rename box, which is the sixth caller and
+// not an `InlineEdit`.
+//
+// Nothing clears it on teardown -- slint has no destructor -- so a stale rect
+// outlives the field that wrote it. That is harmless: the overlay only exists
+// while `app.slint`'s aggregate flag says an edit is open, and the field that
+// re-opens rewrites all four before the frame is laid out.
+export global InlineEditVm {
+    in-out property <length> field-x;
+    in-out property <length> field-y;
+    in-out property <length> field-w;
+    in-out property <length> field-h;
+
+    // ---------- the review confirm step's second and third holes (task3860,
+    // user ruling 2026-09-09) ----------
+    // The overlay normally cuts one hole, the field's own rect above. The
+    // 確認 screen's 確定ステップ is the single exception the user granted: the
+    // track and the panel's range block stay live *while* the comment field is
+    // open, because round19 §1 puts the range edit inside that step rather
+    // than behind the 「範囲を編集」 toggle it replaced. Every other editor
+    // keeps the one-hole frame and the 2026-09-08 「最初の押下は食われる」
+    // ruling with it.
+    //
+    // Window coordinates, pushed the same way `field-*` is: a global cannot
+    // carry a binding to an element's geometry, so `review.slint` writes these
+    // from `absolute-position` on `changed`, and the panel scroll moves them
+    // on its own (task3110 measured that).
+    //
+    // `panel-x` is the boundary between the two columns the overlay is built
+    // out of -- the stage column holds the track hole, the panel column holds
+    // the range one. Pushed rather than derived from a constant 280px: the
+    // panel's width animates open and shut.
+    //
+    // `panel-y` / `panel-h` are what the range band is clamped to. The panel
+    // scrolls (task3110), so the range block can be carried above the panel's
+    // own top edge, and a hole that followed it there would sit over the title
+    // bar -- an editor open with the window's own controls live under it.
+    in-out property <length> panel-x;
+    in-out property <length> panel-y;
+    in-out property <length> panel-h;
+    // The track's hit band on the stage. Zero-sized while the control bar is
+    // not rendered: a hole over a bar that is not there would let the press
+    // reach the stage's own tap-to-play area *without* ending the edit, which
+    // is precisely the gap task3640 closed.
+    in-out property <length> track-x;
+    in-out property <length> track-y;
+    in-out property <length> track-w;
+    in-out property <length> track-h;
+    // The top of the panel band. Its bottom is the field's own
+    // `field-y + field-h`, so the band is one hole from the range block down
+    // through the comment field rather than two with a seam between them:
+    // what lies in between is inert -- the 動画の出力 heading, and the 直近N
+    // chip row, which `review.slint` already removes with an `if` while the
+    // step is open. Deriving the bottom from the field also means the band
+    // cannot drift off it, whatever the export slot's rows come to measure.
+    in-out property <length> range-y;
+}
+
+// §4-D / §6-C2. Editing in place: the field appears where the text was and
+// keeps the row's rhythm. Enter is the only exit that saves; Esc and losing
+// focus both discard (task3430 -- see the `changed has-focus` block below for
+// why that stopped being a commit). `title` is the heavier variant the
+// session-name edit uses.
+export component InlineEdit inherits Rectangle {
+    in property <string> text;
+    in property <string> hint;
+    /// Task3250. Off by default, and it has to stay that way: every other
+    /// caller opens the field with text already in it (a session title, a
+    /// note, a marker label, an existing clip's comment on the history
+    /// screen), so hiding the hint on non-empty input would mean their `Enter`
+    /// never appears at all. The one opt-in is review's clip-save prompt,
+    /// which opens empty and whose guidance is long enough to squeeze the
+    /// input down to a sliver.
+    in property <bool> hint-only-while-empty;
+    /// Task4130, 2026-09-09. Opt-in, and off by default like the property
+    /// above: while this field is **empty**, a bare `i` / `o` is handed to the
+    /// screen's shortcuts through `shortcut-key` instead of being typed. Only
+    /// review's clip-save prompt sets it; the other four callers open with text
+    /// already in them, so the branch could not fire for them even if they did.
+    /// The rules the user settled on 2026-09-09, in person, are written out at
+    /// the branch itself in `input.key-pressed` below -- read them there before
+    /// changing this.
+    in property <bool> io-while-empty;
+    in property <bool> title;
+    /// Where the first glyph sits, measured from this component's own left
+    /// edge (task3850). 6px everywhere -- the default is the mock's
+    /// `.memoedit .box{padding:0 6px}` and must not move, because the other
+    /// four call sites (review's marker label and clip-save prompt,
+    /// `sessions_tile`'s title and note) replace a row of text whose origin was
+    /// already tuned to it. `app.slint`'s hand-built rename box is the app's
+    /// sixth inline field but is not an `InlineEdit`, so it is untouched by
+    /// this.
+    ///
+    /// Left only, and deliberately so. The clip tile is the one caller that has
+    /// to put the editor's text exactly where its comment `Text` was, and in
+    /// slint that distance is this padding alone: `border-width` is drawn
+    /// *inside* the element's bounds and does not inset its children -- unlike
+    /// CSS, where the mock's own `margin-left:-7px` is border 1px + padding 6px
+    /// (`mock/liveback-mock.html:710`). So the number to cancel here is 6, not
+    /// the mock's 7. The right side keeps its 6px whatever this is set to: only
+    /// the left decides the first glyph's origin, and a 0 there as well would
+    /// leave the trailing `Enter` hint touching the border for nothing.
+    in property <length> text-inset: 6px;
+    callback committed(string);
+    callback cancelled();
+    /// Every keystroke, so the caller can keep the draft where a re-render
+    /// cannot take it (task1340).
+    callback edited(string);
+    /// Task4130. A key this field decided not to type, handed on to whoever
+    /// owns the screen's shortcuts: `(event.text, event.modifiers.shift)`.
+    /// Only fires for the four letters the branch below names, and only while
+    /// `io-while-empty` is set. Nothing is wired to it by default -- for the
+    /// four callers that leave the property off it is dead alongside it.
+    callback shortcut-key(string, bool);
+
+    // Task194-D: whichever of the three exits fires first wins. Enter and Esc
+    // both end with the caller tearing this element down, and a teardown can
+    // blur the field on the way out -- without this the blur would fire a
+    // second exit after the first one had already been answered (task3430
+    // changed what that second exit *is*, not the need to swallow it: a blur
+    // arriving after Enter would now cancel a commit that already happened).
+    property <bool> settled: false;
+
+    // task3640. The overlay in `app.slint` cuts its hole out of these four
+    // numbers, so they have to be the field's *window* rect -- the overlay is a
+    // child of the window root, whose coordinate frame `absolute-position` is
+    // already in, so nothing is subtracted from them. Pushed rather than bound:
+    // a global cannot carry a binding to an element's geometry.
+    //
+    // The `changed` pair is what keeps the hole under the field when the row
+    // moves -- the marker list and both grids scroll while an editor is open,
+    // and `absolute-position` follows a scroll on its own (task3110 measured
+    // that in `review.slint`'s export row).
+    property <length> abs-x: root.absolute-position.x;
+    property <length> abs-y: root.absolute-position.y;
+    changed abs-x => {
+        InlineEditVm.field-x = self.abs-x;
+    }
+    changed abs-y => {
+        InlineEditVm.field-y = self.abs-y;
+    }
+    changed width => {
+        InlineEditVm.field-w = self.width;
+    }
+    changed height => {
+        InlineEditVm.field-h = self.height;
+    }
+
+    height: root.title ? 24px : 22px;
+    border-radius: Tokens.shape-xs;
+    border-width: 1px;
+    border-color: Tokens.color-primary;
+    background: Tokens.chrome-inset;
+
+    // Drawn outside the border rather than inside it, so the field's own height
+    // stays exactly the row height it replaced.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 3px;
+        border-color: Tokens.color-primary.with-alpha(0.16);
+    }
+
+    // task3430. The field's own hit area, declared before the layout so the
+    // `TextInput` below still wins where the two overlap (the same layering
+    // `app.slint`'s rename field uses for its own padding). Without it a press
+    // on the 6px padding or on the trailing hint falls straight through this
+    // `Rectangle` to whatever ground area sits under the row -- and every one
+    // of those now cancels the edit, so clicking *inside* the field would end
+    // it. Focusing on the click also puts the caret back where the user aimed
+    // if the press landed off the glyphs.
+    TouchArea {
+        // Qualified: `text` on its own resolves to this component's own
+        // `in property <string> text` before it reaches the enum.
+        mouse-cursor: MouseCursor.text;
+        // task3640. The first write of this field's rect, so the overlay's hole
+        // is not left over the *previous* editor: the four `changed` handlers
+        // above only fire on a change, and a field that opens exactly where the
+        // last one was would never produce one.
+        //
+        // On a child rather than on the component root: no component in this
+        // repo declares a root `init`, and every caller of `InlineEdit` already
+        // sets one at the instantiation site (`init => self.begin-edit()`).
+        // Whether slint runs both is not something to find out by breaking the
+        // focus of all five editors.
+        init => {
+            InlineEditVm.field-x = root.abs-x;
+            InlineEditVm.field-y = root.abs-y;
+            InlineEditVm.field-w = root.width;
+            InlineEditVm.field-h = root.height;
+        }
+        clicked => {
+            input.focus();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: root.text-inset;
+        padding-right: 6px;
+        spacing: 6px;
+
+        input := TextInput {
+            // Poured in once, not bound (task1340). A binding is re-evaluated
+            // when the row model behind `root.text` is rewritten, and a
+            // re-render while the editor is open would overwrite the draft
+            // with the stored title -- which is exactly what the user was in
+            // the middle of replacing. `init` on this child runs before the
+            // caller's own `init => begin-edit()`, so the select-all still
+            // selects the right text.
+            init => {
+                self.text = root.text;
+            }
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            single-line: true;
+            font-size: root.title ? 12.5px : 11px;
+            font-weight: root.title ? 600 : Tokens.type-body-weight;
+            color: Tokens.color-on-surface;
+            text-cursor-width: 1.5px;
+            // Opaque, with a foreground to match (task1140). At 30% primary
+            // over the field's own ground the selected run came out barely
+            // tinted, and with no `selection-foreground-color` anywhere in the
+            // repo the glyphs kept `color-on-surface` -- so selecting text was
+            // something you had to squint to see. Every `TextInput` in the app
+            // now carries this same pair.
+            //
+            // 2026-09-12 (the user, in person): the pair is swapped out while
+            // an IME conversion is open. slint draws the preedit *with these*
+            // -- `sharedparley::draw_text_input` replaces the selection
+            // range with the preedit range whenever one exists (1.17.1,
+            // sharedparley.rs:1417) -- so unconverted kana came out looking
+            // exactly like a range selection. There is no underline to ask
+            // for: nothing in the .slint API reaches the preedit run, and no
+            // renderer in 1.17 draws one. The swap is what is left, and it
+            // is exact rather than approximate: while `preedit-text` is
+            // non-empty slint never paints a real selection, so these two
+            // values can only ever land on the composition. 0.16 is the
+            // field's own focus-ring alpha above. The user chose this over a
+            // bare undecorated run on 2026-09-12, knowing it is not the
+            // underline a Windows field would draw.
+            selection-background-color: self.preedit-text != ""
+                ? Tokens.color-primary.with-alpha(0.16)
+                : Tokens.color-primary;
+            selection-foreground-color: self.preedit-text != ""
+                ? Tokens.color-on-surface
+                : Tokens.color-on-primary;
+            edited => {
+                root.edited(self.text);
+            }
+            accepted => {
+                root.commit-once();
+            }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.cancel-once();
+                    return accept;
+                }
+                // Task4130, 2026-09-09 (the user's ruling, in person: 案 (b)).
+                // While the field is empty, `i` and `o` are the screen's
+                // shortcuts, not text. The 確定ステップ opens this field with
+                // focus, and `reject` below does not merely decline a key --
+                // in slint's `TextInput` it hands the key to the built-in
+                // editing behaviour, which **inserts the character and
+                // consumes the event**. So an ancestor `FocusScope` never sees
+                // it: forwarding has to happen here, with `accept`, or not at
+                // all.
+                //
+                // The line is state-dependent, not entry-dependent, and it is
+                // re-evaluated on every keystroke -- no armed/disarmed flag:
+                //   - empty -> first character typed (an IME preedit counts):
+                //     `i` / `o` are text from that moment. The shortcut dies.
+                //   - non-empty -> deleted back to empty: interception is
+                //     back, with no extra wiring. It is *not* "dead for the
+                //     rest of this edit".
+                //   - anything but these four letters is always text.
+                // `preedit-text` is part of the emptiness test on purpose: with
+                // a Japanese IME the `i` arrives as a preedit (the precedent is
+                // `SearchField` above, which tests the same pair).
+                //
+                // **The cost is accepted, not overlooked**: a comment cannot
+                // *begin* with i or o any more (only the first character is
+                // affected). The user chose that on 2026-09-09 knowing it.
+                //
+                // It therefore does **not** satisfy
+                // `.agents/docs/design/round19-design-response.md` §1
+                // literally -- §1 asks for the range block to stay live during
+                // the step unconditionally, and here one typed character ends
+                // it. That gap is the user's decision, not a defect.
+                //
+                // Widening was considered and **declined** on the same day:
+                // the same `reject` swallows every other bare-letter shortcut
+                // (`k` / `m` / `f` / `j` / `l` / digits / `,` / `.`), and the
+                // user kept the interception to `i` / `o` only. Should that
+                // ever be revisited, the shape is one place: this literal list,
+                // opt-in per caller through `io-while-empty`. Do not widen it
+                // without a new ruling.
+                if (root.io-while-empty
+                    && input.text == ""
+                    && input.preedit-text == ""
+                    && (event.text == "i" || event.text == "I"
+                        || event.text == "o" || event.text == "O")) {
+                    root.shortcut-key(event.text, event.modifiers.shift);
+                    return accept;
+                }
+                reject
+            }
+            // Losing focus discards. This is a deliberate reversal of
+            // task194-D, which had made blur *commit*: 194-D read "clicking
+            // another row closes the editor and drops what was typed" as the
+            // only path in the app that silently lost input, and made the blur
+            // save instead. The user's instruction of 2026-09-07 overrides
+            // that -- 「他をクリックしたらフォーカスを失って戻るようにして
+            // 編集もキャンセルでよい」, and 「全部同じ挙動だよ」 for all six
+            // fields (task3430). 194-D's concern is real and is now the
+            // accepted cost: a stray click while a long note is half-typed
+            // throws the whole draft away, with no warning and no undo.
+            //
+            // Blur alone does not end an edit everywhere, because a `TouchArea`
+            // takes no key focus -- a press on a plain button leaves this field
+            // focused. Each screen therefore also clears its own "which row is
+            // being edited" on a press outside the field, and the teardown that
+            // follows is what brings the exit back through here.
+            //
+            // Since task3640 neither path is what usually runs: `app.slint`
+            // lays a full-window overlay while any editor is open, and it takes
+            // the press before a button or a ground area can. **That first
+            // press is eaten -- the button under it does not act -- and that is
+            // the user's ruling of 2026-09-08, not an oversight.** The screens'
+            // ground areas are kept underneath it because 3430 verified them on
+            // the machine and unpicking them is a separate job.
+            //
+            // 2026-09-09 (task3860), appended: the ruling above stands for
+            // five of the six editors. The user granted one exception -- the
+            // 確認 screen's 確定ステップ, where the overlay's hole widens to
+            // the track and the panel's range block, so a press there acts
+            // instead of being eaten. round19 §1 asks for the range edit to
+            // live inside that step, and being eaten would have left it with
+            // no way to move a boundary at all. `InlineEditVm`'s `track-*` /
+            // `range-*` carry that hole; nothing about this field changes.
+            //
+            // Blur still discards. That used to be what a press on the range
+            // block's *typed* time did -- the row's own `TextInput` took key
+            // focus, this field blurred, and the step ended before a keystroke
+            // landed. 2026-09-09, in person, the user withdrew the typed time
+            // rather than this rule: `RangeRow`'s value cell no longer takes a
+            // press at all (see `ui/review.slint`), so no control inside the
+            // widened hole takes key focus. The steppers, 再生位置に合わせる
+            // and the track's own drag are `TouchArea`s, which take none, and
+            // those are the controls the widened hole buys. A press on the
+            // value cell still ends the step -- measured 2026-09-09 -- but
+            // **which layer takes it was not separated**: with the cell's own
+            // `TouchArea` disabled the press can reach the panel's ground area
+            // (task3430), and `app.slint`'s overlay is the other candidate.
+            // Neither path logs, so do not write one of them down as the
+            // cause. What changed is only that the cell no longer promises a
+            // caret on the way out.
+            changed has-focus => {
+                if (!self.has-focus) {
+                    root.cancel-once();
+                }
+            }
+        }
+
+        // The hint is a trailing label sharing this layout with the input, so
+        // it keeps its width for as long as it is here (task3180). Reading
+        // `input.text` directly is what makes `hint-only-while-empty` cheap:
+        // the binding re-evaluates on every keystroke, with no draft copy for
+        // the caller to keep in sync.
+        // 2026-09-12 (the user). `preedit-text` is in the emptiness
+        // test alongside `text`, the same pair `SearchField` and the
+        // `io-while-empty` branch above already test: mid-conversion the IME
+        // draft is not in `text` yet, so the hint stayed up while kana were
+        // being typed -- and a `TextInput`'s layout *min* width is its own
+        // text width (`text_layout_info`, no elide, no wrap), so every extra
+        // character of the draft shoved the hint further right and off the
+        // end of the field.
+        if root.hint != "" && (!root.hint-only-while-empty || (input.text == "" && input.preedit-text == "")): Text {
+            text: root.hint;
+            vertical-alignment: center;
+            font-size: 9.5px;
+            color: Tokens.color-on-surface-variant;
+        }
+    }
+
+    function commit-once() {
+        if (!root.settled) {
+            root.settled = true;
+            root.committed(input.text);
+        }
+    }
+
+    // The other half of the pair (task3430). Esc and blur share it, so an Esc
+    // that tears the field down cannot be followed by a second `cancelled()`
+    // from the blur the teardown produces.
+    function cancel-once() {
+        if (!root.settled) {
+            root.settled = true;
+            root.cancelled();
+        }
+    }
+
+    /// Named `begin-edit` rather than `focus`, which every element already has:
+    /// opening an inline edit is "focus *and* select everything", so a caller
+    /// that only focused would leave the old text for the user to clear.
+    public function begin-edit() {
+        input.focus();
+        input.select-all();
+    }
+}
+
+// A scroll area with the mock's scrollbar (round6, 2026-08-16). slint's own
+// `ScrollView` offers no way at the styling of its `ScrollBar`, so this is the
+// same shape it uses -- a non-interactive `Flickable` with a bar drawn beside
+// it -- with the bar drawn here instead.
+//
+// The lane is always reserved (the mock's `scrollbar-gutter: stable`): the
+// viewport is inset by its width whether or not there is anything to scroll, so
+// a row's right edge does not move as the list grows past one screen. That is
+// the one behavioural difference from `ScrollView`, whose bar floats over the
+// content.
+export component AppScroll {
+    in property <length> viewport-width <=> flickable.content-width;
+    in property <length> viewport-height <=> flickable.content-height;
+    in-out property <length> viewport-x <=> flickable.content-x;
+    in-out property <length> viewport-y <=> flickable.content-y;
+    out property <length> visible-width <=> flickable.width;
+    out property <length> visible-height <=> flickable.height;
+    // How short the thumb may get: 48px for rows and tiles, 36px for the
+    // marker list, which is a smaller column of smaller things.
+    in property <length> min-thumb: 48px;
+    // The part of a wheel notch this view could not use because it is already
+    // at that end (task3110). Nobody listens by default, so a scroll that runs
+    // out of room still just stops -- only a caller that has somewhere to pass
+    // it on wires this up (the marker list, into the panel behind it).
+    //
+    // A callback rather than "reject the event and let it bubble": rejecting
+    // hands the wheel to the `Flickable` below this `TouchArea`, and a
+    // `Flickable` with any overflow at all accepts a wheel it cannot act on
+    // (`process_wheel_event` sets `last_scroll_event` on every
+    // `TouchPhase::Moved`, then returns `EventAccepted` via
+    // `should_capture_scroll`), so nothing would ever reach an ancestor.
+    callback overflow-scrolled(length);
+
+    // How far in from this component's right edge the lane sits (task4320).
+    // 0 by default, so an `AppScroll` that does not reach the window edge is
+    // untouched; the four that do are handed `Tokens.resize-band-inset`, which
+    // is the window's resize band in logical px (0 while maximized).
+    //
+    // The lane is *moved*, not made wider, and the viewport loses the same
+    // width: the thumb keeps its 4px/6px and the lane its 12px, and the strip
+    // left over at the right edge belongs to the band. Without this the thumb's
+    // right edge sits 4px in from the client edge against an 8px band, so three
+    // of its four columns are pressed-through to winit's resize (task4120).
+    in property <length> right-inset: 0px;
+
+    // How long a *programmatic* `viewport-y` move takes. See the `animate` on
+    // the flickable below: 0ms is the immediate scroll every caller had, and a
+    // caller that jumps the view itself (the clip grid, scrolling an expansion
+    // into view) raises it while that jump is on.
+    in property <duration> scroll-tween: 0ms;
+
+    min-height: 50px;
+    min-width: 50px;
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    preferred-height: 100%;
+    preferred-width: 100%;
+
+    property <length> lane: 12px;
+    // 2026-09-13 (the user): the rod used to run into the view's top and bottom
+    // edges, so at either end its rounded cap was flush against the boundary
+    // and read as cut off. The travel is inset by this instead -- the thumb
+    // still reaches both ends of the range, it just never touches the edge.
+    property <length> lane-pad: 4px;
+    // `out` since task3110: the panel's scroll has to clamp a handed-over
+    // delta against the room its own view still has.
+    out property <length> overflow: Math.max(0px, flickable.content-height - flickable.height);
+    property <length> travel: Math.max(0px,
+        flickable.height - 2 * root.lane-pad - root.thumb-length);
+    property <length> thumb-length: root.overflow <= 0px
+        ? 0px
+        // The `min` keeps a short view's thumb inside the padded lane: without
+        // it the 48px floor could outrun the room left after the inset.
+        : Math.min(flickable.height - 2 * root.lane-pad,
+            Math.max(root.min-thumb,
+                flickable.height * flickable.height / flickable.content-height));
+
+    flickable := Flickable {
+        // As in `ScrollView`: the wheel still scrolls, but dragging the content
+        // does not -- the history's marquee selection needs that drag.
+        interactive: false;
+        x: 0;
+        y: 0;
+        width: parent.width - root.lane - root.right-inset;
+        height: parent.height;
+
+        // Here rather than on the caller's `AppScroll` element: `viewport-y` up
+        // there is a two-way alias (`<=>`) of this property, and an `animate`
+        // on the alias never fires -- the clip grid carried one since task3880
+        // and its scroll-into-view still jumped the whole way on the first
+        // frame (measured 2026-09-13: the heading was already at its final y
+        // 60ms in, while the tile was a third of the way open).
+        //
+        // 0ms by default, so every other `AppScroll` and every wheel notch is
+        // exactly as immediate as it was -- the TouchArea below exists to keep
+        // the wheel on the same frame, and an animation here would put slint's
+        // easing back on top of it. Only a caller with a jump worth softening
+        // raises it, and only for as long as that jump lasts.
+        animate content-y {
+            duration: root.scroll-tween;
+            easing: Tokens.motion-curve;
+        }
+
+        // The wheel, answered here rather than by the Flickable. slint 1.17
+        // gives every mouse-wheel notch a 180ms deceleration animation
+        // (`WHEEL_SCROLL_DURATION` in `i-slint-core`'s flickable.rs), so the
+        // content keeps sliding after the wheel has stopped and reads as lag.
+        // Accepting the event here moves `viewport-y` the whole notch on the
+        // same frame, and the Flickable never sees it -- it only intercepts a
+        // wheel before its children once it has handled one itself.
+        //
+        // It wraps the children rather than sitting under them: a rejected
+        // scroll bubbles to an ancestor, not to a sibling. Presses still reach
+        // the children first, so the history's marquee is untouched.
+        //
+        // ponytail: this takes the touchpad's phased path with it, which had no
+        // animation to begin with and now loses its fling on release. Give the
+        // handler a `event.delta-y == 0` escape if a trackpad ever has to feel
+        // native here.
+        TouchArea {
+            scroll-event(event) => {
+                // What the clamp is about to throw away, reported before it is
+                // thrown (task3110). Zero for every notch that lands inside the
+                // range, so a listener only hears from the two ends.
+                if (flickable.content-y + event.delta-y != Math.clamp(
+                        flickable.content-y + event.delta-y, -root.overflow, 0px)) {
+                    root.overflow-scrolled(flickable.content-y + event.delta-y
+                        - Math.clamp(flickable.content-y + event.delta-y,
+                            -root.overflow, 0px));
+                }
+                flickable.content-y = Math.clamp(
+                    flickable.content-y + event.delta-y, -root.overflow, 0px);
+                return accept;
+            }
+
+            @children
+        }
+    }
+
+    Rectangle {
+        x: parent.width - root.lane - root.right-inset;
+        width: root.lane;
+        height: 100%;
+        background: transparent;
+
+        thumb := Rectangle {
+            visible: root.overflow > 0px;
+            // `border:4px solid transparent` on a 12px lane, `3px` on hover:
+            // a 4px rod that fattens to 6px rather than a 12px slab.
+            width: bar.has-hover || bar.pressed ? 6px : 4px;
+            x: (parent.width - self.width) / 2;
+            height: root.thumb-length;
+            y: root.lane-pad + (root.overflow <= 0px
+                ? 0px
+                : -flickable.content-y / root.overflow * root.travel);
+            border-radius: self.width / 2;
+            background: bar.has-hover || bar.pressed
+                ? Tokens.color-outline
+                : Tokens.chrome-hairline-strong;
+        }
+
+        bar := TouchArea {
+            // Where in the thumb the drag started, so it does not jump to
+            // centre itself under the pointer on the first move.
+            property <length> grab;
+
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    self.grab = self.pressed-y - thumb.y;
+                }
+            }
+
+            moved => {
+                if (root.overflow > 0px && root.travel > 0px) {
+                    // `grab` was taken against the padded `thumb.y`, so the
+                    // inset comes back off here before the ratio.
+                    root.viewport-y = -Math.min(root.overflow, Math.max(0px,
+                        (self.mouse-y - self.grab - root.lane-pad)
+                            / root.travel * root.overflow));
+                }
+            }
+        }
+    }
+}
+
+// ---------- transport pieces (task3510) ----------
+// Moved here from `review.slint` so the clip player (task3520) can draw the
+// same transport without a second copy. Both read `Dark` directly rather than
+// the themed set: everything drawn on a video stage stays dark while the rest
+// of the screen follows the theme (round16 §2), and that holds wherever the
+// stage is.
+
+// `.icon-btn` with a filled/stroked transport glyph.
+export component TransportBtn inherits Rectangle {
+    in property <string> icon;
+    in property <bool> filled;
+    // The volume toggle carries state in its tint (round 4 §2-B2): muted drops
+    // to the variant colour. Everything else keeps the default.
+    in property <color> tint: Dark.color-on-surface;
+    // The mock's `.t-ic svg` is 20px, not 18: the styleguide only bounds other
+    // UI icons to 14-20px (§"その他の UI アイコン"), so the mock is the source
+    // here and 20 sits at the top of that range. Box stayed 30px (task2300);
+    // this is that task's leftover glyph half (task2440).
+    in property <length> icon-size: 20px;
+    // Toggles that are *on* take the selected plate (round5 §4-C).
+    in property <bool> on;
+    // A button whose target is not there to be toggled (task1030). Greyed and
+    // inert rather than hidden: the row keeps its shape across the transition.
+    in property <bool> disabled;
+    callback clicked;
+
+    // The styleguide's `.t-ic` is 30px, not the 28px small-control token:
+    // round11 §0-3 narrowed the 28px settlement to the settings family
+    // (`.sbtn` etc.), leaving `.btn` and `.t-ic` at 30. Literal like `Btn`
+    // (task2290) -- a token would drag `.sbtn` along (task2300).
+    width: 30px;
+    height: 30px;
+    border-radius: Tokens.shape-s;
+    opacity: root.disabled ? 0.38 : 1.0;
+    background: root.on
+        ? Dark.chrome-selected
+        : touch.pressed
+            ? Dark.chrome-active
+            : touch.has-hover ? Dark.chrome-hover : transparent;
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    AppIcon {
+        commands: root.icon;
+        stroke-color: root.filled ? transparent : (root.on ? Dark.color-primary : root.tint);
+        fill-color: root.filled ? (root.on ? Dark.color-primary : root.tint) : transparent;
+        size: root.icon-size;
+        // No `weight` override: the styleguide states plainly that "その他の UI
+        // アイコンは 14〜20px・線 1.5px" and the mock's `.t-ic svg` sets no
+        // stroke-width, inheriting its global 1.5. The 2px that sat here had no
+        // recorded source, so stroke width stays decided in one place --
+        // `AppIcon`'s 1.5px default (task2460, task2440's leftover).
+    }
+}
+
+// The transport's volume bar, lifted out of `review.slint` verbatim (task3510).
+// `ratio` and `muted` come in, and every gesture leaves as `ratio-changed` --
+// the component holds no state of its own, so the caller's model stays the one
+// place a volume lives.
+//
+// Not `changed`: that word opens slint's property-observer statement
+// (`changed ratio => {}`), so a callback cannot take it.
+export component VolumeSlider inherits Rectangle {
+    in property <float> ratio;
+    in property <bool> muted;
+    callback ratio-changed(float);
+
+    width: 84px;
+    // Follows the transport row's 30px so the groove and knob, which centre on
+    // `parent.height`, land on the row's centre whichever way the layout aligns
+    // a shorter child (task2300).
+    height: 30px;
+
+    Rectangle {
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: Dark.chrome-hairline-strong;
+    }
+
+    // Muted drains the fill and hides the knob; the ratio itself is untouched,
+    // so unmuting comes back to the same volume (round5 §4-C).
+    if !root.muted: Rectangle {
+        x: 0;
+        y: (parent.height - 4px) / 2;
+        width: parent.width * root.ratio;
+        height: 4px;
+        border-radius: 2px;
+        background: Dark.color-primary;
+    }
+
+    if !root.muted: Rectangle {
+        x: parent.width * root.ratio - 5px;
+        y: (parent.height - 10px) / 2;
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        background: Dark.color-primary;
+    }
+
+    TouchArea {
+        // Same as the seek track: the whole bar is a click target, so pointer,
+        // not a resize glyph.
+        mouse-cursor: pointer;
+        pointer-event(event) => {
+            if ((event.kind == PointerEventKind.down && event.button == PointerEventButton.left)
+                || (event.kind == PointerEventKind.move && self.pressed)) {
+                root.ratio-changed(max(0.0, min(1.0, self.mouse-x / root.width)));
+            }
+        }
+        // Wheel over the slider, ±5% (task151).
+        scroll-event(event) => {
+            root.ratio-changed(max(0.0, min(1.0,
+                root.ratio + (event.delta-y > 0 ? 0.05 : -0.05))));
+            return accept;
+        }
+    }
+}

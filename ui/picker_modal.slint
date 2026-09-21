@@ -1,0 +1,842 @@
+// The target picker, as a flyout off the rail's キャプチャ button (round21
+// §2, task t260913-ec28; before that a centred dialog, task170 / round5 §5).
+//
+// It deliberately does not reuse the shell's generic overlay (scrim + pane
+// header + top-right ×): borrowing the shell is exactly what made the old
+// picker feel like a title bar with a close button bolted on. Since round21
+// there is no header and no × at all -- a click outside and Escape are the
+// ways out -- and no scrim either: the layer behind the panel only catches
+// that outside click. The sizes are screen-local literals from the design,
+// not new tokens.
+//
+// Strings come from `ui_state::targets` (W-6 / W-7 / W-8 / W-11 / W-12 / W-13);
+// nothing user-visible is spelled here.
+
+import { Dark, Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { Pill, PillVariant, Alert, Chip, EmptyState, SegmentTabs, AppScroll, Tooltip, SearchField } from "controls.slint";
+import { TargetTile, TileMedia } from "targets.slint";
+
+// The gap hatch, as a 45deg ruled field. `repeating-linear-gradient` has no
+// slint equivalent, so the stripes are a path stretched over the plate; the
+// viewbox is 16:9 so they land near 45deg once scaled.
+global Hatch {
+    out property <string> commands: "M-64 64L0 0M-58 64L6 0M-52 64L12 0M-46 64L18 0M-40 64L24 0M-34 64L30 0M-28 64L36 0M-22 64L42 0M-16 64L48 0M-10 64L54 0M-4 64L60 0M2 64L66 0M8 64L72 0M14 64L78 0M20 64L84 0M26 64L90 0M32 64L96 0M38 64L102 0M44 64L108 0M50 64L114 0M56 64L120 0M62 64L126 0M68 64L132 0M74 64L138 0M80 64L144 0M86 64L150 0M92 64L156 0M98 64L162 0M104 64L168 0M110 64L174 0";
+}
+
+// One 16:9 thumbnail with its badges. No caption row underneath any more: the
+// title moved onto the frame, which is what buys the grid its density.
+component Tile inherits Rectangle {
+    in property <TargetTile> tile;
+    // The trailing cells of the last row. The grid is a flat model laid out in
+    // fixed-width rows, so a short last row still has to be filled out -- and a
+    // blank cell must not draw a card or answer a click.
+    in property <bool> blank;
+    in property <string> recording-label;
+    in property <string> primary-label;
+    in property <string> capture-label;
+    in property <string> stop-label;
+    // One callback for both halves of the toggle (task2030 判断1). It used to
+    // have a `stop-clicked` beside it, from when a click on a recording tile
+    // could only mean "close the modal" and stopping needed a door of its own.
+    callback clicked;
+
+    // Live for the whole tile, not just the plate: hover *is* the selection
+    // here (round5 §5), so everything below reads it.
+    out property <bool> lit: !root.blank
+        && !root.tile.disabled
+        && (touch.has-hover || stop_touch.has-hover);
+
+    clip: true;
+    border-radius: root.blank ? 0px : Tokens.shape-s;
+    border-width: root.blank ? 0px : 1px;
+    // Neutral white, not primary: the colour on this tile belongs to the
+    // キャプチャ chip in the middle of it, and a primary edge on every hover
+    // spends the accent on "the pointer is here" (round7 §2-5). Light theme
+    // takes the navy at the same 60% (round21 §2-5: rgba(31,42,58,.6)) --
+    // white on the light plate would not read as an edge at all.
+    property <color> ring: Tokens.light ? #1f2a3a99 : #ffffff99;
+    border-color: root.lit ? root.ring : Tokens.chrome-hairline;
+    background: root.blank
+        ? transparent
+        : root.tile.media == TileMedia.none
+            ? Tokens.color-gap-bg
+            // Waiting reads as "this is coming" only if it is not a flat black
+            // box; the pulse below sits on top of this fill.
+            : root.tile.media == TileMedia.loading
+                ? Tokens.color-surface-container
+                : Tokens.chrome-inset;
+
+    if !root.blank && root.tile.media == TileMedia.none: Path {
+        width: 100%;
+        height: 100%;
+        fit: fill;
+        viewbox-width: 112;
+        viewbox-height: 64;
+        commands: Hatch.commands;
+        stroke: Tokens.color-gap-fg;
+        stroke-width: 0.55px;
+        opacity: 0.42;
+        fill: transparent;
+    }
+
+    if !root.blank && root.tile.media == TileMedia.loading: AppIcon {
+        commands: Icons.loading;
+        stroke-color: Tokens.color-on-surface-variant;
+        size: 20px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        // Same trick as settings.slint's hotkey pulse.
+        opacity: 0.35 + 0.55 * abs(sin(animation-tick() / 1.4s * 180deg));
+    }
+
+    if !root.blank && root.tile.media == TileMedia.ready: Image {
+        width: 100%;
+        height: 100%;
+        image-fit: cover;
+        source: root.tile.thumbnail;
+    }
+
+    // "brightness 50%", which slint has no filter for: a half-black plate over
+    // the frame is the same picture. Declared before the badges, so only the
+    // thumbnail dims and the labels stay at full contrast.
+    if root.lit: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000080;
+    }
+
+    // A target you cannot pick reads as unavailable without also becoming
+    // unreadable: the plate dims, its pill does not. An overlay rather than
+    // `opacity`, because an opacity layer swallows the hit test.
+    if !root.blank && root.tile.disabled: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000073;
+    }
+
+    // The inner edge of the hover ring (design §5: the band inside is the same
+    // colour), which is what makes the selection read on a bright frame.
+    // round21 §2-5 thickened it from 1px to 2px (the mock's inset box-shadow),
+    // on top of the 1px border: 3px of ring in all.
+    if root.lit: Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        border-radius: Tokens.shape-s - 1px;
+        border-width: 2px;
+        border-color: root.ring;
+        background: transparent;
+    }
+
+    // ---------- badge: what this tile is ----------
+    if !root.blank: Rectangle {
+        x: 6px;
+        y: parent.height - self.height - 6px;
+        height: badge.preferred-height;
+        width: min(badge.preferred-width, parent.width * 0.78);
+        border-radius: Tokens.shape-xs;
+        border-width: 1px;
+        // round16 §2-2: the badges sit on the picture, so they keep the dark
+        // ground they always had and the dark set's foregrounds with it.
+        border-color: Dark.chrome-hairline;
+        background: #0d0f11d1;
+        clip: true;
+
+        badge := HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 8px;
+            padding-top: 3px;
+            padding-bottom: 3px;
+            spacing: 6px;
+
+            if root.tile.has-icon: Image {
+                width: 14px;
+                height: 14px;
+                image-fit: contain;
+                source: root.tile.app-icon;
+                y: (parent.height - self.height) / 2;
+            }
+
+            Text {
+                text: root.tile.title;
+                overflow: elide;
+                vertical-alignment: center;
+                font-size: 10.5px;
+                color: Dark.color-on-surface;
+            }
+        }
+    }
+
+    // A screen's resolution, opposite its name. Windows leave this empty.
+    if !root.blank && root.tile.resolution != "": Rectangle {
+        x: parent.width - self.width - 6px;
+        y: parent.height - self.height - 6px;
+        height: resolution.preferred-height;
+        width: resolution.preferred-width;
+        border-radius: Tokens.shape-xs;
+        border-width: 1px;
+        border-color: Dark.chrome-hairline;
+        background: #0d0f11d1;
+
+        resolution := HorizontalLayout {
+            padding-left: 7px;
+            padding-right: 7px;
+            padding-top: 3px;
+            padding-bottom: 3px;
+
+            Text {
+                text: root.tile.resolution;
+                vertical-alignment: center;
+                font-size: 10px;
+                color: Dark.color-on-surface-variant;
+            }
+        }
+    }
+
+    // ---------- top-left: the one state worth saying up front ----------
+    // Recording outranks everything (it is why the tile behaves differently),
+    // then プライマリ, then 自動録画, then 最小化中. One slot for all of them:
+    // プライマリ is a screen and 自動録画 is a window, so those two never meet,
+    // and the mock draws no tile wearing two marks (round13 §1 keeps the badge
+    // "既存 `.pmark` と同位置"). 自動録画 sits above 最小化中 because it is what
+    // the tile *is* rather than how it happens to be sitting, and round13 §2
+    // moved the 最小化中 explanation onto the review screen.
+    // Except the recording one, which sits top *right* (task235): it is the
+    // tile you are looking for, and the right corner is where the eye lands
+    // after the thumbnail. `blocked-reason` below yields the corner back.
+    if !root.blank && root.tile.recording: Pill {
+        x: parent.width - self.width - 6px;
+        y: 6px;
+        icon: Icons.record;
+        label: root.recording-label;
+        variant: PillVariant.error;
+        on-thumbnail: true;
+    }
+
+    if !root.blank && !root.tile.recording && root.tile.primary: Pill {
+        x: 6px;
+        y: 6px;
+        icon: Icons.monitor;
+        label: root.primary-label;
+        variant: PillVariant.neutral;
+        on-thumbnail: true;
+    }
+
+    // round13 §1: state only. The hover verbs that used to share this control
+    // moved to the review panel's toggle row, so nothing here answers a click.
+    if !root.blank && !root.tile.recording && root.tile.auto-capture: Pill {
+        x: 6px;
+        y: 6px;
+        icon: Icons.check;
+        label: root.tile.auto-capture-label;
+        variant: PillVariant.primary;
+        on-thumbnail: true;
+    }
+
+    if !root.blank
+        && !root.tile.recording
+        && !root.tile.primary
+        && !root.tile.auto-capture
+        && root.tile.state-label != "": Pill {
+        x: 6px;
+        y: 6px;
+        icon: Icons.info;
+        label: root.tile.state-label;
+        variant: PillVariant.neutral;
+        on-thumbnail: true;
+    }
+
+    // Middle of the tile (the user, 2026-09-20): it used to sit in a top
+    // corner, where 最小化中は録画できません was a long sentence squeezed beside
+    // the 最小化中 badge. The centre slot is free on exactly these tiles --
+    // `action_plate` below only shows on a tile that can be picked, and a tile
+    // with a reason never can.
+    if !root.blank && root.tile.blocked-reason != "": Pill {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        icon: Icons.warning;
+        label: root.tile.blocked-reason;
+        variant: PillVariant.warning;
+        on-thumbnail: true;
+    }
+
+    // Before the hover action below, so the stop button wins the hit test where
+    // they overlap: last-declared is on top in slint, and with this area last a
+    // press on キャプチャを停止 reached the tile instead, which refuses the target it
+    // is already recording -- the recording could not be stopped from here at
+    // all. Everything above is a Pill or an Image and grabs nothing.
+    touch := TouchArea {
+        enabled: !root.blank && !root.tile.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // ---------- hover: the action, in the middle ----------
+    // Two verbs in one slot (task175, task2030 判断1): the tile is a toggle --
+    // every other tile starts one more capture beside whatever is running, and
+    // the one already being recorded stops it. Same box -- H32, pad 0/14,
+    // shape-xs -- so the button does not move as the pointer crosses the grid;
+    // only its colour and its word change.
+    action_plate := Rectangle {
+        visible: root.lit && root.tile.action != 0;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        height: 32px;
+        width: go.preferred-width;
+        border-radius: Tokens.shape-xs;
+        // round27 §1 (2026-09-20, mock `.go` / `.go.stoprec`): starting is an
+        // outline -- a dark translucent ground (`rgba(36,50,66,.55)`, the dimmed
+        // thumbnail shows through), a 1px primary edge, primary word and dot --
+        // and holds no red at all: red means "recording", so only the LIVE
+        // badge and the stop half carry it. The stop half keeps round9 §1-1's
+        // filled error-container, with a transparent edge so the two halves
+        // keep one size.
+        //
+        // `Dark.color-primary` in both themes, not `Tokens`: the MD keeps the
+        // ground dark in light too because the plate always sits on a dark
+        // thumbnail, and light's #007496 on that ground would all but vanish
+        // -- the same call round16 §2-2 made for the pills over a thumbnail.
+        background: root.tile.action == 2 ? Tokens.color-error-container : #2432428c;
+        border-width: 1px;
+        border-color: root.tile.action == 2 ? transparent : Dark.color-primary;
+        drop-shadow-blur: 18px;
+        drop-shadow-offset-y: 6px;
+        drop-shadow-color: #00000073;
+
+        go := HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 6px;
+            alignment: center;
+
+            // The record dot belongs to starting only: a dot beside キャプチャを停止
+            // would read as "recording" rather than as the way out of it. The
+            // word's colour, not red, since round27 §1.
+            if root.tile.action != 2: Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Dark.color-primary;
+                y: (parent.height - self.height) / 2;
+            }
+
+            if root.tile.action == 2: AppIcon {
+                commands: Icons.stop;
+                stroke-color: transparent;
+                fill-color: Tokens.color-on-error-container;
+                size: 12px;
+                y: (parent.height - self.height) / 2;
+            }
+
+            Text {
+                text: root.tile.action == 2 ? root.stop-label : root.capture-label;
+                vertical-alignment: center;
+                font-size: Tokens.type-body-size;
+                font-weight: 700;
+                color: root.tile.action == 2
+                    ? Tokens.color-on-error-container
+                    : Dark.color-primary;
+            }
+        }
+
+    }
+
+    // Only the button stops: a stray click on the frame closes the modal and
+    // leaves the recording running, which is what it did before.
+    //
+    // `enabled`, never `if root.lit`: pressing here takes the mouse grab off
+    // `touch`, which drops *its* hover -- and a conditional keyed on hover then
+    // deletes this very area between the press and the release, so no click is
+    // ever reported. Six presses in a row went nowhere before this was found.
+    // A sibling with the plate's geometry copied onto it, declared after
+    // `touch` so it wins the overlap: slint hit-tests front-to-back.
+    stop_touch := TouchArea {
+        enabled: !root.blank && root.tile.action == 2;
+        x: action_plate.x;
+        y: action_plate.y;
+        width: action_plate.width;
+        height: action_plate.height;
+        mouse-cursor: pointer;
+        clicked => {
+            // The same callback the rest of the tile fires (task2030 判断1):
+            // the tile is one toggle, and which half it is on is decided in
+            // Rust from what is recording -- not by two callbacks that could
+            // disagree about it.
+            root.clicked();
+        }
+    }
+
+}
+
+export component PickerModal inherits Rectangle {
+    in property <[TargetTile]> tiles;
+    in property <[string]> tab-labels;
+    in property <int> tab;
+    in property <string> error-text;
+    in property <bool> error-dismissible;
+    in property <string> error-dismiss-label;
+    in property <string> empty-text;
+    in property <bool> empty-is-filter;
+    in property <string> search-placeholder;
+    in property <string> clear-label;
+    in property <string> recording-label;
+    in property <string> primary-label;
+    in property <string> capture-label;
+    in property <string> stop-label;
+    // The hover titles that go with those two words (task2180, mock `.go` /
+    // `.go.stoprec`). One tooltip shows one of them at a time, so they arrive
+    // on the modal rather than per tile.
+    in property <string> capture-title;
+    in property <string> stop-title;
+
+    // Fired once per open, from the dialog's `init`: the modal only exists
+    // while it is open, which is what makes this the "opened" moment the sort
+    // order is allowed to change in (design §5).
+    callback opened();
+    callback closed();
+    callback tab-changed(int);
+    callback search-changed(string);
+    callback error-dismissed();
+    callback tile-clicked(string);
+
+    // The click-catcher. round21 §2-1: no scrim any more -- transparent in
+    // both themes, so the pane behind stays in view -- but the layer itself
+    // stays, because the panel is its child and a click that reaches this one
+    // was a click outside the panel.
+    background: transparent;
+
+    // ---------- the flyout's own geometry (round21 §2-1 / §2-3 / §2-4) ----------
+    // `min(700px, 100% - 120px)`. No floor any more (task t260913-ec28 判断4):
+    // the 568px one belonged to the centred dialog.
+    // Passed in, not computed here (t260917-099c): app.slint's title-bar hot
+    // zone has to step around this panel, and an id inside an `if` block is
+    // not reachable from its siblings, so the formula lives with the caller
+    // (`picker-dialog-width` in app.slint) and flows in. No default -- a
+    // second copy of the formula here is exactly what this avoids.
+    in property <length> dialog-width;
+    // The mock's `max-height: 100% - 74px` was 44 above + 30 below; the panel
+    // now sits at y 9 (see `dialog` below), so the same 30px bottom margin is
+    // `100% - 39px`. Keeping the mock's 74 would leave 65px of slack under the
+    // panel and break ec28's arithmetic that only the panel's 20px bottom
+    // padding is ever covered by the threshold warning bar.
+    // Not written as `max-height` on the panel: that is a hint to a parent
+    // *layout*, and the panel sits at x/y inside a Rectangle, so it would be
+    // ignored without a word (the task's 罠4).
+    property <length> max-dialog-height: root.height - 39px;
+    // The right-edge rule (§2-4): tabs, search and the tiles' right edge all
+    // stop 14px short of the content box, and the scrollbar's 12px lane lives
+    // in that 14px strip. The grid also keeps the mock's 2px inset on its
+    // other sides (`padding: 2px 14px 2px 2px`). So: 20px of panel padding
+    // each side, then 2px + 14px of grid inset.
+    property <length> grid-right-inset: 14px;
+    property <length> grid-inset: 2px;
+    property <length> grid-width: root.dialog-width - 40px - root.grid-inset - root.grid-right-inset;
+    // `repeat(auto-fill, minmax(204px, 1fr))` resolved by hand: slint has no
+    // auto-fill grid, so the column count is computed and the rows are laid out
+    // from a flat model. The step is 216px (a 204px minimum tile plus the 12px
+    // column gap) so that the full 700px panel gives three columns (§2-3); the
+    // old 236px step gave two there. Never below 2, so a narrow window does not
+    // collapse to one column.
+    property <int> columns: Math.max(2, Math.floor((root.grid-width + 12px) / 216px));
+    property <length> tile-width: (root.grid-width - (root.columns - 1) * 12px) / root.columns;
+    // Fixed (§2-3), not 16:9 of the width: the mock measured an aspect-ratio
+    // tile squashing its own row in a scrolling grid.
+    property <length> tile-height: 120px;
+    property <int> rows: Math.ceil(root.tiles.length / root.columns);
+    // What the grid frame needs to show every row without scrolling, 2px inset
+    // top and bottom included. An empty state has no rows to count, so it gets
+    // a height of its own to be centred in (task t260913-c3c4 measured the
+    // filter-made one, the taller of the two, inside it with ~45px to spare).
+    // A single row also reserves the hover tooltip's 6px gap and 22px plate
+    // under the tile: with one row the tip can flip neither up nor down inside
+    // the frame, and measured 6px past the panel's outline without this
+    // (t260913-c3c4). Two rows and more flip the last row's tip up, so they
+    // keep the exact height.
+    property <length> grid-needed-height: root.empty-text != ""
+        ? 200px
+        : Math.max(0px, root.rows * (root.tile-height + 14px) - 14px) + 2 * root.grid-inset
+            + (root.rows == 1 ? 6px + 22px : 0px);
+
+    // ---------- the hover tooltip's own state (task2180) ----------
+    // Which tile the pointer is on, raised by the tiles themselves: `Tile.lit`
+    // is the hover the whole tile already reads, and the grid has no surface of
+    // its own to take mouse coordinates from (the tiles sit in layouts, not at
+    // absolute positions, so `sessions.slint`'s `hovered-row` arithmetic has
+    // nothing to measure). -1 is "nowhere" -- only before the first hover:
+    // leaving a tile clears `hover-live` and **keeps the index**.
+    //
+    // It used to go back to -1, and the tip is faded out over 120ms, not cut:
+    // for those 120ms it was still positioned from the index, and -1 puts it
+    // at row -1 (`Math.floor` rounds down) column `columns - 1` (`Math.mod` is
+    // non-negative) -- above the grid, hard right. That is the
+    // 「カーソルを外したとき一瞬右上にちらつく」 the user reported on
+    // 2026-09-16. Latching the index freezes the plate where it was while it
+    // fades, and `hover-action` keeps reading the tile it labels, so the text
+    // does not swap mid-fade either.
+    property <int> hover-index: -1;
+    // Whether the pointer is on that tile *now*. The tip's `armed`, and the
+    // only thing an un-hover clears.
+    property <bool> hover-live: false;
+    property <int> hover-row: Math.floor(root.hover-index / root.columns);
+    property <int> hover-column: Math.mod(root.hover-index, root.columns);
+    // What the hovered tile's button would do -- the same 0/1/2 the plate in
+    // the middle of it reads, so the tooltip appears exactly when that plate
+    // does. 0 covers the blank trailing cells and the unpickable targets, both
+    // of which never light in the first place.
+    property <int> hover-action: root.hover-index >= 0 && root.hover-index < root.tiles.length
+        ? root.tiles[root.hover-index].action
+        : 0;
+    // How far the grid is scrolled, pulled out of the `AppScroll` below.
+    // `scroll` is declared inside an `if`, so nothing outside that branch can
+    // name it -- and the tooltip is outside, because it has to draw over the
+    // scroll area rather than inside its clip. Negative as the view goes down,
+    // which is the sign the position arithmetic wants.
+    property <length> grid-scroll-y: 0px;
+
+    // Stops at the rail's right edge, so the rail stays live while the picker
+    // is open: a rail item switches the pane (and `show_pane` closes the picker
+    // on the way) instead of the click being spent on "close".
+    // ponytail: in full screen the rail is hidden and this leaves a 76px dead
+    // strip -- the dialog is anchored at 88px there anyway, so the picker is
+    // already wrong in full screen; fix both together if it ever opens there.
+    TouchArea {
+        x: Tokens.rail-width;
+        width: parent.width - self.x;
+        clicked => {
+            root.closed();
+        }
+    }
+
+    dialog := Rectangle {
+        // Anchored beside the rail's キャプチャ (§2-1: `left: 88px / top: 44px`).
+        // The mock's `top: 44px` counts under a 32px title bar this window no
+        // longer has (task4370), which put the bubble's arrow 35.5px below the
+        // capture button's centre (measured, task t260913-ec28). The user ruled
+        // on 2026-09-13 to point the arrow at the button instead, so `top` is
+        // 9px here -- a deliberate deviation from §2-1, noted there.
+        // 9 = 8 (the rail's `padding-top: Tokens.space-2` in app.slint)
+        //   + 27 (half of CaptureButton's 54px height, ui/chrome.slint)
+        //   - 26 (the arrow's centre offset inside this panel, below).
+        // Written as a literal because the rail's padding lives in app.slint
+        // and is not reachable from here.
+        x: Tokens.rail-width + Tokens.picker-rail-gap;
+        y: 9px;
+        width: root.dialog-width;
+        // A Rectangle takes no size from its children -- only layouts do -- so
+        // without this the dialog is 0px tall: it would still paint and still
+        // be unclickable, which is the trap this file is most exposed to.
+        // Capped by the max height; `box` then shrinks the one child that can
+        // give (the grid frame, which scrolls) to fit.
+        height: Math.min(box.preferred-height, root.max-dialog-height);
+        border-radius: Tokens.shape-m;
+        border-width: 1px;
+        border-color: Tokens.color-outline;
+        // Glass, like the window itself (the user, 2026-09-20): translucent
+        // ground so the pane behind shows through, and the sheen below. Not a
+        // `chrome-*` token -- those three are the window's two ground layers
+        // (tokens.slint) and this floats over them.
+        background: Tokens.color-surface-container-high.with-alpha(Tokens.light ? 0.78 : 0.72);
+        drop-shadow-blur: 40px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: Tokens.light ? Tokens.shadow-window : #0000008c;
+
+        // The window's own glass (app.slint, round25 §4-5): a 135deg sheen
+        // white 7 % at the top-left fading out by 60 %, and a 1px inner rim.
+        // One rounded border here rather than app.slint's three straight rim
+        // lines -- the panel's corners are round, and a full-width line at
+        // y=1 would run past them. Declared first, so the content draws over.
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: parent.border-radius;
+            border-width: 1px;
+            border-color: #ffffff14;
+            background: @linear-gradient(135deg, #ffffff12 0%, #ffffff05 38%, #ffffff00 60%);
+        }
+
+        // Above the scrim's TouchArea, so a click inside the dialog is not a
+        // click in the margin.
+        TouchArea { }
+
+        // The speech-bubble arrow on the left edge (§2-1: an 8x8 square turned
+        // 45deg at `top: 22px`, same ground and border as the panel). slint
+        // cannot rotate a Path (see `caret-down` in icons.slint), so this is
+        // the half of that square that shows: a triangle with its tip 5.66px
+        // out -- half of the 8px square's diagonal -- centred where the
+        // square's centre was, 22px + 4px down. The path is left open along
+        // its base, so the stroke draws only the two slanted edges, and the
+        // base reaches 2px into the panel so the fill paints over the panel's
+        // own 1px border where the two meet.
+        Path {
+            x: -6px;
+            y: 26px - 6px;
+            width: 8px;
+            height: 12px;
+            viewbox-width: 8;
+            viewbox-height: 12;
+            commands: "M8 0.34L0.34 6L8 11.66";
+            // The panel's ground, alpha and all, so the arrow does not read as
+            // a solid tab stuck onto a translucent panel.
+            fill: Tokens.color-surface-container-high.with-alpha(Tokens.light ? 0.78 : 0.72);
+            stroke: Tokens.color-outline;
+            stroke-width: 1px;
+        }
+
+        FocusScope {
+            width: 100%;
+            height: 100%;
+
+            // Runs exactly once per open, and takes the key focus off whatever
+            // the pane behind had.
+            init => {
+                self.focus();
+                root.opened();
+            }
+
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.closed();
+                    return EventResult.accept;
+                }
+                return EventResult.reject;
+            }
+
+            box := VerticalLayout {
+                padding: 20px;
+
+                // ---------- tabs ----------
+                // Stops on the right-edge rule (§2-4: `margin-right: 14px`).
+                // The inset is this row's padding and the width is written out
+                // to fill what is left, so where the track ends does not hang
+                // on how a layout places a child narrower than itself.
+                HorizontalLayout {
+                    padding-right: root.grid-right-inset;
+
+                    SegmentTabs {
+                        height: 36px;
+                        width: parent.width - root.grid-right-inset;
+                        stretch: true;
+                        segments: root.tab-labels;
+                        // Same order as the labels: ウィンドウ, then 画面全体.
+                        icons: [Icons.window, Icons.monitor];
+                        selected: root.tab;
+                        selected-changed(index) => {
+                            root.tab-changed(index);
+                        }
+                    }
+                }
+
+                Rectangle { height: 12px; }
+
+                // ---------- search ----------
+                // The slot is unconditional and the field inside it is not:
+                // 画面全体 has at most a handful of screens and no need to
+                // filter them, but the dialog must not change height for it.
+                Rectangle {
+                    height: Tokens.control-height-s;
+
+                    HorizontalLayout {
+                        spacing: Tokens.space-2;
+                        // The same right-edge rule as the tabs above (§2-4).
+                        padding-right: root.grid-right-inset;
+                        visible: root.tab == 0;
+
+                        // Same field as history's, deliberately (task194-B,
+                        // task3810's shared `SearchField` in controls.slint).
+                        // `plate: true` is this screen's own round16 §3-1
+                        // light-theme override -- history does not pass it.
+                        // `id`ed (`search`) so the empty-state's "clear" below
+                        // can reach in from outside the field.
+                        search := SearchField {
+                            placeholder: root.search-placeholder;
+                            plate: true;
+                            search-changed(text) => {
+                                root.search-changed(text);
+                            }
+                        }
+
+                    }
+                }
+
+                Rectangle { height: 12px; }
+
+                // A failure the user caused: it has to be readable from inside
+                // the modal, which is where they caused it. Only appears for an
+                // actual failure, so it never moves the height on a tab switch.
+                if root.error-text != "": Alert {
+                    icon: Icons.warning;
+                    label: root.error-text;
+                    error: true;
+                    action: root.error-dismissible ? root.error-dismiss-label : "";
+                    action-icon: Icons.close;
+                    action-clicked => {
+                        root.error-dismissed();
+                    }
+                }
+
+                if root.error-text != "": Rectangle { height: 12px; }
+
+                // ---------- grid ----------
+                // As tall as its rows need, and no taller than the panel's max
+                // height leaves (§2-3; task t260913-ec28 判断5 -- the old fixed
+                // 400px was the centred dialog's "does not jump" rule, and a
+                // panel hanging off a button can grow downwards without
+                // jumping). Only this frame gives: everything else in `box`
+                // has a fixed height, so when the panel is capped the layout
+                // takes the whole shortfall out of here, error row included,
+                // and the tabs and search stay put while the grid scrolls.
+                // These are layout hints, which is what they are for: this
+                // frame is a child of `box`, unlike the panel itself.
+                Rectangle {
+                    preferred-height: root.grid-needed-height;
+                    max-height: root.grid-needed-height;
+                    min-height: 0px;
+                    vertical-stretch: 1;
+
+                    if root.empty-text != "": EmptyState {
+                        width: 100%;
+                        height: 100%;
+                        // Two distinct nothings, and only one of them has a
+                        // verb: "your filter matched nothing" is answered by
+                        // clearing it, "no windows at all" by the 1s poll that
+                        // is already running (task143).
+                        icon: root.empty-is-filter ? Icons.search : Icons.targets;
+                        label: root.empty-text;
+                        action: root.empty-is-filter ? root.clear-label : "";
+                        action-icon: Icons.close;
+                        action-clicked => {
+                            search.text = "";
+                            root.search-changed("");
+                            search.focus-field();
+                        }
+                    }
+
+                    // Inset 2px top, left and bottom (§2-4's grid padding) and
+                    // flush right: the 12px lane is the right end of this
+                    // area, so the viewport -- and the last column -- ends
+                    // 14px short of the content box, on the same line as the
+                    // tabs and the search field. `AppScroll` reserves the lane
+                    // whether or not there is anything to scroll, so the tile
+                    // width does not change when the bar appears.
+                    if root.empty-text == "": scroll := AppScroll {
+                        x: root.grid-inset;
+                        y: root.grid-inset;
+                        width: parent.width - root.grid-inset;
+                        height: parent.height - 2 * root.grid-inset;
+                        viewport-width: scroll.visible-width;
+                        viewport-height: grid.preferred-height;
+                        viewport-y <=> root.grid-scroll-y;
+
+                        grid := VerticalLayout {
+                            width: scroll.visible-width;
+                            alignment: start;
+                            spacing: 14px;
+
+                            for row in root.rows: HorizontalLayout {
+                                spacing: 12px;
+                                alignment: start;
+
+                                // The tile sits in the row directly. Wrapping it
+                                // in a Rectangle looks harmless and is not: a
+                                // component inheriting Rectangle expands to its
+                                // parent, the wrapper sizes itself from its
+                                // children, and the pair resolves to height 0 --
+                                // the tile still paints but hit-testing has
+                                // nothing to hit.
+                                for column in root.columns: cell := Tile {
+                                    // Explicit, not `horizontal-stretch: 1`:
+                                    // stretch shares out the *leftover* space,
+                                    // so every column would end up a different
+                                    // size. `1fr` is a fixed share.
+                                    width: root.tile-width;
+                                    height: root.tile-height;
+                                    property <int> index: row * root.columns + column;
+                                    blank: cell.index >= root.tiles.length;
+                                    tile: root.tiles[Math.min(cell.index, root.tiles.length - 1)];
+                                    recording-label: root.recording-label;
+                                    primary-label: root.primary-label;
+                                    capture-label: root.capture-label;
+                                    stop-label: root.stop-label;
+                                    // The tile reports its own hover up to the
+                                    // tooltip layer. The `else if` guard is
+                                    // what makes a slide between two touching
+                                    // tiles work: the new tile lights before
+                                    // the old one goes dark, so the darkening
+                                    // one must only clear the index if it is
+                                    // still the one being pointed at.
+                                    changed lit => {
+                                        if (cell.lit) {
+                                            root.hover-index = cell.index;
+                                            root.hover-live = true;
+                                        } else if (root.hover-index == cell.index) {
+                                            root.hover-live = false;
+                                        }
+                                    }
+                                    clicked => {
+                                        // Both, always: a click either starts a
+                                        // recording or lands on the one already
+                                        // running, and both answers are "you are
+                                        // done here" (design §5).
+                                        root.tile-clicked(cell.tile.id);
+                                        root.closed();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---------- tooltip layer (task2180) ----------
+                    // Last child of the grid frame, so it draws over the
+                    // scroll area declared before it -- and outside it, because
+                    // `Tile` clips and a tip mounted inside one could not leave
+                    // the tile it labels.
+                    //
+                    // Mounted unconditionally and hidden by `Tooltip`'s own
+                    // opacity, never wrapped in an `if`: a hover-gated subtree
+                    // is task194-B's trap, and this one sits directly over the
+                    // tiles it labels, so an `if` here would be swapping a
+                    // child in and out under the pointer on every hover.
+                    // It carries no TouchArea, so the tile stays clickable
+                    // through it.
+                    //
+                    // Positioned from the grid's own constants (task148: never
+                    // from `absolute-position`). The row offset takes the
+                    // scroll into account, which is what keeps the tip stuck to
+                    // its tile as the grid moves under it.
+                    Tooltip {
+                        // The scroll area sits `grid-inset` in from the frame,
+                        // so the tile positions carry that offset too.
+                        property <length> tile-top:
+                            root.grid-inset + root.hover-row * (root.tile-height + 14px) + root.grid-scroll-y;
+                        property <length> below: self.tile-top + root.tile-height + 6px;
+                        property <length> above: self.tile-top - 6px - self.height;
+                        // Centred on the tile, then pulled back inside the
+                        // grid so a tip wider than its tile does not hang off
+                        // the first or last column.
+                        x: Math.max(root.grid-inset, Math.min(root.grid-inset + root.grid-width - self.width,
+                            root.grid-inset + root.hover-column * (root.tile-width + 12px)
+                                + (root.tile-width - self.width) / 2));
+                        // 6px under the tile, or 6px above it when that would
+                        // put the plate through the bottom of the frame -- the
+                        // last row is otherwise where the tip goes to die.
+                        // Unless there is no room above either: the frame now
+                        // shrinks to its rows (task t260913-ec28), so with a
+                        // single row both sides are "outside", and flipping up
+                        // would clamp the tip onto the tile it labels. Then it
+                        // hangs below the frame, into the panel's padding.
+                        y: self.below + self.height > parent.height && self.above >= 0px
+                            ? self.above
+                            : self.below;
+                        armed: root.hover-live && root.hover-action != 0;
+                        label: root.hover-action == 2 ? root.stop-title : root.capture-title;
+                    }
+                }
+
+            }
+        }
+    }
+}

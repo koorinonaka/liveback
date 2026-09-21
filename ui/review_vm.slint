@@ -1,0 +1,370 @@
+// The review pane's view-model global and track-model structs, split from
+// review.slint so the stage/track components can reference them without a
+// circular import. Everything time-valued stays in Rust: 100ns ticks do not
+// fit slint's 32-bit int, so the model carries percents and ratios only, and
+// callbacks hand back ratios or model row indices.
+
+// A span on the track, in percent of its width.
+export struct TrackSpan {
+    left: float,
+    width: float,
+}
+
+// A gap, plus what to draw for it. `single` is decided in Rust from the track's
+// pixel width (`ui_state::timeline::gap_mark`): under 4px there is no room for
+// a rule at each edge and the pair collapses into one.
+export struct GapSpan {
+    left: float,
+    width: float,
+    single: bool,
+}
+
+export struct MarkerSpan {
+    left: float,
+    // Which row of `marker-rows` this bar is. The bar only draws the markers
+    // the viewport can reach, so its own loop index is not the list index the
+    // click callbacks speak in.
+    row: int,
+    // 0..5 into the six-colour palette (round5 §4-B). Resolved in
+    // `ui_state::timeline::marker_palette_index`; `review.slint` is the only
+    // place that turns it back into a colour, so the bar and the panel row
+    // cannot disagree.
+    color-index: int,
+}
+
+// One row of the right panel's marker list.
+export struct MarkerRow {
+    time: string,
+    label: string,
+    color-index: int,
+}
+
+/// One 直近N chip above 「クリップに保存」 (design round19 §2-3, task3870).
+/// `seconds` rides along with the word rather than being read back out of the
+/// loop index: the callback hands this number straight to Rust, so nothing on
+/// this side has to agree with `ui_state::timeline::RECENT_CHIP_SECONDS` about
+/// the order of the list (task3820 -- no slint-derived index in a callback).
+export struct RecentChip {
+    label: string,
+    seconds: int,
+}
+
+/// One row of the track mixer (task1300).
+export struct MixerTrack {
+    name: string,
+    volume-ratio: float,
+    muted: bool,
+}
+
+export global ReviewVm {
+    // ---------- track model (computed in Rust per render) ----------
+    in-out property <[TrackSpan]> segments;
+    in-out property <[GapSpan]> gaps;
+    in-out property <float> played-percent;
+    in-out property <float> buffered-percent;
+    in-out property <bool> has-range;
+    in-out property <float> range-start-percent;
+    in-out property <float> range-end-percent;
+    in-out property <bool> range-start-handle-visible;
+    in-out property <bool> range-end-handle-visible;
+    in-out property <[MarkerSpan]> markers;
+    in-out property <bool> live-visible;
+    // Pinned to the right edge only when the live edge really is the right
+    // edge; under zoom it sits where its time falls.
+    in-out property <bool> live-pinned;
+    in-out property <float> live-percent;
+    in-out property <bool> playhead-visible;
+    in-out property <float> playhead-percent;
+    in-out property <bool> dragging;
+    // The track's own width in px, reported back so Rust can decide how each
+    // gap is drawn. A pure function cannot know a layout's pixels otherwise,
+    // and the alternative -- comparing widths in `.slint` -- would put the rule
+    // somewhere no test can reach it.
+    callback track-resized(float);
+
+    // ---------- hover preview ----------
+    in-out property <bool> hover-visible;
+    in-out property <float> hover-anchor;
+    in-out property <string> hover-time;
+    in-out property <image> hover-thumbnail;
+    in-out property <bool> hover-has-thumbnail;
+
+    // ---------- video stage (task128) ----------
+    in-out property <image> stage-frame;
+    in-out property <bool> stage-has-frame;
+    // A loaded session whose first frame has not arrived (task239). Decided by
+    // `ui_state::playback::stage_loading`, not derived here, so the rule about
+    // standing down for the other stage marks has a test.
+    in-out property <bool> stage-loading;
+    // Width / height of the recording, so the stage can hold the shape it was
+    // recorded in (round5 §4-A-2). 16:9 until a frame says otherwise.
+    in-out property <float> stage-aspect: 1.7777778;
+    // How big the picture is actually being drawn, in logical pixels (task990).
+    // Rust turns it into physical pixels and the playback engine resamples each
+    // frame to it, so what reaches skia is already the size it is drawn at
+    // instead of a 1440p frame minified bilinearly with no mipmaps.
+    callback stage-size-changed(length, length);
+    // 0 none, 1 tap, 2 hold, 3 clamped, 4 gap, 5 buffering.
+    in-out property <int> stage-feedback-kind;
+    // The mark's opacity gate (task1020). Rust drops this first and clears the
+    // kind above only once the fade has run, so the circle goes out with its
+    // glyph still in it -- and the keyboard's ±seek fades the same way a tap
+    // does instead of staying up until something replaces it.
+    in-out property <bool> stage-feedback-shown;
+    in-out property <bool> stage-feedback-backward;
+    in-out property <string> stage-feedback-seconds;
+    in-out property <int> stage-feedback-dots;
+    in-out property <string> stage-feedback-line;
+    in-out property <bool> stage-hint-visible;
+    in-out property <string> stage-hint-text;
+    in-out property <string> stage-zone-seconds;
+    in-out property <bool> live-edge-visible;
+    in-out property <string> live-edge-text;
+    // The stage's LIVE capsule (task237, round8 §1). Rust alone decides
+    // whether it exists, from `ui_state::lifecycle::live_chip` (recording /
+    // stopping of the staged session); nothing on the slint side -- hover
+    // included -- writes it back (t260913-a18d).
+    in-out property <bool> live-chip-visible;
+    // The word it wears: LIVE, or 停止中… once a stop is in flight. Nothing
+    // hovers it (round7 §2-3) -- the verb sits beside it in the same capsule.
+    in-out property <string> live-chip-text;
+    // The stage capsule's 「■ 停止」 half (round8 §1). Was the title bar's
+    // button until round8 moved the verb onto the stage.
+    in-out property <string> stop-button-label;
+    // round7 §2-7 / §2-8: the message shown while the captured window is
+    // minimized, and the full screen exit pill's wording.
+    in-out property <bool> minimized-visible;
+    in-out property <string> minimized-title;
+    in-out property <string> minimized-body;
+    in-out property <string> fullscreen-exit-label;
+    // The four `stop-confirm-*` properties that stood here are gone with the
+    // dialog itself (task2030 判断4): every stop is immediate now.
+    // Where the press landed relative to the *picture's* top-left corner, and
+    // how big the picture is: Rust drops the ones that missed it and splits
+    // the rest into zones by the picture's width (task1010). The whole stage
+    // is still the hit area so the letterbox keeps waking the overlay, but
+    // only the picture answers a gesture.
+    callback stage-pressed(length, length, length, length);
+    callback stage-released();
+    callback stage-cancelled();
+    // The engine thread rings this through the event loop; the bin-side
+    // handler pulls the frame mailbox and updates the scalars.
+    callback frame-ready();
+
+    // ---------- transport ----------
+    in-out property <bool> playing;
+    in-out property <string> position-text;
+    in-out property <string> total-text;
+    in-out property <string> rate-text;
+    // The rate chip's menu: every selectable rate, and which row is current.
+    in-out property <[string]> rate-labels;
+    in-out property <int> rate-index;
+    in-out property <float> volume-ratio;
+    in-out property <bool> muted;
+    // ---------- track mixer (task1300) ----------
+    // One row per recorded audio track, in track order. Empty for a recording
+    // with a single track, which is every recording made before task1260 --
+    // the panel section is absent entirely for those.
+    in-out property <[MixerTrack]> audio-tracks;
+    in property <string> mixer-section-label;
+    in-out property <string> status-text;
+    // Borderless full screen (task151 draws the button, task152 wires it).
+    in-out property <bool> fullscreen;
+    in-out property <bool> repeat-enabled;
+
+    // ---------- right detail panel (round5 §4-D) ----------
+    in-out property <bool> panel-open: true;
+    in-out property <string> panel-toggle-label;
+    in-out property <string> range-section-label;
+    // task3060 (design round18 §4-7): the export pair and the still each get
+    // their own heading, so the still is not read as "a still of the range".
+    in property <string> export-section-label;
+    in property <string> still-section-label;
+    in-out property <string> marker-section-label;
+    in-out property <string> range-start-label;
+    in-out property <string> range-end-label;
+    in-out property <string> range-length-label;
+    in-out property <string> range-start-text;
+    in-out property <string> range-end-text;
+    in-out property <string> range-length-text;
+    // round8 §2: the steppers' and the reset's tooltips, decided in Rust so
+    // the wording lives with every other string.
+    in-out property <string> range-start-back-hint;
+    in-out property <string> range-start-forward-hint;
+    in-out property <string> range-end-back-hint;
+    in-out property <string> range-end-forward-hint;
+    in-out property <string> range-reset-hint;
+    // task3050: the tail column's third button, and the marker row's second.
+    in-out property <string> range-start-playhead-hint;
+    in-out property <string> range-end-playhead-hint;
+    in-out property <string> marker-range-hint;
+    // task1060's range-edit mode used to stand here as `range-editing`.
+    // task3860 (round19 §1) folded it into the 確定ステップ: `clip-editing`
+    // below is now the one flag that says the boundaries are editable, so the
+    // track, the panel's rows and the Esc branch all read it and there is no
+    // second mode to leave switched on.
+    //
+    // A band drag is in flight (task3160). Pins the control bar, exactly as
+    // `dragging` does for a track scrub -- the bar fading out from under a
+    // gesture the user is in the middle of is the same bug either way.
+    in-out property <bool> range-dragging;
+    in-out property <string> markers-empty-text;
+    in-out property <string> marker-hotkey-text;
+    in-out property <[MarkerRow]> marker-rows;
+    callback panel-toggled(bool);
+    // (row, new name). The row indexes `marker-rows`, which is the same order
+    // and the same list `markers` is drawn from.
+    callback marker-renamed(int, string);
+    callback marker-removed(int);
+    // task3050: 前後30秒を範囲に, from the same row index.
+    callback marker-ranged(int);
+
+    // ---------- 起動時に自動録画 (round13 §1) ----------
+    // The panel's bottom row: the one door into `autoCaptureExecutables`, now
+    // that the picker tile's badge only reports. Everything here is derived in
+    // `ui_state::auto_capture::review_toggle` -- the row draws, it does not
+    // decide. Hidden when the session names no executable (monitor recordings
+    // and everything made before task2350).
+    in-out property <bool> autorec-visible;
+    in-out property <bool> autorec-on;
+    /// The recorded target's filename, stashed so the settings screen's × can
+    /// re-derive `autorec-on` without reaching into the review state. Nothing
+    /// draws it -- `autorec-body` is the text.
+    in-out property <string> autorec-executable;
+    /// That executable's full image path, resolved from a running process of
+    /// it (task3670), and empty when nothing by that name is running. Stashed
+    /// beside the name and for the same reason: the settings screen's folder
+    /// handlers have to answer "is this session covered by a folder rule"
+    /// without a borrow of the review, and resolving it is a process-list walk
+    /// that must not happen per render. Nothing draws it either.
+    in-out property <string> autorec-image-path;
+    in-out property <string> autorec-label;
+    in-out property <string> autorec-body;
+    callback autorec-toggled();
+
+    // ---------- labels (set once from ui_state::timeline) ----------
+    in-out property <string> add-marker-label;
+    in-out property <string> marker-placeholder;
+    in-out property <string> export-label;
+
+    // ---------- empty state (round5 §4-A) ----------
+    // round7 §2-6: one caption, two lines. The two cards (and W-3 / W-4 with
+    // them) are gone.
+    in-out property <string> empty-title;
+    in-out property <string> empty-body;
+
+    // ---------- export / screenshot (task129) ----------
+    in-out property <bool> export-busy;
+    in-out property <bool> export-enabled;
+    in-out property <string> export-running-text;
+    // 0..100, for the progress bar the mock draws beside the text.
+    in-out property <float> export-percent;
+    in-out property <string> export-cancel-label;
+    in-out property <string> screenshot-label;
+    /// Written files of the last completed job. Nothing draws them since
+    /// task169 -- they are what the toast's reveal button opens.
+    in-out property <[string]> export-paths;
+
+    // ---------- クリップに保存 (task2970) ----------
+    // The primary half of the export slot. Pressing it does not open a file
+    // dialog: the button turns into a one-line comment field in place, and
+    // Enter both closes it and starts the job. There is no `clip-draft` --
+    // the field keeps its own text, and nothing tears it down while it is
+    // open (`clip-editing` gates the `if`).
+    in-out property <bool> clip-editing;
+    in-out property <string> clip-label;
+    in-out property <string> clip-hint;
+
+    // ---------- 直近N チップ (design round19 §2-3, task3870) ----------
+    // The row directly above the clip button. Filled once from
+    // `ui_state::timeline` like every other label, because the only thing that
+    // changes it is the language.
+    in-out property <[RecentChip]> recent-chips;
+    // Carries the chip's own `seconds`, not its row. Pressing one only sets the
+    // range (end = the playhead, start = N seconds before it); nothing is
+    // saved, and the chips hold no selected state -- pressing one is an act,
+    // not a mode.
+    callback recent-chip-clicked(int);
+
+    // ---------- the marker rename, seen from the shell (task3640) ----------
+    // Read-only as far as everything outside `ReviewPane` is concerned: the
+    // rename's real state is `ReviewPane`'s own `editing-marker`, and this is a
+    // mirror of `editing-marker >= 0` that the pane publishes so `app.slint`
+    // can fold it into the "is any inline edit open" flag its overlay hangs on.
+    //
+    // A mirror rather than a move. `editing-marker` is local on purpose --
+    // leaving 確認 destroys the pane and the rename goes with it, for free.
+    // Nothing resets a global, so this one can be left true by a pane that is
+    // gone; `app.slint` reads it only while 確認 is the showing pane, which is
+    // what makes the stale value unreachable rather than merely unlikely.
+    in-out property <bool> marker-editing;
+
+    // ---------- callbacks ----------
+    callback track-pressed(float);
+    callback track-moved(float, bool);
+    callback track-released(float);
+    callback track-exited();
+    // Pointer-cancel mid-drag: abandon the gesture without seeking.
+    callback track-cancelled();
+    // (cursor ratio, delta-y, ctrl, shift) -> handled
+    callback track-wheel(float, float, bool, bool) -> bool;
+    callback track-double-clicked();
+    // (0 = start handle, 1 = end handle, absolute track ratio)
+    callback handle-moved(int, float);
+    // round8 §2: the band dragged by its middle. The float is where its start
+    // should land, as a ratio of the visible track.
+    callback range-panned(float);
+    // The band's drag started / ended (task3160). The int is `sel.mode`:
+    // 0 = 開始端, 1 = 終了端, 2 = 移動. On release it is **-1 when the
+    // gesture never moved** -- a plain press the band passes through as a
+    // seek, or a cancelled pointer -- which tells Rust to put the transport
+    // back without carrying the playhead anywhere.
+    callback range-drag-changed(bool, int);
+    // Seeks to that marker. It used to open a popover on the bar; the panel's
+    // list replaced that, so a click on the bar is now only a jump.
+    callback marker-clicked(int);
+    callback play-toggled();
+    // The capsule's stop was pressed. It stops the session on the stage and
+    // only that one (task2030 判断5), with no confirmation (判断4).
+    callback stop-requested();
+    // Clicking the clock swaps elapsed for remaining, like YouTube's.
+    callback time-display-toggled();
+    // round8 §2. Edge: 0 = 開始, 1 = 終了. The playhead follows whichever
+    // boundary moved, so the frame on screen is the one that just changed.
+    callback range-stepped(int, int);
+    callback range-edited(int, string);
+    callback range-reset();
+    // task3050. The other direction: 0 = 開始, 1 = 終了 takes the playhead's
+    // current position, and the playhead itself does not move -- it is already
+    // where the boundary is going.
+    callback range-set-to-playhead(int);
+    // Moves the playhead to the selection's start / end without changing it.
+    callback jump-range(bool);
+    callback add-marker();
+    callback rate-selected(int);
+    callback volume-changed(float);
+    callback mute-toggled();
+    /// (track index, 0.0-1.0). The master volume above is unchanged by these.
+    callback track-volume-changed(int, float);
+    callback track-mute-toggled(int);
+    callback fullscreen-toggled();
+    callback repeat-toggled();
+    // Rung from the export pipeline's thread through the event loop.
+    callback export-changed();
+    callback export-start();
+    // Task2970. `clip-committed` can arrive with the field already gone (an
+    // unload, or the export block-out covering the slot), so Rust re-checks
+    // that it is still open before it starts anything. Blur used to be one of
+    // those paths; since task3430 it arrives as `clip-cancelled` instead.
+    callback clip-requested();
+    callback clip-committed(string);
+    callback clip-cancelled();
+    callback export-cancel();
+    callback export-reveal(string);
+    callback screenshot-save();
+    // (key text, shift, repeat) -> handled
+    callback key-pressed-cb(string, bool, bool) -> bool;
+    // (key text). Release of a transport key arms the precise settle
+    // seek (task2540).
+    callback key-released-cb(string);
+}

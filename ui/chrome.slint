@@ -1,0 +1,141 @@
+// The window chrome split out of app.slint: the caption buttons and the rail.
+//
+// The status bar and the diagnostics drawer that lived here are gone (task169,
+// round5 §3-C): a permanent 26px strip cost the review pane height forever, and
+// the eight measured values it carried never answered a question the user was
+// actually asking. What is left of "tell me something happened" is the `Toast`
+// in the bottom-right corner.
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon, CaptionIcon } from "icons.slint";
+
+export component CaptionButton inherits Rectangle {
+    in property <string> commands;
+    in property <bool> danger;
+    callback clicked;
+
+    // 44x full height, matching `.win-caption button`. Full height matters:
+    // chrome-overrides.css records that a half-pixel vertical offset let the
+    // top device-pixel row hit-test past the button, which is exactly where
+    // users aim on a maximized window.
+    width: 44px;
+    height: 100%;
+    // The caption buttons sit on the darkest ground in the app -- the window
+    // ground itself since round25 §4-1 took the bar's fill away (t260919-fd3d;
+    // `chrome-rail`, #0d1015 at 85 % in dark, the colour the bar used to be),
+    // so they step one rung up the state ladder
+    // that every other chrome control uses: hover takes `chrome-active` (12%)
+    // and the press takes `chrome-selected` (16%). Measured reason (2026-09-07,
+    // task3450): `chrome-hover` is #c7d6eb at 7%, which composites over #0d1015
+    // to roughly #1a2028 -- 13/17/19 per channel off the ground, which the user
+    // reported as no contrast at all. The ladder moves here rather than in
+    // `tokens.slint` because `chrome-hover` also lands on the lighter grounds
+    // (`chrome-sidebar` #12161d, `chrome-content` #171c24) where 7% already
+    // reads; one symptom does not move a constant every other chrome control
+    // shares (about two dozen call sites across eight `.slint` files).
+    // Close takes the Windows caption red on hover (round25 §4-1: `#e81123`
+    // ground, white glyph), in both themes. The press darkens that red the
+    // way it always has, rather than reaching for a chrome token that would
+    // read as "less":
+    // #b20a18 = color-mix(in oklch, #e81123, #000 18%) -- #e81123 is
+    // oklch(58.99% 0.2344 26.3); black has no hue, so the mix keeps h and
+    // scales L and C by 0.82 -> oklch(48.37% 0.1922 26.3).
+    background: touch.pressed
+        ? (root.danger ? #b20a18 : Tokens.chrome-selected)
+        : touch.has-hover
+            ? (root.danger ? #e81123 : Tokens.chrome-active)
+            : transparent;
+
+    touch := TouchArea {
+        // Native Windows caption buttons keep the arrow; this shell's rule is
+        // that anything pressable says so, and the drag strip underneath keeps
+        // the arrow, which makes the two readable apart.
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    CaptionIcon {
+        commands: root.commands;
+        // Hover lifts the glyph: white on the close red, `color-on-surface`
+        // (the 文字強調 of round25 §4-1) on the other two.
+        stroke-color: !touch.has-hover
+            ? Tokens.color-on-surface-variant
+            : root.danger ? #ffffff : Tokens.color-on-surface;
+    }
+}
+
+
+// A tab, not a launcher (round 4 §2-A1 overrides round 2's launcher model): all
+// four panes are peers now, so the mark says "you are here", not "this dialog is
+// open". A dot in the corner was the launcher's grammar; a bar down the leading
+// edge is the tab's.
+export component RailButton inherits Rectangle {
+    in property <string> commands;
+    in property <string> fill-commands;
+    // Only キャプチャ sets this: its REC centre is `color-error` while the ring
+    // takes `tint` (round21 §1-2 I1). Everything else leaves it at the stroke.
+    in property <color> fill-commands-color: root.tint;
+    // 1.8px for three of the four glyphs; `settings` overrides to 2px.
+    in property <length> weight: 1.8px;
+    in property <string> label;
+    in property <bool> current;
+    callback clicked;
+
+    width: 68px;
+    height: 54px;
+    border-radius: Tokens.shape-m;
+    // The rail sits on the same darkest ground as the caption buttons
+    // (`chrome-rail` = #0d1015, the window ground), so it steps up the
+    // same rung task3450 used there: hover takes `chrome-active` and press
+    // takes `chrome-selected` (measured reason: task3450's #1a2028 -- 13/17/19
+    // per channel off this ground for plain `chrome-hover`, read as no
+    // contrast). That makes `current` and press the same color while a tab is
+    // held down -- intentional: the pressed tab becomes `current` the moment
+    // it is released, so wearing that color while held is not a "did my press
+    // register" ambiguity. `current` paints no ground of its own any more: the
+    // rail's one shared pill slides under it (round21 §1-3, task t260913-17e1),
+    // so here it only keeps hover and press off the tab the pill is sitting on.
+    background: root.current
+        ? transparent
+        : touch.pressed
+            ? Tokens.chrome-selected
+            : touch.has-hover ? Tokens.chrome-active : transparent;
+
+    property <color> tint: (touch.has-hover || touch.pressed || root.current)
+        ? Tokens.color-on-surface
+        : Tokens.color-on-surface-variant;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 3px;
+
+        HorizontalLayout {
+            alignment: center;
+            AppIcon {
+                commands: root.commands;
+                fill-commands: root.fill-commands;
+                stroke-color: root.tint;
+                fill-commands-color: root.fill-commands-color;
+                size: 22px;
+                weight: root.weight;
+            }
+        }
+
+        Text {
+            text: root.label;
+            horizontal-alignment: center;
+            font-size: Tokens.type-caption-size;
+            font-weight: Tokens.type-caption-weight;
+            color: root.tint;
+        }
+    }
+}

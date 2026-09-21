@@ -1,0 +1,591 @@
+// The settings form (task126). Transcribed from src/pages/SettingsPage.tsx as
+// it stands after round-2 (task117/119), with `.grp` / `.frow` / `.num` /
+// `.switch` / `.hk` / `.path` / `.settings-actions` from src/App.css.
+//
+// All strings and every computed decision (what is dirty, which row carries the
+// conflict alert, what the clamp did) come from Rust; this file only maps them
+// onto elements. Numeric rows keep one client-side judgement, same as React
+// round2 §7-2: an out-of-range draft shows an error and is never committed --
+// the real validation stays in crate::settings (task121).
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { AppScroll, ConfirmDialog, ContextMenu, SBtn, SelText, PresetRow, Tooltip } from "controls.slint";
+import { SettingsLabels, SettingsVm } from "settings_vm.slint";
+import {
+    GroupTitle, HotkeyRow, LanguageRow, ListRow, PathRow, StatusRow, SwitchPresetRow, SwitchRow,
+    ThemeRow,
+} from "settings_rows.slint";
+export { SettingsLabels, SettingsVm }
+
+export component SettingsPane inherits Rectangle {
+    // The content face in app.slint is this pane's ground; a second
+    // 85 % layer here would make it opaque (t260916-ebdb).
+    background: transparent;
+
+    // task1470. UI-local: which language the combo *shows* is Rust's, but
+    // whether its popup is up is nobody else's business.
+    property <bool> language-menu-open;
+
+    VerticalLayout {
+        // The shared scrollbar (task236), not the stock `ScrollView`: settings
+        // was the last pane still wearing slint's own, which is a different
+        // width, a different colour and has no hover growth (task1070).
+        scroll := AppScroll {
+            vertical-stretch: 1;
+            // Flush against the client's right edge: the pane container in
+            // `app.slint` is `horizontal-stretch: 1` beside the rail and nothing
+            // pads it. So the lane steps in by the resize band (task4320) --
+            // without it three of the thumb's four columns are inside the band
+            // and the press never reaches the thumb.
+            right-inset: Tokens.resize-band-inset;
+            viewport-width: scroll.visible-width;
+            viewport-height: form.preferred-height;
+
+            // A press on the empty page cancels whatever number box holds the
+            // caret (`NumberField` puts the committed value back on blur). A
+            // `TouchArea` cannot do this -- it takes no key focus, which is the
+            // whole reason task3640 had to build an overlay for the inline
+            // editors -- so this is a `FocusScope` the size of the form, and
+            // `focus-on-click` is what moves the focus off the field.
+            //
+            // Declared before the form so every row keeps the hit test: this
+            // only ever sees the presses nothing else wanted. Sized to the
+            // content rather than `100%`, which inside a `Flickable` means the
+            // *visible* height and would scroll off the bottom of the page.
+            FocusScope {
+                width: 100%;
+                height: Math.max(form.preferred-height, scroll.visible-height);
+                // Nothing tabs into an invisible sink.
+                focus-on-tab-navigation: false;
+                // The refusal belongs to the draft that caused it, and the
+                // draft has just gone.
+                changed has-focus => {
+                    if (self.has-focus) {
+                        SettingsVm.numeric-error-field = -1;
+                    }
+                }
+            }
+
+            form := VerticalLayout {
+                // `.panel` caps the settings form at 720px (round2 §2-3: a form
+                // does not want the room the grids do). Left-aligned rather than
+                // centred (round 4 §2-E1): centring left ~400px of unexplained
+                // space at 1598px, and a column that starts where every other
+                // pane's content starts needs no explaining.
+                // round8 §3-4: centred. Task146 left-aligned it because 400px
+                // of unexplained space sat to one side at 1598px; the round
+                // asks for the form in the middle, which puts the same space
+                // on both sides and reads as a column rather than a margin.
+                x: (scroll.visible-width - self.width) / 2;
+                width: min(720px, scroll.visible-width);
+                alignment: start;
+                // `.form{gap:6px}`.
+                spacing: 6px;
+                // 24px, one step in from task146's 40px: round5 took the rail
+                // and the footer out from around this pane, so the margin that
+                // used to keep it from feeling cramped now just pushes the
+                // first group off the top (mock state 15). The 720px cap stays.
+                padding: Tokens.space-6;
+
+                // ---------- 表示 ----------
+                // First on the page (task1150): someone who has landed on a
+                // language they cannot read needs the way back to be the first
+                // thing they meet. The languages themselves are a combo now
+                // (task1470) -- the list is going to grow -- but 「システム」
+                // stays a chip, so the way back is still one visible click.
+                GroupTitle { title: SettingsLabels.language; first: true; }
+
+                language-row := LanguageRow {
+                    label: SettingsLabels.language;
+                    system-label: SettingsLabels.language-system;
+                    system-selected: SettingsVm.language-index == 0;
+                    value: SettingsLabels.language-menu[SettingsVm.language-choice-index].label;
+                    open: root.language-menu-open;
+                    system-clicked => {
+                        root.language-menu-open = false;
+                        SettingsVm.language-selected(0);
+                    }
+                    combo-clicked => {
+                        root.language-menu-open = !root.language-menu-open;
+                    }
+                }
+
+                // round16. Under the language row and in the same group: both
+                // are "how the app presents itself", and neither depends on a
+                // capture running.
+                ThemeRow {
+                    label: SettingsLabels.theme;
+                    choices: SettingsLabels.theme-choices;
+                    selected: SettingsVm.theme-index;
+                    picked(index) => {
+                        root.language-menu-open = false;
+                        SettingsVm.theme-selected(index);
+                    }
+                }
+
+                // ---------- キャプチャ ----------
+                GroupTitle { title: SettingsLabels.group-capture; }
+
+                // round8 §3-1, at the head of the group: the two rows under it
+                // are the ring's shape, and they only mean anything while the
+                // ring is running.
+                SwitchRow {
+                    label: SettingsLabels.ring-buffer;
+                    sub: SettingsLabels.ring-buffer-sub;
+                    checked: SettingsVm.ring-buffer-enabled;
+                    toggled(next) => {
+                        SettingsVm.ring-buffer-toggled(next);
+                    }
+                }
+
+                // The free field is back (2026-09-13, the user), overriding
+                // task1080's chips-only row: the chips are still the answer
+                // for almost everyone, but a 15 or a 90 has to be typable.
+                PresetRow {
+                    dimmed: !SettingsVm.ring-buffer-enabled;
+                    label: SettingsLabels.retention-minutes;
+                    presets: SettingsLabels.retention-minutes-presets;
+                    selected: SettingsVm.retention-minutes-index;
+                    value-text: SettingsVm.retention-minutes;
+                    placeholder: SettingsLabels.retention-minutes-placeholder;
+                    unit: SettingsLabels.unit-minutes;
+                    range-error: SettingsVm.numeric-error-field == 0;
+                    preset-clicked(index) => {
+                        SettingsVm.preset-clicked(0, index);
+                    }
+                    value-edited(text) => {
+                        SettingsVm.preset-edited(0, text);
+                    }
+                }
+
+                // Never dimmed (task1080): the rate the ring *would* record at
+                // is a setting you can make while it is stopped, and dimming it
+                // meant turning the ring on just to change it.
+                PresetRow {
+                    label: SettingsLabels.frame-rate;
+                    presets: SettingsLabels.frame-rate-presets;
+                    selected: SettingsVm.frame-rate-index;
+                    unit: SettingsLabels.unit-fps;
+                    editable: false;
+                    preset-clicked(index) => {
+                        SettingsVm.preset-clicked(4, index);
+                    }
+                }
+
+                SwitchRow {
+                    label: SettingsLabels.include-cursor;
+                    checked: SettingsVm.include-cursor;
+                    toggled(next) => {
+                        SettingsVm.cursor-toggled(next);
+                    }
+                }
+
+                // task1430: replaces the picker's per-application audio track
+                // chooser. It lives here, not in the picker, because it is a
+                // standing preference rather than a per-recording choice.
+                SwitchRow {
+                    label: SettingsLabels.capture-all-audio;
+                    sub: SettingsLabels.capture-all-audio-sub;
+                    checked: SettingsVm.capture-all-audio;
+                    toggled(next) => {
+                        SettingsVm.capture-all-audio-toggled(next);
+                    }
+                }
+
+                // task1760: absent, not dimmed, on a machine that cannot both
+                // encode and decode AV1. A disabled row would advertise a
+                // choice whose only outcome there is a recording this app
+                // cannot play back.
+                if SettingsVm.codec-av1-available: SwitchRow {
+                    label: SettingsLabels.codec-av1;
+                    sub: SettingsLabels.codec-av1-sub;
+                    checked: SettingsVm.codec-av1;
+                    toggled(next) => {
+                        SettingsVm.codec-av1-toggled(next);
+                    }
+                }
+
+                SwitchRow {
+                    label: SettingsLabels.auto-start;
+                    checked: SettingsVm.auto-start;
+                    toggled(next) => {
+                        SettingsVm.autostart-toggled(next);
+                    }
+                }
+
+                // task1980: what task1970 watches for. Beside 自動起動 because
+                // both rows are about the app doing something without being
+                // asked; executable entries are added from the review panel's
+                // 「起動時に自動録画」, the one screen that knows which
+                // application a recording was of (task2360). Folder rules
+                // (task3600) have no such screen -- nothing was recorded yet --
+                // so task3610 gives this row the one button that makes them.
+                ListRow {
+                    label: SettingsLabels.auto-capture;
+                    sub: SettingsLabels.auto-capture-sub;
+                    items: SettingsVm.auto-capture-executables;
+                    empty-text: SettingsLabels.auto-capture-empty;
+                    add-label: SettingsLabels.auto-capture-add-folder;
+                    removed(name) => {
+                        SettingsVm.auto-capture-removed(name);
+                    }
+                    folder-removed(path) => {
+                        SettingsVm.auto-capture-folder-removed(path);
+                    }
+                    add-clicked() => {
+                        SettingsVm.auto-capture-folder-add();
+                    }
+                }
+
+                buffer-row := PathRow {
+                    label: SettingsLabels.buffer-label;
+                    head: SettingsVm.buffer-head;
+                    tail: SettingsVm.buffer-tail;
+                    // While a capture is running the sub-label carries the
+                    // reason the 変更 button is dead, rather than leaving a
+                    // disabled control to explain itself.
+                    sub: SettingsVm.buffer-change-enabled
+                        ? ""
+                        : SettingsLabels.buffer-change-blocked;
+
+                    // Order is the mock's (round18 §12): 既定に戻す, 変更, 開く.
+                    //
+                    // Only once the folder has actually been moved (task2380):
+                    // while the path is still the shipped default there is
+                    // nothing for 元に戻す to go back to, and the `if` keeps it
+                    // from taking width there. Same guard as 変更 on top of
+                    // that: the engine refuses either one while a capture is
+                    // running, so the button says so rather than failing when
+                    // pressed.
+                    //
+                    // Hover is `opacity`, never a second `if` (task194-B): an
+                    // element that exists only while hovered deletes itself
+                    // under the press and eats the click. The row's hover is
+                    // ORed with the button's own so the pointer landing on it
+                    // cannot take it away, and the disabled dim is folded in
+                    // here because this binding replaces `SBtn`'s own.
+                    if SettingsVm.buffer-modified: SBtn {
+                        icon: Icons.reset;
+                        disabled: !SettingsVm.buffer-change-enabled;
+                        opacity: (buffer-row.has-hover || self.has-hover)
+                            ? (SettingsVm.buffer-change-enabled ? 1.0 : 0.45)
+                            : 0.0;
+                        clicked => {
+                            SettingsVm.buffer-reset-clicked();
+                        }
+                    }
+
+                    // `.sbtn`, not the primary `Btn` it used to be: the
+                    // primary thin plate is one per screen (styleguide §4) and
+                    // the settings screen is not where it is spent (round11
+                    // §1). 開く drops its folder glyph in the same answer --
+                    // three identical plates read as one row of controls.
+                    SBtn {
+                        label: SettingsLabels.export-change;
+                        disabled: !SettingsVm.buffer-change-enabled;
+                        clicked => {
+                            SettingsVm.buffer-change();
+                        }
+                    }
+
+                    SBtn {
+                        label: SettingsLabels.directory-open;
+                        clicked => {
+                            SettingsVm.buffer-open();
+                        }
+                    }
+                }
+
+                // Where 「クリップに保存」 writes (task2970). The buffer row's
+                // shape without its guard: moving this folder moves nothing,
+                // so there is no capture state that can refuse it and no
+                // confirmation to explain what happens to what is already
+                // there.
+                clip-row := PathRow {
+                    label: SettingsLabels.clip-label;
+                    sub: SettingsLabels.clip-sub;
+                    head: SettingsVm.clip-head;
+                    tail: SettingsVm.clip-tail;
+
+                    // Same 既定に戻す → 変更 → 開く order and the same hover
+                    // fade as the buffer row above; no capture guard here.
+                    if SettingsVm.clip-modified: SBtn {
+                        icon: Icons.reset;
+                        opacity: (clip-row.has-hover || self.has-hover)
+                            ? 1.0
+                            : 0.0;
+                        clicked => {
+                            SettingsVm.clip-reset-clicked();
+                        }
+                    }
+
+                    SBtn {
+                        label: SettingsLabels.export-change;
+                        clicked => {
+                            SettingsVm.clip-change();
+                        }
+                    }
+
+                    SBtn {
+                        label: SettingsLabels.directory-open;
+                        clicked => {
+                            SettingsVm.clip-open();
+                        }
+                    }
+                }
+
+                // ---------- 保存領域 ----------
+                GroupTitle { title: SettingsLabels.group-retention; }
+
+                // `.grp-hint`: applies to both rows below, so it sits under the
+                // heading rather than trailing the last row (round2 §7-5).
+                SelText {
+                    text: SettingsLabels.retention-hint;
+                    wrap: word-wrap;
+                    max-width: 560px;
+                    // `.ghint` is 11.5px / line-height 1.7. Slint's Text has no
+                    // line-height (checked against the 1.17 element reference
+                    // and by compiling it), so only the size carries over --
+                    // recorded as a deliberate diff (task2160).
+                    font-size: 11.5px;
+                    color: Tokens.color-on-surface-variant;
+                }
+
+                Rectangle { height: 6px; }
+
+                // task3040: label / chips / free field / unit / switch on one
+                // row (design round18-response §4-5, overwriting task1490's
+                // switch row + sub row; switch moved to the row's end by
+                // task3320). Both 保存領域 rows below pair a
+                // switch with a preset set the same way, so they share
+                // `SwitchPresetRow` (settings_rows.slint) instead of each
+                // inlining the ~60-line shape.
+                SwitchPresetRow {
+                    label: SettingsLabels.retention-capacity;
+                    checked: SettingsVm.retention-capacity-on;
+                    presets: SettingsLabels.retention-capacity-presets;
+                    selected: SettingsVm.retention-capacity-index;
+                    value-text: SettingsVm.retention-capacity;
+                    placeholder: SettingsLabels.retention-capacity-placeholder;
+                    unit: SettingsLabels.unit-gigabytes;
+                    range-error: SettingsVm.numeric-error-field == 1;
+                    error-text: SettingsLabels.retention-capacity-error;
+                    toggled(next) => {
+                        SettingsVm.retention-toggled(1, next);
+                    }
+                    preset-clicked(index) => {
+                        SettingsVm.preset-clicked(1, index);
+                    }
+                    value-edited(text) => {
+                        SettingsVm.preset-edited(1, text);
+                    }
+                }
+
+                SwitchPresetRow {
+                    label: SettingsLabels.session-lifetime;
+                    checked: SettingsVm.session-lifetime-on;
+                    presets: SettingsLabels.session-lifetime-presets;
+                    selected: SettingsVm.session-lifetime-index;
+                    value-text: SettingsVm.session-lifetime;
+                    placeholder: SettingsLabels.session-lifetime-placeholder;
+                    unit: SettingsLabels.unit-days;
+                    range-error: SettingsVm.numeric-error-field == 2;
+                    error-text: SettingsLabels.session-lifetime-error;
+                    toggled(next) => {
+                        SettingsVm.retention-toggled(2, next);
+                    }
+                    preset-clicked(index) => {
+                        SettingsVm.preset-clicked(2, index);
+                    }
+                    value-edited(text) => {
+                        SettingsVm.preset-edited(2, text);
+                    }
+                }
+
+                // No 書き出し先フォルダ row: the save dialog asks where every
+                // export goes (task1050), and the stored path is only the
+                // place that dialog opens on next time.
+                // No クリップ保存の長さ row either: clip saving went with
+                // task1090, and the hotkey below is now only 「マーカーを追加」.
+
+                // ---------- ホットキー ----------
+                GroupTitle { title: SettingsLabels.group-hotkey; }
+
+                marker-row := HotkeyRow {
+                    label: SettingsLabels.hotkey;
+                    capturing: SettingsVm.armed == 1;
+                    draft: SettingsVm.marker-draft;
+                    keys: SettingsVm.marker-keys;
+                    alert: SettingsVm.armed == 1
+                        ? ""
+                        : SettingsVm.marker-taken ? SettingsLabels.state-taken : "";
+                    clicked => {
+                        SettingsVm.hk-clicked(1);
+                    }
+                    captured(text, ctrl, alt, shift, meta) => {
+                        return SettingsVm.hk-key(1, text, ctrl, alt, shift, meta);
+                    }
+                    blurred => {
+                        SettingsVm.hk-blurred(1);
+                    }
+                    reset => {
+                        SettingsVm.hk-reset(1);
+                    }
+                }
+
+                // No save button (task146): a captured chord is registered and
+                // written the moment it lands, like every other row here.
+
+                // ---------- インストール (task4140) ----------
+                // Last in the form, and absent altogether on a machine where
+                // the installer's registrations are all there:
+                // `install-unregistered` is the empty string then, and this
+                // `if` is what the emptiness means. Two features die with no
+                // signal whatsoever when their registration is missing -- OS
+                // toasts (`Toast::show` returns `Ok` for a toast Windows
+                // dropped) and the Explorer thumbnail (its symptom is entirely
+                // outside this app) -- so this row is the only place either can
+                // be reported.
+                //
+                // Nothing here is pressable, by the user's 2026-09-09 ruling:
+                // one status row, minimal, no buttons. 「今すぐ登録する」 is a
+                // separate task, and this side only ever reads the registry.
+                //
+                // A permanent row is knowingly against two precedents -- the
+                // AV1 row above is absent rather than dimmed on a machine that
+                // cannot do AV1 (task1760), and design round5 §318 deleted the
+                // hotkey row's standing registration line in favour of a toast.
+                // The user overrode both on the one point that separates this
+                // case: an unregistered feature is a state the user can fix,
+                // which missing hardware is not.
+                //
+                // The nested layout repeats `form`'s own 6px so the
+                // title-to-row gap matches every other group; wrapping both in
+                // one element is what lets a single `if` take the whole group.
+                if SettingsLabels.install-unregistered != "": VerticalLayout {
+                    spacing: 6px;
+
+                    GroupTitle { title: SettingsLabels.group-install; }
+
+                    StatusRow {
+                        label: SettingsLabels.install-unregistered;
+                        sub: SettingsLabels.install-unregistered-reason;
+                    }
+                }
+
+                // task t260920-2be2. Which way this sits is asked once, by the
+                // installer's last page; this is where it is changed afterwards.
+                GroupTitle { title: SettingsLabels.group-update; }
+
+                SwitchRow {
+                    label: SettingsLabels.update-check;
+                    checked: SettingsVm.update-check-enabled;
+                    toggled(on) => {
+                        SettingsVm.update-check-toggled(on);
+                    }
+                }
+
+                // The status and the button share a row: 更新 is only ever
+                // pressed for the version the line beside it just named.
+                HorizontalLayout {
+                    spacing: Tokens.space-3;
+
+                    StatusRow {
+                        horizontal-stretch: 1;
+                        label: SettingsLabels.update-status;
+                    }
+
+                    if SettingsVm.update-available: SBtn {
+                        y: (parent.height - self.height) / 2;
+                        label: SettingsLabels.update-now;
+                        clicked => {
+                            SettingsVm.update-requested();
+                        }
+                    }
+                }
+            }
+        }
+
+        // The `.settings-actions` bar is gone (round 4 §2-E4): it sat across the
+        // bottom of every visit holding two buttons that were disabled almost
+        // always. Its two buttons moved next to the hotkeys; `msg-text` moved to
+        // the status bar, where it gets the 6-second rule for free.
+    }
+
+    // round8 §3-3: the hotkey box has a pencil on hover but no word for what
+    // pressing it does. Placed here -- last child of the pane -- so it draws
+    // over the form rather than taking a row in it.
+    Tooltip {
+        x: Math.max(12px, Math.min(root.width - 12px - self.width,
+            (root.width + 720px) / 2 - Tokens.space-6 - self.width));
+        y: marker-row.absolute-position.y - root.absolute-position.y + 38px;
+        armed: marker-row.box-hovered;
+        label: SettingsLabels.hotkey-edit-hint;
+    }
+
+    // ---------- the language combo's popup (task1470) ----------
+    // At pane level so it draws over the form, and positioned from the row's
+    // `absolute-position` like the tooltip above. A scrim, unlike the sessions
+    // grid's menu: there is no drag or right-click here for one to swallow, and
+    // it is what closes the menu -- including on the combo itself, which is why
+    // the box needs no "already open" branch of its own.
+    if root.language-menu-open: TouchArea {
+        clicked => {
+            root.language-menu-open = false;
+        }
+    }
+
+    if root.language-menu-open: ContextMenu {
+        // Declared after the scrim so it wins the hit test.
+        // Not `combo-x - root.absolute-position.x`: that pair renders the
+        // popup ~294px right of the box. `absolute-position.y` agrees with the
+        // layout, `.x` does not -- the pane's own reads well left of where it
+        // draws, so the subtraction lands the popup that far off. Positioned
+        // from the form's geometry instead, like the tooltip above: the column
+        // is centred and capped at 720px, so its right edge minus the padding
+        // is the combo's right edge, and the popup hangs its own width off that.
+        x: Math.clamp((scroll.visible-width + form.width) / 2
+                - Tokens.space-6 - self.width,
+            4px, root.width - self.width - 4px);
+        y: Math.clamp(language-row.combo-y - root.absolute-position.y + 4px,
+            4px, root.height - self.height - 4px);
+        // Not the stock 196px: a popup wider than the box it hangs off reads as
+        // a different control rather than that box's list.
+        width: language-row.combo-width;
+        entries: SettingsLabels.language-menu;
+        chosen(index) => {
+            root.language-menu-open = false;
+            SettingsVm.language-choice-selected(index);
+        }
+    }
+
+    // ---------- moving the buffer root (round5 §7-C) ----------
+    // Worth a confirmation because of what it does *not* do: existing
+    // recordings stay where they are, and the history follows the new root.
+    if SettingsVm.confirm-title != "": ConfirmDialog {
+        cancel-label: SettingsLabels.confirm-cancel;
+        ok-label: SettingsLabels.confirm-ok;
+        cancelled => {
+            SettingsVm.buffer-confirm-cancelled();
+        }
+        accepted => {
+            SettingsVm.buffer-confirm-accepted();
+        }
+
+        SelText {
+            text: SettingsVm.confirm-title;
+            wrap: word-wrap;
+            font-size: 14.5px;
+            font-weight: 600;
+            color: Tokens.color-on-surface;
+        }
+
+        SelText {
+            text: SettingsVm.confirm-lead;
+            wrap: word-wrap;
+            font-size: 12px;
+            color: Tokens.color-on-surface-variant;
+        }
+    }
+}

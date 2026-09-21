@@ -1,0 +1,97 @@
+// One track's row in the review screen's mixer (task1300).
+//
+// Deliberately the same shape as the transport bar's master volume: a mute
+// button and a 4px rail with a knob. Two controls that do the same kind of
+// thing should not look like two different kinds of thing -- and the master
+// slider is the one a person has already learned.
+//
+// Named `review_mixer`, not `review_track`: that file is the *timeline's*
+// track and has nothing to do with sound.
+
+import { Tokens } from "tokens.slint";
+import { Icons } from "icons.slint";
+import { IconBtn } from "controls.slint";
+
+export component MixerRow inherits Rectangle {
+    in property <string> name;
+    in property <float> volume-ratio;
+    in property <bool> muted;
+    callback volume-changed(float);
+    callback mute-toggled();
+
+    height: row.preferred-height;
+
+    row := HorizontalLayout {
+        spacing: 6px;
+
+        IconBtn {
+            box: 22px;
+            icon-size: 14px;
+            icon: root.muted ? Icons.volume-muted : Icons.volume;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                root.mute-toggled();
+            }
+        }
+
+        Text {
+            // The panel is 280px wide and an executable name can be longer
+            // than the space left over, so it elides rather than pushing the
+            // slider off the edge.
+            width: 96px;
+            text: root.name;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: Tokens.type-caption-size;
+            color: root.muted ? Tokens.color-on-surface-variant : Tokens.color-on-surface;
+        }
+
+        slider := Rectangle {
+            horizontal-stretch: 1;
+            height: Tokens.control-height-s;
+
+            Rectangle {
+                y: (parent.height - 4px) / 2;
+                height: 4px;
+                border-radius: 2px;
+                background: Tokens.chrome-hairline-strong;
+            }
+
+            // Muted drains the fill and hides the knob, exactly as the master
+            // slider does: the ratio itself is untouched, so unmuting comes
+            // back to the same level.
+            if !root.muted: Rectangle {
+                x: 0;
+                y: (parent.height - 4px) / 2;
+                width: parent.width * root.volume-ratio;
+                height: 4px;
+                border-radius: 2px;
+                background: Tokens.color-primary;
+            }
+
+            if !root.muted: Rectangle {
+                x: parent.width * root.volume-ratio - 5px;
+                y: (parent.height - 10px) / 2;
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: Tokens.color-primary;
+            }
+
+            TouchArea {
+                mouse-cursor: pointer;
+                pointer-event(event) => {
+                    if ((event.kind == PointerEventKind.down && event.button == PointerEventButton.left)
+                        || (event.kind == PointerEventKind.move && self.pressed)) {
+                        root.volume-changed(max(0.0, min(1.0, self.mouse-x / slider.width)));
+                    }
+                }
+                scroll-event(event) => {
+                    root.volume-changed(max(0.0, min(1.0,
+                        root.volume-ratio + (event.delta-y > 0 ? 0.05 : -0.05))));
+                    return accept;
+                }
+            }
+        }
+    }
+}

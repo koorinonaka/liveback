@@ -1,0 +1,304 @@
+// The settings screen's label and view-model globals, split from
+// settings.slint so the row components can reference them without a circular
+// import.
+
+import { MenuEntry } from "controls.slint";
+
+// task2560: one auto-capture registration as the settings row draws it. The
+// exe name stays the identity -- it is what the × reports back -- while the
+// display name and icon are metadata the Rust side resolved from the exe.
+// `display` empty means a metadata-less entry: the row falls back to the
+// task2370 shape, the bare mono exe name.
+//
+// task3610 puts folder rules (task3600) in the same model rather than a second
+// list: both halves are "things whose launch starts a recording", and two lists
+// under one label would say that twice. `kind` is what the row draws from, and
+// `executable` carries the identity either way -- the exe name for kind 0, the
+// folder path for kind 1 -- since that is what the callbacks report back.
+export struct AutoCaptureEntry {
+    // task2570: record the monitor the app's window sits on, not the window.
+    capture-monitor: bool,
+    // The row's leading, full-weight run: the app's display name (kind 0, empty
+    // when no metadata resolved) or the folder rule's last folder name
+    // (kind 1, task3830 -- round21 §2-3 makes that the half the row promotes).
+    display: string,
+    // The exe name (kind 0) or the folder rule's path (kind 1). The identity in
+    // both cases: it is what `removed` / `folder-removed` report.
+    executable: string,
+    icon: image,
+    // 0 = an executable registration, 1 = a folder rule.
+    kind: int,
+    // task3830: the path above `display`, drawn muted beside it (kind 1 only,
+    // empty for kind 0). Split off in Rust rather than in the row so the
+    // spelling rules -- trailing separator, volume root with no parent -- live
+    // beside the rest of the rule handling (`auto_capture::folder_row_parts`).
+    // Not spelled `parent`: that word is the element-tree keyword in .slint.
+    parent-path: string,
+    // task3730: this folder rule is in `settings.json` but the guard turns it
+    // down, so `poll` never acts on it -- the row says so in words. Always
+    // false for kind 0: an executable registration has no guard.
+    ignored: bool,
+}
+
+// Static labels and ranges, set once from ui_state::settings at startup.
+export global SettingsLabels {
+    in-out property <string> group-capture;
+    in-out property <string> group-retention;
+    in-out property <string> group-hotkey;
+    // task t260920-2be2
+    in-out property <string> group-update;
+    in-out property <string> update-check;
+    in-out property <string> update-now;
+    // The one line under the switch: 最新版です / 0.9.1 が利用できます /
+    // 確認できませんでした / 確認しています…, built in Rust because two of the
+    // four carry a version number.
+    in-out property <string> update-status;
+    in-out property <string> retention-minutes;
+    in-out property <string> frame-rate;
+    // round8 §3-1.
+    in-out property <string> ring-buffer;
+    in-out property <string> ring-buffer-sub;
+    in-out property <string> include-cursor;
+    // task1430.
+    in-out property <string> capture-all-audio;
+    in-out property <string> capture-all-audio-sub;
+    in-out property <string> auto-start;
+    // task1980; the sub line came with task2370's new entry point.
+    in-out property <string> auto-capture;
+    in-out property <string> auto-capture-sub;
+    in-out property <string> auto-capture-empty;
+    // task3610; the button at the right end of that label. The refusal when a
+    // picked folder fails the guard is a toast, raised from Rust, so it needs
+    // no property here.
+    in-out property <string> auto-capture-add-folder;
+    // task3730; the trailing run on a folder row the guard turns down. One
+    // string for every such row -- the reason is the guard's, not the rule's,
+    // so it does not vary per path.
+    in-out property <string> auto-capture-ignored;
+    // task2410; the tooltip on each row's ×.
+    in-out property <string> auto-capture-remove-hint;
+    // task2570; the tooltips on each row's window/monitor toggle, one per
+    // current state, naming what a click switches to.
+    in-out property <string> auto-capture-monitor-hint;
+    in-out property <string> auto-capture-window-hint;
+    in-out property <string> retention-capacity;
+    in-out property <string> session-lifetime;
+    in-out property <string> retention-hint;
+    in-out property <string> unit-minutes;
+    in-out property <string> unit-gigabytes;
+    in-out property <string> unit-days;
+    in-out property <string> unit-seconds;
+    in-out property <string> unit-fps;
+    in-out property <string> retention-minutes-range;
+    in-out property <string> retention-capacity-range;
+    in-out property <string> session-lifetime-range;
+    in-out property <string> retention-minutes-error;
+    in-out property <string> retention-capacity-error;
+    in-out property <string> session-lifetime-error;
+    in-out property <float> retention-minutes-min;
+    in-out property <float> retention-minutes-max;
+    in-out property <float> retention-capacity-min;
+    in-out property <float> retention-capacity-max;
+    in-out property <float> session-lifetime-min;
+    in-out property <float> session-lifetime-max;
+    in-out property <string> hotkey;
+    in-out property <string> capture-armed;
+    in-out property <string> capture-abort;
+    in-out property <string> state-failed;
+    in-out property <string> state-taken;
+    // round8 §3-3: the tooltip on the hotkey box.
+    in-out property <string> hotkey-edit-hint;
+    in-out property <string> export-change;
+    in-out property <string> directory-open;
+    in-out property <string> buffer-label;
+    // Task2970. No 変更できません twin: nothing is moved by pointing the clip
+    // folder somewhere else, so there is no state that can refuse it.
+    in-out property <string> clip-label;
+    // Task3030: the row's sub line, always shown (unlike the buffer row's
+    // conditional 変更できません) since the folder is always auto-created.
+    in-out property <string> clip-sub;
+    // Round5 §7-B: the preset chip rows, their free-field placeholders, and
+    // the buffer folder's new vocabulary.
+    in-out property <[string]> retention-minutes-presets;
+    in-out property <[string]> frame-rate-presets;
+    // task1150 / task1470: the 「システム」 chip, then the languages themselves in
+    // the combo beside it. The combo's entries are `MenuEntry` because the
+    // popup is the shared `ContextMenu`; only `label` is ever filled.
+    in-out property <string> language;
+    in-out property <string> language-system;
+    in-out property <[MenuEntry]> language-menu;
+    // round16: the theme row. Three chips rather than a chip plus a combo --
+    // the list is three long and is not going to grow, so the way back to
+    // 「システム」 is one click like every other preset row's.
+    in-out property <string> theme;
+    in-out property <[string]> theme-choices;
+    in-out property <[string]> retention-capacity-presets;
+    in-out property <[string]> session-lifetime-presets;
+    in-out property <string> codec-av1;
+    in-out property <string> codec-av1-sub;
+    in-out property <string> retention-minutes-placeholder;
+    in-out property <string> retention-capacity-placeholder;
+    in-out property <string> session-lifetime-placeholder;
+    in-out property <string> buffer-change-blocked;
+    in-out property <string> directory-reset;
+    in-out property <string> confirm-ok;
+    in-out property <string> confirm-cancel;
+    // task4140: the 「インストール」 group at the end of the form -- which
+    // features the installer's registration is missing, and why that matters.
+    // Labels rather than `SettingsVm` because the answer cannot change while
+    // the app runs: changing it means running the installer, which stops this
+    // process first.
+    //
+    // `install-unregistered` empty *is* the installed machine. The group title
+    // and the row are wrapped in one `if` on it, so on a machine where both
+    // registrations are there neither element is built -- there is no second
+    // flag that could get out of step with the text.
+    in-out property <string> group-install;
+    in-out property <string> install-unregistered;
+    in-out property <string> install-unregistered-reason;
+}
+
+// Live state and everything the user can do to it. One global rather than a
+// property chain through AppWindow: the form has ~20 bindings and the shell
+// has no business relaying any of them.
+export global SettingsVm {
+    // Numeric drafts as text; Rust only rewrites them when a reload came back
+    // different (clamp or external edit), so typing never gets snapped.
+    in-out property <string> retention-minutes;
+    in-out property <string> retention-capacity;
+    in-out property <string> session-lifetime;
+    in-out property <int> frame-rate;
+    in-out property <bool> ring-buffer-enabled;
+    in-out property <bool> include-cursor;
+    in-out property <bool> capture-all-audio;
+    // task1760. The row is hidden outright when `codec-av1-available` is false:
+    // a machine missing either the AV1 encoder or the AV1 decoder must not be
+    // offered a recording it could not play back.
+    in-out property <bool> codec-av1;
+    in-out property <bool> codec-av1-available;
+    in-out property <bool> auto-start;
+    // task t260920-2be2. `update-available` gates the 更新 button: the status
+    // line alone cannot, since it also carries the "up to date" wording.
+    in-out property <bool> update-check-enabled;
+    in-out property <bool> update-available;
+    callback update-check-toggled(bool);
+    callback update-requested();
+    // task1980: the executables registered for auto-capture, in stored order --
+    // which is load-bearing, since it decides between two launches landing in
+    // one poll. Written from both sides: the settings page's own render, and
+    // the picker when a tile registers one (nothing re-renders this pane for
+    // that, the same reason `buffer-change-enabled` is pushed from there too).
+    // Struct rows since task2560: icon + app name + exe name per entry.
+    // Since task3610 the same model also carries the folder rules (task3600),
+    // `kind == 1`, appended after the executables so the two kinds stay
+    // grouped. The name is left alone: renaming it would touch every push site
+    // for no behaviour, and the label above the list already says what it holds.
+    in-out property <[AutoCaptureEntry]> auto-capture-executables;
+    in-out property <string> buffer-head;
+    in-out property <string> buffer-tail;
+    // The buffer root only moves while nothing is being written to it (§7-C).
+    in-out property <bool> buffer-change-enabled;
+    // task2380: the folder has been moved off the shipped default, so there is
+    // something for 規定値に戻す to go back to. `buffer_directory.is_some()` -- the
+    // resolved path is not compared, because unset is what reset writes.
+    in-out property <bool> buffer-modified;
+    // ---------- クリップの保存先 (task2970) ----------
+    // Same three-part row as the buffer folder above, minus the confirmation:
+    // clips already written stay where they are, so there is nothing to warn
+    // about. `clip-modified` is `clip_directory.is_some()`, the same rule as
+    // `buffer-modified` -- reset writes `None`, so a path that happens to
+    // equal today's default is still a folder the user picked.
+    in-out property <string> clip-head;
+    in-out property <string> clip-tail;
+    in-out property <bool> clip-modified;
+    // Which chip is lit per row, or -1 when the stored value is off the list.
+    in-out property <int> retention-minutes-index;
+    in-out property <int> frame-rate-index;
+    // Which value the language row holds, in `LANGUAGE_SETTINGS` order: 0 is
+    // 「システム」, so the chip is lit exactly when this is 0.
+    in-out property <int> language-index;
+    // Which combo entry to show, in the combo's own order (system excluded).
+    // While 「システム」 is selected this is the language the row would go back
+    // to -- the last explicit pick, or what the OS resolved to (task1470).
+    in-out property <int> language-choice-index;
+    // Which chip the theme row lights, in `THEME_SETTINGS` order: 0 is
+    // 「システム」 (round16).
+    in-out property <int> theme-index;
+    in-out property <int> retention-capacity-index;
+    in-out property <int> session-lifetime-index;
+    // task1490: the row's switch. Off means the stored value is 0 and the
+    // limit is not in force -- the chips and the field below still show the
+    // value the row goes back to, dimmed.
+    in-out property <bool> retention-capacity-on;
+    in-out property <bool> session-lifetime-on;
+    // Open when the title is non-empty: the buffer-move confirmation.
+    in-out property <string> confirm-title;
+    in-out property <string> confirm-lead;
+    in-out property <string> marker-draft;
+    // round8 §3-3: the same two chords, split into caps for the row to draw.
+    in-out property <[string]> marker-keys;
+    // 0 = none, 1 = the marker row (task1090 removed the clip row).
+    in-out property <int> armed;
+    // Per row (task730): only the chord another app holds is dead now, so
+    // each row answers for itself.
+    in-out property <bool> marker-taken;
+
+    // Which row refused its last draft, in the same field ids below, or -1 for
+    // none. Round6 3's `.errrow` is drawn from this: one at a time, because
+    // typing into the other row is what clears it.
+    in-out property <int> numeric-error-field: -1;
+
+    // field: 0 retention-minutes, 1 capacity, 2 lifetime.
+    callback numeric-committed(int, string);
+    // (field, preset index) and (field, typed text) for the chip rows. Same
+    // field ids as `numeric-committed`, plus 4 for the frame rate.
+    callback preset-clicked(int, int);
+    // `LANGUAGE_SETTINGS` index -- the 「システム」 chip is the only caller left.
+    callback language-selected(int);
+    // The combo's own index space (task1470): picking a language here is also
+    // what takes the row off 「システム」.
+    callback language-choice-selected(int);
+    // `THEME_SETTINGS` index (round16).
+    callback theme-selected(int);
+    // Same field ids: 1 capacity, 2 lifetime. Off writes 0, on puts the value
+    // the row was last holding back (task1490).
+    callback retention-toggled(int, bool);
+    callback preset-edited(int, string);
+    callback ring-buffer-toggled(bool);
+    callback cursor-toggled(bool);
+    callback capture-all-audio-toggled(bool);
+    // task1760: its own callback rather than a `preset-clicked` id, because the
+    // codec is a named choice rather than a number off a list.
+    callback codec-av1-toggled(bool);
+    callback autostart-toggled(bool);
+    // task1980: the × on one row of the list. The name, not its index -- the
+    // model is rebuilt from the file after every commit.
+    callback auto-capture-removed(string);
+    // task2570: the window/monitor toggle on one row, by name for the same
+    // reason.
+    callback auto-capture-monitor-toggled(string);
+    // task3610: the folder half of the same three actions, kept as their own
+    // callbacks rather than a `kind` argument on the three above -- the
+    // executable ones edit `autoCaptureExecutables` and the folder ones
+    // `autoCaptureFolders`, two different lists in `settings.json`. Both
+    // report the path string, for the same "the model is rebuilt after every
+    // commit" reason the executable ones report the name.
+    callback auto-capture-folder-add();
+    callback auto-capture-folder-removed(string);
+    callback auto-capture-folder-monitor-toggled(string);
+    callback buffer-open();
+    callback buffer-change();
+    callback buffer-reset-clicked();
+    callback clip-open();
+    callback clip-change();
+    callback clip-reset-clicked();
+    callback buffer-confirm-accepted();
+    callback buffer-confirm-cancelled();
+    callback hk-clicked(int);
+    // (control, key text, ctrl, alt, shift, meta) -> handled.
+    callback hk-key(int, string, bool, bool, bool, bool) -> bool;
+    callback hk-blurred(int);
+    // task310: put the chord back to the shipped default, same as the folder
+    // rows' 規定値に戻す.
+    callback hk-reset(int);
+}

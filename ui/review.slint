@@ -1,0 +1,2817 @@
+// The review screen (task127, rebuilt for round5 §4 by task171).
+//
+// Three things share the pane: the stage with the overlay controls anchored to
+// the *video's* bottom edge rather than the pane's, the right detail panel that
+// owns everything which produces output, and -- with nothing loaded -- the two
+// cards that are the screen's real starting point.
+//
+// Everything time-valued stays in Rust: 100ns ticks do not fit slint's 32-bit
+// int, so the model carries percents and ratios only, and callbacks hand back
+// ratios or model row indices. Strings all come from `ui_state::timeline`.
+
+import { MixerRow } from "review_mixer.slint";
+// round16 §2: `Dark` is the un-themed 1c set. Everything drawn on the video
+// stage -- the transport, the rate chip and its menu, the LIVE capsule, the
+// overlay cards and the empty state -- reads it directly and stays dark while
+// the rest of the screen follows the theme.
+import { Dark, Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+// `TransportBtn` and `VolumeSlider` used to be declared below; task3510 moved
+// them into `controls.slint` so the clip player can draw the same transport.
+import { Btn, Chip, IconBtn, RuleV, InlineEdit, InlineEditVm, AppScroll, Tooltip, Switch, TransportBtn, VolumeSlider } from "controls.slint";
+import { ReviewStage } from "review_stage.slint";
+import { ReviewTrackWrap } from "review_track.slint";
+import { ReviewVm, TrackSpan, GapSpan, MarkerSpan, MarkerRow } from "review_vm.slint";
+export { ReviewVm, TrackSpan, GapSpan, MarkerSpan, MarkerRow }
+
+// The six marker colours (round5 §4-B), resolved from the index Rust stored on
+// the marker. One place, so the bar's rule and the panel's row can never drift
+// apart. Five are tokens; the sixth has no role to borrow and is a literal.
+//
+// round16 §3-5: light's accents are deep by design, and a deep colour in a
+// 10px swatch just reads as grey. The three that lose the most get a brighter
+// value here and here only -- the panel's colour chips are the one place in
+// the app where a token is being used as a sample of itself rather than as
+// the colour of something. error and warning are not in the ruling and keep
+// their themed token.
+global MarkerPalette {
+    public pure function color(index: int) -> color {
+        return index == 0
+            ? (Tokens.light ? #e58e00 : Tokens.color-tertiary)          // light: oklch(72% 0.16 68)
+            : index == 1
+                ? (Tokens.light ? #00a65f : Tokens.color-success)       // light: oklch(63% 0.17 158)
+                : index == 2
+                    ? (Tokens.light ? #007fbf : Tokens.color-primary)   // light: oklch(56% 0.15 235)
+                    : index == 3
+                        ? Tokens.color-error
+                        : index == 4
+                            ? Tokens.color-warning
+                            : #c2a5f5;
+    }
+}
+
+// `.timeline-chip`.
+component TimelineChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    in property <bool> disabled;
+    // The rate chip opens its menu on hover (task238), and the menu is a
+    // sibling that cannot see this chip's own TouchArea.
+    out property <bool> hovered: touch.has-hover;
+    callback clicked;
+
+    height: 24px;
+    width: layout.preferred-width;
+    border-radius: Tokens.shape-s;
+    border-width: root.on ? 0px : 1px;
+    border-color: Dark.chrome-hairline-strong;
+    background: root.on
+        ? Dark.chrome-selected
+        : touch.pressed ? Dark.chrome-active : touch.has-hover ? Dark.chrome-hover : transparent;
+    // 0.50 rather than the 0.38 the shared Btn uses: this chip's label is the
+    // dimmer `on-surface-variant`, which at 0.38 fell to 2.2:1 on the task159
+    // surfaces -- under the 3:1 a disabled control still owes.
+    opacity: root.disabled ? 0.50 : 1.0;
+
+    layout := HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        alignment: center;
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            font-size: 11px;
+            font-weight: root.on ? 600 : 400;
+            color: (root.on || touch.has-hover) ? Dark.color-on-surface : Dark.color-on-surface-variant;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// `.range .stepbtn` / `.range .rst`: a 26x22 icon square that carries no
+// plate of its own until the pointer is on it.
+component RangeStep inherits Rectangle {
+    in property <string> icon;
+    in property <color> tint: Tokens.color-on-surface-variant;
+    out property <bool> hovered: touch.has-hover;
+    callback clicked;
+
+    width: 26px;
+    height: 22px;
+    border-radius: Tokens.shape-xs;
+    background: touch.pressed
+        ? Tokens.chrome-selected
+        : touch.has-hover ? Tokens.chrome-hover : transparent;
+
+    AppIcon {
+        commands: root.icon;
+        stroke-color: touch.has-hover ? Tokens.color-on-surface : root.tint;
+        size: 14px;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// One row of the range panel (round8 §2, D案). The column run is the mock's
+// `34px | 1fr | 26px | 84px | 26px | 26px`, with the last two cells merged
+// into one 52px tail so the same component can hold either a forward stepper
+// or the reset -- what matters is that the 84px value cell lands in the same
+// place on all three rows, which is what puts the digits on one vertical line.
+// The tail column was 14px until task3050 (design round18 §4-6) widened it to
+// a full 26x22 button cell, so the playhead buttons and the reset line up.
+component RangeRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    // 開始/終了 carry steppers; 長さ is a readout with the way back on it.
+    in property <bool> steppable;
+    in property <bool> resettable;
+    in property <bool> accent;
+    in property <bool> enabled: true;
+    // Range-edit mode (task1060). `enabled` still means "there is a range";
+    // this is "and you may move it". Kept apart so the 長さ row's reset stays
+    // bright and clickable outside the mode -- it is one click, and one click
+    // back, so it never needed the mode.
+    // 2026-09-11 (task4340): **no call site produces this any more** -- both
+    // `start-row` and `end-row` dropped their `editable: ReviewVm.clip-editing`,
+    // so it is the default `true` everywhere and `dimmed` is always false. The
+    // property, `dimmed`, and `changed editable` below are all left standing on
+    // purpose: `draft/4160` holds their removal and the user ruled on
+    // 2026-09-09 that it stays asleep, and the set only goes back together.
+    in property <bool> editable: true;
+    in property <string> back-hint;
+    in property <string> forward-hint;
+    in property <string> reset-hint;
+    in property <string> playhead-hint;
+    // Whatever the pointer is on, for the panel's one shared tooltip. Empty
+    // means nothing here is hovered.
+    out property <string> hint:
+        back.hovered ? root.back-hint
+            : forward.hovered ? root.forward-hint
+            : reset.hovered ? root.reset-hint
+            : playhead.hovered ? root.playhead-hint
+            : "";
+    // -10 or +10 seconds.
+    callback stepped(int);
+    callback committed(string);
+    callback reset-clicked();
+    callback playhead-clicked();
+
+    property <bool> editing;
+
+    // Leaving range-edit mode takes the open editor with it, Esc-style: the
+    // box stayed up holding the focus after the mode it belongs to was gone,
+    // and a half-typed boundary is not something to commit on the way out.
+    changed editable => {
+        if (!root.editable) {
+            root.editing = false;
+        }
+    }
+
+    // A boundary you cannot move right now reads as one (task1060). The 長さ
+    // row is a readout in either mode, so it never dims. Carried per-child
+    // rather than on the row since task3050: the playhead button works outside
+    // range-edit mode, and a working control drawn at 0.38 reads as dead.
+    property <bool> dimmed: root.steppable && !root.editable;
+
+    height: 40px;
+    background: root.accent ? Tokens.color-primary.with-alpha(0.05) : transparent;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+
+        Text {
+            width: 34px;
+            text: root.label;
+            vertical-alignment: center;
+            font-size: 10.5px;
+            opacity: root.dimmed ? 0.38 : 1.0;
+            color: Tokens.color-on-surface-variant;
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        Rectangle {
+            width: 26px;
+            opacity: root.dimmed ? 0.38 : 1.0;
+
+            back := RangeStep {
+                // The digits are a full-row `Text` centred on its line box, so
+                // their visual weight sits ~2px below that box's centre while a
+                // 22px button sits exactly on it -- the button reads as high.
+                // Measured 2026-09-11 (task4340) on the real machine: ink-centre
+                // 54.5 vs 56.5 on 開始, 95.5 vs 97.5 on 終了, 136 vs 138.5 on 長さ.
+                // Same expression on all four buttons so the three rows' last
+                // buttons stay on one line. Precedent: `ui/controls.slint`'s
+                // `- 0.5px`.
+                y: (parent.height - self.height) / 2 + 2px;
+                visible: root.steppable && root.enabled && root.editable;
+                icon: Icons.step-back;
+                clicked => {
+                    root.stepped(-10);
+                }
+            }
+        }
+
+        // The value cell. `padding-right: 14px` is what holds the digits off
+        // the tail so the three rows share one right edge.
+        Rectangle {
+            width: 84px;
+            opacity: root.dimmed ? 0.38 : 1.0;
+
+            // Behind the text, not around it: a TouchArea that wrapped the
+            // editor would keep the click and the caret would never land
+            // where the pointer did.
+            // 2026-09-09, user, in person: **the typed time is withdrawn.**
+            // `editable` is `ReviewVm.clip-editing` at both call sites, so the
+            // only state this cell was ever openable in is task3860's 確定ステップ
+            // -- and inside that step the click cannot work: the row's
+            // `TextInput` takes key focus, the comment field blurs,
+            // `InlineEdit`'s 2026-09-07 blur-cancel ends the step, and the
+            // caller tears this row's editor down before one keystroke lands.
+            // Measured on the real machine as 3860's Verification item 9.
+            // So the cell stops offering what it cannot deliver: no press, and
+            // no I-beam promising a caret. The steppers, 再生位置に合わせる and
+            // the track's own handles are the ways to move a boundary in the
+            // step -- all `TouchArea`s, which take no key focus.
+            //
+            // The user explicitly declined the wider fix on the same day:
+            // `InlineEdit`'s blur-cancel rule is **not** touched.
+            //
+            // Left in place rather than deleted, so `editing` / the `TextInput`
+            // / `committed` come back as one piece if the typed time is ever
+            // reinstated behind a field that does not steal focus.
+            value-touch := TouchArea {
+                enabled: false;
+            }
+
+            Rectangle {
+                border-radius: Tokens.shape-xs;
+                // The hover fill goes with the press. Spelled out rather than
+                // left to `value-touch.has-hover` under `enabled: false`:
+                // whether a disabled `TouchArea` still tracks hover is slint's
+                // business, and a lit cell is exactly the promise being
+                // withdrawn.
+                background: root.editing ? Tokens.chrome-inset : transparent;
+                border-width: root.editing ? 1px : 0px;
+                border-color: Tokens.color-primary.with-alpha(0.5);
+            }
+
+            if !root.editing: Text {
+                text: root.value;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                width: parent.width - 14px;
+                x: 0;
+                font-size: 15px;
+                font-weight: root.accent ? 700 : 600;
+                color: root.accent ? Tokens.color-primary : Tokens.color-on-surface;
+            }
+
+            if root.editing: TextInput {
+                width: parent.width - 14px;
+                x: 0;
+                height: parent.height;
+                text: root.value;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                single-line: true;
+                font-size: 15px;
+                font-weight: root.accent ? 700 : 600;
+                color: root.accent ? Tokens.color-primary : Tokens.color-on-surface;
+                text-cursor-width: 1.5px;
+                selection-background-color: Tokens.color-primary;
+                selection-foreground-color: Tokens.color-on-primary;
+                init => {
+                    self.focus();
+                    self.select-all();
+                }
+                accepted => {
+                    root.editing = false;
+                    root.committed(self.text);
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        // Esc is the only exit that keeps the old value: the
+                        // row rebuilds from `root.value`, which never moved.
+                        root.editing = false;
+                        return accept;
+                    }
+                    reject
+                }
+                changed has-focus => {
+                    if (!self.has-focus && root.editing) {
+                        root.editing = false;
+                        root.committed(self.text);
+                    }
+                }
+            }
+        }
+
+        // col5 + col6. The stepper sits at the head of it; the reset and the
+        // playhead button share the tail, which is where the mock's
+        // `justify-self:end` puts them -- one 26x22 cell, so the three rows'
+        // last buttons stand in one line.
+        Rectangle {
+            width: 52px;
+
+            forward := RangeStep {
+                x: 0;
+                // Optical nudge, see `back` (task4340).
+                y: (parent.height - self.height) / 2 + 2px;
+                opacity: root.dimmed ? 0.38 : 1.0;
+                visible: root.steppable && root.enabled && root.editable;
+                icon: Icons.step-forward;
+                clicked => {
+                    root.stepped(10);
+                }
+            }
+
+            // No `editable` here (task3050): range-edit mode guards the drag
+            // against a stray click on the track, which is not a risk a button
+            // has -- and hiding this one in the mode it is meant to replace
+            // would empty the feature out.
+            playhead := RangeStep {
+                x: parent.width - self.width;
+                // Optical nudge, see `back` (task4340).
+                y: (parent.height - self.height) / 2 + 2px;
+                visible: root.steppable && root.enabled;
+                icon: Icons.playhead;
+                tint: Tokens.color-outline;
+                clicked => {
+                    root.playhead-clicked();
+                }
+            }
+
+            reset := RangeStep {
+                x: parent.width - self.width;
+                // Optical nudge, see `back` (task4340).
+                y: (parent.height - self.height) / 2 + 2px;
+                visible: root.resettable && root.enabled;
+                icon: Icons.reset;
+                tint: Tokens.color-outline;
+                clicked => {
+                    root.reset-clicked();
+                }
+            }
+        }
+    }
+}
+
+// ---------- empty state (round7 §2-6) ----------
+// Nothing loaded is not an error and not a pitch: a waiting glyph, two waves
+// and two lines laid straight on the panel ground. Round7 threw
+// out the two ghost-line cards that stood here (task234) along with the
+// illustration plate before them -- the screen has no click target at all now,
+// and the way in is the rail. `round5-uiux-redesign.md` §4-A carries the
+// revised description; the mock's 確認 × 空状態 toggle is the measure.
+export component ReviewEmpty inherits Rectangle {
+    // No ground of its own (round25 response §4-4, 2026-09-19): the mock's
+    // `.empty` has no background, so the panel ground (`t260919-ee8c`) shows
+    // through -- in both themes. The black stage ground (`#05070a`) and the
+    // centred radial halo that used to sit here are both gone; the stage
+    // stays black because it holds video, and this screen holds none. Glyph,
+    // waves and caption follow the theme's own tokens.
+    background: transparent;
+    clip: true;
+
+    // ---------- the two waves ----------
+    // The mock is the measure: a band 90px tall holding two SVGs that are 200%
+    // of the pane wide with `preserveAspectRatio: none`. That keeps two things
+    // the same on every display -- two wavelengths across the pane and ~9px of
+    // amplitude -- which is what freezing the geometry at one 4K reading
+    // (task2870) threw away: on a 1571px pane it left a single 30px-tall arc.
+    //
+    // `fit: fill` is slint's `preserveAspectRatio: none` (ImageFit::Fill ->
+    // lyon's Stretch). An earlier note here said slint had no such thing and
+    // paid for it by deriving `height` from the width and flattening the path
+    // data by hand; both are gone, and the commands are the mock's own.
+    //
+    // **They drift again, at a known cost (round25 response §4-4, user ruling
+    // (a) of 2026-09-19).** The mock slides them by one pane width over
+    // 16s/26s, and the phase reads `animation-tick()`. Anything that reads
+    // that function makes slint mark the window as animating on every
+    // evaluation (`i-slint-core-1.17.1/animations.rs:292` calls
+    // `set_has_active_animations()`), and the winit loop turns that into a
+    // `request_redraw()` on every iteration
+    // (`i-slint-backend-winit-1.17.1/event_loop.rs:638`). So while this screen
+    // is shown the window presents at the monitor's refresh rate -- 60.45/s
+    // against 0 when still (round22 §3-2, task3930/3940). task3940 stopped the
+    // drift for that reason; the user chose to pay it for the waves alone (the
+    // glyph stays still). No reduced-motion condition: that switch was removed
+    // with its wiring in task3940 (round22 §5).
+    //
+    // task2870's phase jump stays fixed: the modulo is taken over *time*
+    // against a constant period, never over a distance the pane width feeds,
+    // so a resize cannot skip cycles. An `animate` block would tween back on
+    // the wrap and the wave would rock instead of drift.
+    //
+    // The whole band is at 50% (the mock's `.wavebg{opacity:.5}`); `wave2`
+    // carries its own 55% on top of that (`svg.w2{opacity:.55}`).
+    Rectangle {
+        y: parent.height * 0.56;
+        height: 90px;
+        clip: true;
+        opacity: 0.5;
+
+        // Seconds per crest. The mock's 16s/26s are per pane width, and one
+        // wavelength is half a pane width for wave1 and two thirds of one for
+        // wave2.
+        property <duration> wave1-period: 8s;
+        property <duration> wave2-period: 26s * 2 / 3;
+        // 0 -> 1 over one period, then back to 0: one wavelength of travel.
+        property <float> wave1-phase: Math.mod(animation-tick() / 1ms, self.wave1-period / 1ms) / (self.wave1-period / 1ms);
+        property <float> wave2-phase: Math.mod(animation-tick() / 1ms, self.wave2-period / 1ms) / (self.wave2-period / 1ms);
+        // One wavelength on screen: the paths are twice the pane wide and hold
+        // four and three full waves in their viewboxes.
+        property <length> wave1-lambda: self.width * 2 / 4;
+        property <length> wave2-lambda: self.width * 2 / 3;
+
+        wave1 := Path {
+            width: parent.width * 2;
+            height: parent.height;
+            // Leftward (the mock's `wavedrift`).
+            x: -parent.wave1-phase * parent.wave1-lambda;
+            fit: fill;
+            viewbox-width: 1200;
+            viewbox-height: 170;
+            commands: "M0 85 Q75 51 150 85 T300 85 T450 85 T600 85 T750 85 T900 85 T1050 85 T1200 85";
+            // Theme-following since 2026-09-16.
+            stroke: Tokens.color-primary.with-alpha(0.16);
+            stroke-width: 1.5px;
+            fill: transparent;
+        }
+
+        // The slower one runs the other way, 14px lower, at 55% strength.
+        wave2 := Path {
+            width: parent.width * 2;
+            height: parent.height;
+            y: 14px;
+            // Rightward (the mock's `animation-direction: reverse`).
+            x: (parent.wave2-phase - 1) * parent.wave2-lambda;
+            fit: fill;
+            viewbox-width: 1200;
+            viewbox-height: 170;
+            commands: "M0 85 Q100 115 200 85 T400 85 T600 85 T800 85 T1000 85 T1200 85";
+            // round16 §4-2: 11%, up from the 7% `chrome-hover` carries. Its own
+            // literal now -- the wave is no longer the state layer's strength.
+            //
+            // Light flips the base the way round16 §1 flips every state layer:
+            // blue-white -> navy `#1f2a3a`, same 11%. The mock leaves this one
+            // `rgba(255,255,255,.11)` in both themes, which is invisible on a
+            // light ground -- reported to the design side as a diff rather
+            // than copied, because the user's 2026-09-16 wording was that the
+            // waves follow the light tokens too.
+            stroke: Tokens.light ? #1f2a3a1c : #c7d6eb1c;
+            stroke-width: 1.5px;
+            fill: transparent;
+            opacity: 0.55;
+        }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: Tokens.space-4;
+
+        // ---------- waiting glyph ----------
+        HorizontalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                // It used to breathe 0.55 <-> 1.0 on a 2100ms timer whose
+                // interval matched the tween, i.e. a tween that never settled,
+                // which is a running animation and so a redraw request on every
+                // frame (see the wave note above). Held at the bright end
+                // (task3940): round16 §4-2 raised this glyph precisely because
+                // it was the dimmest mark on the screen.
+                opacity: 1.0;
+
+                AppIcon {
+                    // The dashed ring plus its outlined centre. Both are in
+                    // `Icons.empty-record` now; the filled dot the cards used
+                    // went with them.
+                    commands: Icons.empty-record;
+                    // round16 §4-2, up from #39424e: the glyph is the thing the
+                    // screen is about, and it was the dimmest mark on it.
+                    //
+                    // `color-empty-glyph` since 2026-09-16 -- the token the
+                    // list empty states already use. Dark is byte-identical
+                    // (it *is* `Dark.color-primary.with-alpha(0.55)`), and
+                    // light gets the measured #628da4 instead of a second
+                    // hand-mixed value: the mock asks for
+                    // `color-mix(primary 60%, #aab6c4)` = ~#448ea8, and the
+                    // token was measured against the sub-caption under it
+                    // (see its own comment in `tokens.slint`).
+                    stroke-color: Tokens.color-empty-glyph;
+                    size: 26px;
+                    weight: 1.4px;
+                }
+            }
+        }
+
+        // ---------- caption ----------
+        VerticalLayout {
+            alignment: center;
+            spacing: 9px;
+
+            Text {
+                text: ReviewVm.empty-title;
+                horizontal-alignment: center;
+                font-size: 13.5px;
+                font-weight: 600;
+                letter-spacing: 0.04 * 13.5px;
+                // round16 §4-2, up from #98a1ad -- dark only. Light takes the
+                // theme's own `on-surface-variant` (mock, 2026-09-16).
+                color: Tokens.light ? Tokens.color-on-surface-variant : #b6c1cf;
+            }
+
+            Text {
+                text: ReviewVm.empty-body;
+                horizontal-alignment: center;
+                font-size: 11.5px;
+                letter-spacing: 0.02 * 11.5px;
+                // round16 §4-2, up from #5c6673 -- dark only; light takes
+                // `outline` (mock, 2026-09-16).
+                color: Tokens.light ? Tokens.color-outline : #7d8a9c;
+            }
+        }
+    }
+}
+
+// ---------- right detail panel (round5 §4-D) ----------
+
+// `.sec`. The mock hangs the marker section's hotkey badge and 追加 button off
+// the right of this same line (`justify-content:space-between`), so anything
+// passed as a child lands there.
+component PanelSection inherits Rectangle {
+    in property <string> label;
+    height: 26px;
+
+    HorizontalLayout {
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            font-size: Tokens.type-section-size;
+            font-weight: Tokens.type-section-weight;
+            // `--outline`, not `--on-surface-variant`: a section heading is a
+            // label for what follows, not content of its own (mock `.sec`).
+            color: Tokens.color-outline;
+            letter-spacing: 0.66px;
+        }
+
+        @children
+    }
+}
+
+component MarkerListRow inherits Rectangle {
+    in property <MarkerRow> entry;
+    in property <bool> editing;
+    callback clicked;
+    callback rename-requested();
+    callback renamed(string);
+    callback rename-cancelled();
+    callback removed();
+    // task3050: 前後30秒を範囲に, plus the hover so the panel's tooltip can say
+    // what it does. Reported rather than exposed as a property because the
+    // button lives inside an `if` and ids in there cannot be read from outside.
+    // The hover carries the row's own bottom edge (window-absolute) for the
+    // same reason one level out: the rows live in a `for` and cannot be
+    // addressed from outside either, so the panel's tip can only learn which
+    // row raised it from the row itself (task3420). The bottom edge rather
+    // than the top, so the 28px row height stays in one place.
+    callback ranged();
+    callback range-hovered(bool, length);
+
+    height: 28px;
+    border-radius: Tokens.shape-s;
+    background: root.editing
+        ? Tokens.color-primary.with-alpha(0.1)
+        : touch.has-hover ? Tokens.chrome-hover : transparent;
+
+    // Before the row's content, so the × inside it wins the overlap: slint
+    // hit-tests front-to-back and this used to be declared last, which put an
+    // invisible full-row hit target on top of the button. Disabled while
+    // editing -- the field inside owns the pointer then.
+    touch := TouchArea {
+        enabled: !root.editing;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+        double-clicked => {
+            root.rename-requested();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 4px;
+        spacing: 8px;
+
+        Rectangle {
+            width: 3px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 1.5px;
+            background: MarkerPalette.color(root.entry.color-index);
+        }
+
+        Text {
+            text: root.entry.time;
+            vertical-alignment: center;
+            font-size: 11px;
+            font-weight: 600;
+            color: Tokens.color-on-surface;
+        }
+
+        if !root.editing: Text {
+            text: root.entry.label == "" ? ReviewVm.marker-placeholder : root.entry.label;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            font-size: 11px;
+            color: root.entry.label == ""
+                ? Tokens.color-outline
+                : Tokens.color-on-surface-variant;
+        }
+
+        if root.editing: edit := InlineEdit {
+            horizontal-stretch: 1;
+            y: (parent.height - self.height) / 2;
+            text: root.entry.label;
+            // The `Enter` hint the design asks for, right-aligned in the field.
+            hint: "Enter";
+            init => {
+                self.begin-edit();
+            }
+            committed(value) => {
+                root.renamed(value);
+            }
+            // Guarded on the row's own edit state (task3430). Since blur
+            // cancels, the teardown that follows `root.editing` going false can
+            // itself deliver a `cancelled` -- and by then the pane may already
+            // have opened a *different* row, whose index an unguarded forward
+            // would clear. A stale cancel is a no-op; a real one (the field
+            // blurred while this row was still the one being edited) still
+            // gets through.
+            cancelled => {
+                if (root.editing) {
+                    root.rename-cancelled();
+                }
+            }
+        }
+
+        // Hover drives the opacity, never the element's existence -- the same
+        // shape as the pencils in `sessions_tile.slint` (task184), and for a
+        // reason found the hard way: pressing this button takes the mouse grab
+        // off `touch`, so `if touch.has-hover` deleted the button between the
+        // press and the release and no click was ever reported. `|| self` keeps
+        // it lit while the pointer owns it.
+        // task3870 (design round19 §4). The place was already the one the round
+        // asks for -- 「× の左」, which is where task3050 put it -- so what
+        // changes here is the box (20px -> the panel's 22px hover-group
+        // convention, the same as the marker heading's 追加 button and the
+        // range block's tail column) and the glyph, which gains its filled dot.
+        // The × keeps its 20px: its size belongs to task3420, and this task's
+        // Out of Scope names the row's other buttons.
+        if !root.editing: ranged := IconBtn {
+            box: 22px;
+            icon-size: 12px;
+            icon: Icons.marker-range;
+            fill-icon: Icons.marker-range-fill;
+            y: (parent.height - self.height) / 2;
+            opacity: (touch.has-hover || ranged.has-hover) ? 1 : 0;
+            changed has-hover => {
+                root.range-hovered(self.has-hover,
+                    root.absolute-position.y + root.height);
+            }
+            clicked => {
+                root.ranged();
+            }
+        }
+
+        if !root.editing: remove := IconBtn {
+            box: 20px;
+            icon-size: 12px;
+            icon: Icons.close;
+            y: (parent.height - self.height) / 2;
+            opacity: (touch.has-hover || remove.has-hover) ? 1 : 0;
+            clicked => {
+                root.removed();
+            }
+        }
+    }
+}
+
+export component ReviewPane inherits Rectangle {
+    // Flipped by `live-blink` (round7 §2-3).
+    property <bool> live-dot-dim;
+    // The content face in app.slint is this pane's ground; a second
+    // 85 % layer here would make it opaque (t260916-ebdb).
+    background: transparent;
+
+    // True while one of the shell's dialogs is up (task142). Its FocusScope
+    // owns the keyboard then; this pane takes it back when the dialog closes.
+    in property <bool> overlay-open;
+
+    // The rate chip's menu (task148). Held here rather than in the VM so
+    // Hover, not click (task238): the chip and the popup sit flush against one
+    // another, so `has-hover` on either keeps it open and crossing the seam
+    // never closes it. Nothing assigns to `rate-menu-hovered` -- it is a
+    // binding, which is why the old scrim and the Escape branch are gone.
+    // `rate-menu-hover` is the menu's own backdrop TouchArea, and it is
+    // declared *first* inside the menu so the rate rows above it keep their
+    // clicks -- which also means a row shadows it: slint gives hover to the
+    // topmost TouchArea only, so `rate-menu-hover.has-hover` is false for every
+    // point a row covers, i.e. almost the whole menu. Reading it alone is what
+    // made the menu close the instant the pointer arrived (task238's symptom,
+    // measured again in task340 on 2026-08-19). `hovered-rows` is the missing
+    // half: the rows report themselves, so together they cover the menu.
+    property <bool> rate-menu-hovered: rate-chip.hovered
+        || rate-menu-hover.has-hover
+        || rate-menu.hovered-rows > 0;
+    // The seams the two halves still cannot cover: the 2px joint between the
+    // chip and the menu, and the 4px of padding and inter-row gaps inside it.
+    // A pointer crossing one of those is between TouchAreas for a frame or two,
+    // and without this the menu would flicker shut under a moving cursor.
+    // 200ms is a pointer's flight across a 2px seam with room to spare, and
+    // short enough that a menu the user walked away from is gone before they
+    // notice it. This is a debouncer, not the fix -- the fix is `hovered-rows`.
+    property <bool> rate-menu-open: root.rate-menu-hovered || rate-menu-grace.running;
+
+    rate-menu-grace := Timer {
+        interval: 200ms;
+        running: false;
+        triggered => {
+            self.running = false;
+        }
+    }
+
+    // Arm on the falling edge, disarm the moment hover comes back -- otherwise
+    // a re-entry would leave the timer running and the menu would linger 200ms
+    // past the *second* exit for no reason.
+    changed rate-menu-hovered => {
+        rate-menu-grace.running = !root.rate-menu-hovered;
+    }
+    // Which marker row is being renamed, or -1. UI-local: nothing in Rust
+    // changes until the edit commits.
+    property <int> editing-marker: -1;
+    // task3640. The shell's full-window overlay needs to know that this rename
+    // is open, and a conditional element cannot be read from outside its own
+    // subtree, so the pane pushes the answer onto `ReviewVm` instead. Same
+    // shape as `fs.renaming` below, which has been doing this since task3050.
+    property <bool> marker-renaming: root.editing-marker >= 0;
+    changed marker-renaming => {
+        ReviewVm.marker-editing = self.marker-renaming;
+    }
+    // The other direction: the overlay took a press outside the field and is
+    // asking this pane to end its edit. A counter rather than a bool because
+    // the overlay's only news is "a press happened" -- there is no state to
+    // mirror back, and a counter cannot get stuck in the wrong position.
+    //
+    // Clearing `editing-marker` is the whole of the cancel: the teardown's blur
+    // is what reports it, exactly as the panel's own ground area has done since
+    // task3430 (`review.slint`'s `if editing-marker >= 0 || clip-editing:
+    // TouchArea`, screen-verified in 3430's phase 3 sweep).
+    in property <int> dismiss-token;
+    changed dismiss-token => {
+        root.editing-marker = -1;
+    }
+    // Whichever of the range block's icon-only controls the pointer is on;
+    // its own Tooltip reads it below -- one of three in this panel since
+    // task3050 added the marker list's tip and task3170 split off
+    // 「範囲を編集」's (round8 §2).
+    // The same idea for the marker list's own icon-only button (task3050). It
+    // is assigned rather than bound: a `for` body's children cannot be read
+    // from out here, so each row reports its hover in.
+    property <string> marker-hint;
+    // Window-absolute y of the bottom edge of the row that raised
+    // `marker-hint`, reported by that row along with the hover (task3420).
+    // Written only on the hover-in edge: two rows' `changed has-hover` fire in
+    // an order nobody controls when the pointer crosses a boundary, and a
+    // hover-out arriving after the next hover-in would otherwise overwrite the
+    // live anchor with the row the pointer already left. Stale after the tip
+    // goes away, which costs nothing -- `armed` is false by then.
+    property <length> marker-hint-anchor-y;
+    // Only the three rows inside the range block. 「範囲を編集」 used to be mixed
+    // in here too, but it sits above the block next to the section heading, so
+    // the block's anchor put its tip three rows away from the button that
+    // raised it -- the same mistake task3050 found in the marker list. It has
+    // its own Tooltip now (task3170).
+    property <string> range-hint:
+        start-row.hint != ""
+            ? start-row.hint
+            : end-row.hint != "" ? end-row.hint : length-row.hint;
+
+    // ---------- auto-hide (task151) ----------
+    // `shown` is what the timer owns; `pinned` is every reason the bar must
+    // stay regardless. Anything the user is *in the middle of* pins it, so a
+    // drag, an open menu and a running export all count.
+    property <bool> controls-shown: true;
+    property <bool> controls-pinned: !ReviewVm.playing
+        || overlay-hover.has-hover
+        || ReviewVm.dragging
+        || ReviewVm.range-dragging
+        || root.rate-menu-open
+        || ReviewVm.export-busy
+        // task3860. The 確定ステップ is the one mode the boundaries can be
+        // dragged in, so the track has to be *there* for the whole of it --
+        // and this is the one state the bar cannot bring itself back from.
+        // While the step is open `app.slint`'s overlay covers the stage
+        // except for the track's own band, and a `TouchArea` that is hit
+        // hides everything under it, hover included: `overlay-hover` would
+        // never see the pointer, task1020's bring-it-back area at the foot
+        // of this file would never be reached, and nothing would call
+        // `poke()`. The bar would idle out mid-comment and every press on
+        // the stage would close the step instead of moving a boundary.
+        // 「範囲を編集」 needed no such pin -- it had no overlay above it, so
+        // stage hover alone kept the bar up.
+        || ReviewVm.clip-editing;
+    property <bool> controls-visible: root.controls-shown || root.controls-pinned;
+    // The bar has to outlive its own opacity to fade *out*: dropping `visible`
+    // in the same frame cuts the animation off at frame one, which is why this
+    // used to fade in only (task1020). `fade-out` folds it once the animation
+    // has actually run.
+    property <bool> controls-rendered: true;
+
+    changed controls-visible => {
+        if (root.controls-visible) {
+            root.controls-rendered = true;
+        }
+    }
+
+    function poke() {
+        root.controls-shown = true;
+        idle.restart();
+    }
+
+    // Space / m / s / rate / frame / arrows / Escape all land here.
+    // Explicit size: a FocusScope wrapping a layout otherwise re-sizes to the
+    // layout's preferred height when a conditional child appears, which parked
+    // the whole pane-foot mid-screen the moment the status line showed.
+    fs := FocusScope {
+        width: 100%;
+        height: 100%;
+
+        // Nothing else hands a fresh FocusScope key focus, and the pane is
+        // re-instantiated every time the 確認 rail opens, so without this the
+        // shortcuts stay dead until the user happens to click the stage.
+        init => {
+            self.focus();
+        }
+
+        // The shell's overlay dialogs take focus while open (task142).
+        property <bool> shell-overlay: root.overlay-open;
+        changed shell-overlay => {
+            if (!self.shell-overlay) {
+                self.focus();
+            }
+        }
+
+        // A rename field takes focus and takes it to the grave; claim it back.
+        property <bool> renaming: root.editing-marker >= 0;
+        changed renaming => {
+            if (!self.renaming) {
+                self.focus();
+            }
+        }
+
+        // task4190. The 確定ステップ's comment field is the third one, and it
+        // leaves the same hole: Enter and Esc both drop `clip-editing` to
+        // false, the field tears down, and slint hands the focus to nobody --
+        // so the shortcuts stayed dead until the user clicked the stage.
+        // Measured before the fix: Esc, then four `l`, and the playhead never
+        // moved off 0:28.
+        //
+        // **The false edge only, exactly like the two above.** `changed` fires
+        // on both edges, and focusing on the true edge would take the focus
+        // the field's own `init => self.begin-edit()` has just claimed; the
+        // blur that followed would hit `InlineEdit`'s blur-cancel and close
+        // the step in the same frame it opened. On this edge the field is
+        // already on its way out and its `cancelled` handler is guarded by
+        // `if (ReviewVm.clip-editing)`, false by now -- so the reclaim cannot
+        // fire a second cancel either.
+        property <bool> clip-editing: ReviewVm.clip-editing;
+        changed clip-editing => {
+            if (!self.clip-editing) {
+                self.focus();
+            }
+        }
+
+        key-pressed(event) => {
+            root.poke();
+            if (ReviewVm.key-pressed-cb(event.text, event.modifiers.shift, event.repeat)) {
+                return accept;
+            }
+            return reject;
+        }
+
+        key-released(event) => {
+            ReviewVm.key-released-cb(event.text);
+            return accept;
+        }
+
+        HorizontalLayout {
+            // ---------- stage + its overlay ----------
+            stage-area := Rectangle {
+                horizontal-stretch: 1;
+                clip: true;
+
+                // Where the picture actually is inside the stage (round5
+                // §4-A-2). The overlay bar hangs off *this* box, not the
+                // pane's edge: in a letterboxed session a bar pinned to the
+                // pane floats in the black, detached from the video it drives.
+                property <length> video-width:
+                    min(stage-area.width, stage-area.height * ReviewVm.stage-aspect);
+                property <length> video-height:
+                    min(stage-area.height, stage-area.width / ReviewVm.stage-aspect);
+
+                // The picture's drawn size, reported so the engine can resample
+                // frames to it (task990). This box is the one that already
+                // knows it -- deriving it a second time in Rust would be the
+                // same contain-fit maths kept in step by hand. `init` as well
+                // as `changed`: an engine starts with an empty target and its
+                // first frames would go out full-size waiting for a resize
+                // that may never come.
+                init => {
+                    ReviewVm.stage-size-changed(stage-area.video-width, stage-area.video-height);
+                }
+                changed video-width => {
+                    ReviewVm.stage-size-changed(stage-area.video-width, stage-area.video-height);
+                }
+                changed video-height => {
+                    ReviewVm.stage-size-changed(stage-area.video-width, stage-area.video-height);
+                }
+
+                stage := ReviewStage {
+                    width: 100%;
+                    height: 100%;
+                    video-width: stage-area.video-width;
+                    video-height: stage-area.video-height;
+                    bottom-inset: root.controls-visible
+                        ? overlay.height + (stage-area.height - stage-area.video-height) / 2
+                        : 0px;
+                    request-focus => {
+                        fs.focus();
+                    }
+                    activity => {
+                        root.poke();
+                    }
+                }
+
+                // ---------- minimized message (round7 §2-7) ----------
+                // Centred in the picture *minus the transport band*, not in the
+                // picture: the mock insets the box by 64px at the bottom, so
+                // the text sits in the middle of what is actually free.
+                if ReviewVm.minimized-visible: Rectangle {
+                    x: (stage-area.width - stage-area.video-width) / 2;
+                    y: (stage-area.height - stage-area.video-height) / 2;
+                    width: stage-area.video-width;
+                    height: stage-area.video-height - 64px;
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+
+                        Text {
+                            text: ReviewVm.minimized-title;
+                            horizontal-alignment: center;
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: Dark.color-on-surface-variant;
+                        }
+
+                        Text {
+                            text: ReviewVm.minimized-body;
+                            horizontal-alignment: center;
+                            font-size: 12px;
+                            color: Dark.color-outline;
+                        }
+                    }
+                }
+
+                // ---------- full screen exit pill (round7 §2-8) ----------
+                // The only chrome left in full screen: the title bar and the
+                // rail are hidden by `app.slint`, so without this there is
+                // nothing on screen that says how to get back.
+                if ReviewVm.fullscreen: Rectangle {
+                    x: parent.width - self.width - 12px;
+                    y: 12px;
+                    width: fsexit-row.preferred-width;
+                    height: 26px;
+                    border-radius: Tokens.shape-s;
+                    border-width: 1px;
+                    border-color: Dark.chrome-hairline;
+                    background: fsexit-touch.has-hover
+                        ? Dark.chrome-content.with-alpha(0.9)
+                        : Dark.chrome-titlebar.with-alpha(0.82);
+
+                    fsexit-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            ReviewVm.fullscreen-toggled();
+                        }
+                    }
+
+                    fsexit-row := HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 7px;
+                        alignment: center;
+
+                        Text {
+                            text: ReviewVm.fullscreen-exit-label;
+                            vertical-alignment: center;
+                            font-size: 11px;
+                            color: Dark.color-on-surface-variant;
+                        }
+
+                        // The key cap, as in the mock: a mono word in a box.
+                        VerticalLayout {
+                            alignment: center;
+
+                            Rectangle {
+                                width: key-text.preferred-width + 10px;
+                                height: key-text.preferred-height + 2px;
+                                border-radius: Tokens.shape-xs;
+                                border-width: 1px;
+                                border-color: Dark.chrome-hairline-strong;
+
+                                key-text := Text {
+                                    text: "Esc";
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    color: Dark.color-on-surface;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---------- LIVE capsule (round8 §1) ----------
+                // The one stop affordance while capturing. It sits on the
+                // stage rather than the title bar (round7 §2-3 overturned):
+                // beside ─ □ ✕ a stop button is one slip away from closing
+                // the window. Like the full screen pill above it lives on the
+                // stage, so both survive full screen -- but not at the same
+                // inset any more, see the `y` below.
+                //
+                // y: 44 = 32 (`Tokens.titlebar-height`, the overlay bar plus
+                // its 1px hairline) + 12 (round8 §1's inset, unchanged). Since
+                // task4370 the title bar is an overlay and nothing sits above
+                // the stage, so `stage-area`'s top IS client y 0: at the old
+                // y 12 the stop half spanned client y 12..39 and the title
+                // bar's hot zone (20px, 32px once the bar is out) swallowed
+                // the press whenever the cursor came down from the top edge
+                // (t260913-a18d measured it over six cells). 44 clears that.
+                // Applied unconditionally, full screen included -- where there
+                // is no title bar to dodge, so the capsule no longer lines up
+                // with the exit pill's 12px. User ruling 2026-09-13,
+                // task t260913-4ad7; noted as a divergence in round8 §1.
+                if ReviewVm.live-chip-visible: Rectangle {
+                    x: 12px;
+                    y: 44px;
+                    width: livecap-row.preferred-width;
+                    height: 28px;
+                    border-radius: Tokens.shape-m;
+                    border-width: 1px;
+                    border-color: Dark.chrome-hairline-strong;
+                    // `rgba(13,15,17,.82)`. The mock also blurs what is behind
+                    // it; slint has no backdrop filter, so the translucency
+                    // carries the effect alone (round8 逆提案).
+                    background: #0d0f11d1;
+                    // The stop half fills its whole rectangle on hover, so the
+                    // capsule's own radius has to cut the corners off it.
+                    clip: true;
+
+                    livecap-row := HorizontalLayout {
+                        alignment: center;
+
+                        // The indicator half: no TouchArea, no cursor change.
+                        // What it says is decided in Rust -- LIVE, or 停止中…
+                        // once a stop is in flight.
+                        HorizontalLayout {
+                            padding-left: 11px;
+                            padding-right: 11px;
+                            spacing: 7px;
+                            alignment: center;
+
+                            VerticalLayout {
+                                alignment: center;
+
+                                Rectangle {
+                                    width: 6px;
+                                    height: 6px;
+                                    border-radius: 3px;
+                                    background: Dark.color-error;
+                                    opacity: root.live-dot-dim ? 0.35 : 1.0;
+                                    animate opacity {
+                                        duration: 600ms;
+                                        easing: ease-in-out;
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: ReviewVm.live-chip-text;
+                                vertical-alignment: center;
+                                font-size: 11px;
+                                font-weight: 700;
+                                letter-spacing: 0.06 * 11px;
+                                color: Dark.color-error;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 1px;
+                            background: Dark.chrome-hairline-strong;
+                        }
+
+                        Rectangle {
+                            width: livecap-stop-row.preferred-width;
+                            background: livecap-stop.has-hover
+                                ? Dark.color-error-container
+                                : transparent;
+
+                            livecap-stop := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    ReviewVm.stop-requested();
+                                }
+                            }
+
+                            livecap-stop-row := HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 7px;
+                                alignment: center;
+
+                                // A filled square, not `Icons.stop`: at 8px a
+                                // stroked glyph is a smudge (task810's finding).
+                                VerticalLayout {
+                                    alignment: center;
+
+                                    Rectangle {
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 1.5px;
+                                        background: livecap-stop.has-hover
+                                            ? Dark.color-on-error-container
+                                            : Dark.color-on-surface-variant;
+                                    }
+                                }
+
+                                Text {
+                                    text: ReviewVm.stop-button-label;
+                                    vertical-alignment: center;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: livecap-stop.has-hover
+                                        ? Dark.color-on-error-container
+                                        : Dark.color-on-surface-variant;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---------- overlay controls (task151) ----------
+                // Every control is a *descendant* of `overlay-hover`, not a
+                // sibling stacked on top of it. TouchArea sets `has-hover` in
+                // `input_event_filter_before_children`, so an ancestor keeps
+                // its hover while events travel down to a child -- but a
+                // merely-overlapping sibling gets an Exit and loses it.
+                // Nesting is what keeps the bar pinned while the pointer rests
+                // on a button.
+                overlay := Rectangle {
+                    x: (stage-area.width - stage-area.video-width) / 2;
+                    width: stage-area.video-width;
+                    height: overlay-layout.preferred-height;
+                    y: (stage-area.height + stage-area.video-height) / 2 - self.height;
+                    background: @linear-gradient(180deg, #00000000 0%, #000000c4 55%, #000000e0 100%);
+                    visible: root.controls-rendered;
+                    opacity: root.controls-visible ? 1.0 : 0.0;
+                    animate opacity { duration: 180ms; }
+
+                    overlay-hover := TouchArea {
+                        width: 100%;
+                        height: 100%;
+
+                        overlay-layout := VerticalLayout {
+                            width: 100%;
+                            padding-top: 10px;
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-bottom: 10px;
+                            spacing: 8px;
+
+                            // ---------- the track ----------
+                            // The hover preview draws at negative y, so the
+                            // overlay must not clip.
+                            track-wrap := ReviewTrackWrap {
+                                // task3860. The confirm step's first hole. In
+                                // window coordinates, pushed on `changed` the
+                                // way `InlineEdit` pushes the field's own rect
+                                // -- a global cannot carry a binding to an
+                                // element's geometry -- and re-pushed from
+                                // `init` because a bar that opens exactly where
+                                // the last one stood produces no `changed`.
+                                //
+                                // Zero unless the control bar is up. The bar
+                                // auto-hides, and a hole left standing over a
+                                // bar that is not there would let the press
+                                // reach the stage's own tap-to-play area
+                                // *without* closing the editor -- the very
+                                // shape of the gap task3640 closed.
+                                //
+                                // `controls-visible`, not `controls-rendered`:
+                                // for the 180ms of the fade the bar is still
+                                // hit-testable but task1020's blocker below is
+                                // over it, so a hole there would take the press
+                                // to something that neither acts nor ends the
+                                // edit. Visible implies rendered anyway.
+                                //
+                                // A safety net rather than the common path:
+                                // `clip-editing` pins the bar up above, so for
+                                // the whole of the step this is true. It still
+                                // has to be read -- the pin and this hole must
+                                // not be able to disagree, whatever a later
+                                // change does to either.
+                                property <bool> live: root.controls-visible;
+                                property <length> hole-x:
+                                    self.live ? self.absolute-position.x : 0px;
+                                property <length> hole-y:
+                                    self.live ? self.absolute-position.y : 0px;
+                                property <length> hole-w: self.live ? self.width : 0px;
+                                property <length> hole-h: self.live ? self.height : 0px;
+                                changed hole-x => {
+                                    InlineEditVm.track-x = self.hole-x;
+                                }
+                                changed hole-y => {
+                                    InlineEditVm.track-y = self.hole-y;
+                                }
+                                changed hole-w => {
+                                    InlineEditVm.track-w = self.hole-w;
+                                }
+                                changed hole-h => {
+                                    InlineEditVm.track-h = self.hole-h;
+                                }
+                                init => {
+                                    InlineEditVm.track-x = self.hole-x;
+                                    InlineEditVm.track-y = self.hole-y;
+                                    InlineEditVm.track-w = self.hole-w;
+                                    InlineEditVm.track-h = self.hole-h;
+                                }
+
+                                // task3860: not while the confirm step is open.
+                                // Key focus belongs to the comment field there,
+                                // and taking it away blurs the field -- which
+                                // since task3430 *discards the comment*. A seek
+                                // to check a boundary would have quietly ended
+                                // the step the range edit now lives in. The
+                                // band's own drag never reached here anyway
+                                // (`sel-touch` raises no `request-focus`), so
+                                // this only spares the plain seek.
+                                request-focus => {
+                                    if (!ReviewVm.clip-editing) {
+                                        fs.focus();
+                                    }
+                                }
+                            }
+
+                            // ---------- transport, one row (round5 §4-C) ----------
+                            // Named so the rate menu, which lives up on the
+                            // stage, can add this row's offset to the chip's
+                            // (task340).
+                            transport := HorizontalLayout {
+                                spacing: 12px;
+
+                                // What is playing, and whether it loops.
+                                HorizontalLayout {
+                                    spacing: 6px;
+
+                                    // To the selection's start / end (task240).
+                                    // The playhead moves; the selection does
+                                    // not -- these are how you get back to what
+                                    // you are about to export.
+                                    TransportBtn {
+                                        icon: Icons.seek;
+                                        clicked => {
+                                            ReviewVm.jump-range(true);
+                                        }
+                                    }
+
+                                    TransportBtn {
+                                        icon: ReviewVm.playing ? Icons.pause : Icons.play;
+                                        filled: !ReviewVm.playing;
+                                        clicked => {
+                                            ReviewVm.play-toggled();
+                                        }
+                                    }
+
+                                    // Repeat sits immediately right of play:
+                                    // it is a property of the thing playing,
+                                    // not of the output group (round5 §4-C).
+                                    // An icon toggle, not a text chip -- the
+                                    // mock's `.t-ic` (task183).
+                                    TransportBtn {
+                                        icon: Icons.seek-forward;
+                                        clicked => {
+                                            ReviewVm.jump-range(false);
+                                        }
+                                    }
+
+                                    TransportBtn {
+                                        icon: Icons.repeat;
+                                        on: ReviewVm.repeat-enabled;
+                                        clicked => {
+                                            ReviewVm.repeat-toggled();
+                                        }
+                                    }
+                                }
+
+                                // The mock's `.t-sep`, right after the repeat
+                                // toggle.
+                                RuleV {
+                                    rule-height: 16px;
+                                    y: (parent.height - self.height) / 2;
+                                }
+
+                                // ---------- where you are ----------
+                                HorizontalLayout {
+                                    spacing: 6px;
+
+                                    // One box, one target: YouTube toggles
+                                    // elapsed/remaining from anywhere in it
+                                    // (task149). The `/` is gone -- a slash
+                                    // between two digit runs moves every time
+                                    // a digit is added, so the separator is a
+                                    // rule that cannot (round5 §4-C).
+                                    Rectangle {
+                                        width: clock.preferred-width;
+                                        y: (parent.height - self.height) / 2;
+                                        height: 24px;
+                                        border-radius: Tokens.shape-xs;
+                                        border-width: 1px;
+                                        border-color: Dark.chrome-hairline;
+                                        background: Dark.chrome-inset;
+
+                                        clock-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                ReviewVm.time-display-toggled();
+                                            }
+                                        }
+
+                                        // Task660: the digits are not equal
+                                        // width, so a box that follows its own
+                                        // content changed width on every
+                                        // second and shoved the live badge and
+                                        // the LIVE chip sideways. Each visible
+                                        // Text is pinned to the widest string
+                                        // it can ever hold instead. These two
+                                        // measurers are direct children of the
+                                        // Rectangle, so they are absolutely
+                                        // positioned and add nothing to the
+                                        // layout.
+                                        //
+                                        // The widest string is the *total*, not
+                                        // a fixed `0:00`: the position never
+                                        // passes the total, so whatever fits
+                                        // the total fits both. A literal
+                                        // `0:00` assumed single-digit minutes
+                                        // and clipped every session past
+                                        // 10 minutes (`26:58` came out as
+                                        // `26:5`). `−` is the remaining-time
+                                        // toggle's sign, which makes that form
+                                        // the wider of the two.
+                                        //
+                                        // Empty before a session is loaded, and
+                                        // a zero-width box would collapse the
+                                        // rule and the padding into a sliver.
+                                        property <string> widest:
+                                            ReviewVm.total-text == "" ? "0:00" : ReviewVm.total-text;
+
+                                        position-measure := Text {
+                                            opacity: 0;
+                                            text: "−" + parent.widest;
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                        }
+
+                                        total-measure := Text {
+                                            opacity: 0;
+                                            text: parent.widest;
+                                            font-size: 12px;
+                                        }
+
+                                        clock := HorizontalLayout {
+                                            padding-left: 9px;
+                                            padding-right: 9px;
+                                            spacing: 7px;
+                                            alignment: center;
+
+                                            Text {
+                                                text: ReviewVm.position-text;
+                                                width: position-measure.preferred-width;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                                font-size: 12px;
+                                                font-weight: 700;
+                                                color: Dark.color-on-surface;
+                                            }
+
+                                            RuleV {
+                                                rule-height: 12px;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+
+                                            Text {
+                                                text: ReviewVm.total-text;
+                                                width: total-measure.preferred-width;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                                font-size: 12px;
+                                                color: clock-touch.has-hover
+                                                    ? Dark.color-on-surface
+                                                    : Dark.color-on-surface-variant;
+                                            }
+                                        }
+                                    }
+
+                                    // `.timeline-live-edge-badge`.
+                                    if ReviewVm.live-edge-visible && stage-area.width >= 900px: Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: badge-layout.preferred-width;
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        border-width: 1px;
+                                        border-color: Dark.color-success.with-alpha(0.35);
+
+                                        badge-layout := HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            spacing: 5px;
+                                            alignment: center;
+
+                                            Rectangle {
+                                                width: 5px;
+                                                height: 5px;
+                                                y: (parent.height - self.height) / 2;
+                                                border-radius: 2.5px;
+                                                background: Dark.color-success;
+                                            }
+
+                                            Text {
+                                                text: ReviewVm.live-edge-text;
+                                                vertical-alignment: center;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                color: Dark.color-success;
+                                            }
+                                        }
+                                    }
+                                    // The LIVE chip that used to sit here moved
+                                    // onto the stage as the capsule (round8
+                                    // §1): the transport is the playback's
+                                    // tools, not the session's state.
+                                }
+
+                                Rectangle { horizontal-stretch: 1; }
+
+                                // Only the chip lives here now. Its menu is a
+                                // child of `stage-area` instead -- see the
+                                // comment on `rate-menu` for why the slot could
+                                // not hold something taller than itself
+                                // (task340). This element stays named because
+                                // that menu positions itself off it.
+                                rate-slot := Rectangle {
+                                    // Fixed, not the chip's own content width
+                                    // (task620): the label runs `x1` to
+                                    // `x0.25`, and a slot that follows it moved
+                                    // everything to its right -- volume, full
+                                    // screen, panel -- on every rate change.
+                                    // Sized for `x0.25` at 11px with the chip's
+                                    // 9px padding either side.
+                                    width: 56px;
+                                    height: rate-chip.height;
+                                    y: (parent.height - self.height) / 2;
+
+                                    rate-chip := TimelineChip {
+                                        width: 100%;
+                                        label: ReviewVm.rate-text;
+                                        on: root.rate-menu-open;
+                                    }
+                                }
+
+                                RuleV {
+                                    rule-height: 16px;
+                                    y: (parent.height - self.height) / 2;
+                                }
+
+                                // ---------- listening conditions ----------
+                                HorizontalLayout {
+                                    spacing: 6px;
+
+                                    TransportBtn {
+                                        icon: ReviewVm.muted ? Icons.volume-muted : Icons.volume;
+                                        tint: ReviewVm.muted
+                                            ? Dark.color-on-surface-variant
+                                            : Dark.color-on-surface;
+                                        clicked => {
+                                            ReviewVm.mute-toggled();
+                                        }
+                                    }
+
+                                    // The bar itself is `controls.slint`'s
+                                    // `VolumeSlider` since task3510 -- same
+                                    // 84x30 box, same groove, knob and wheel
+                                    // step, now shared with the clip player.
+                                    VolumeSlider {
+                                        ratio: ReviewVm.volume-ratio;
+                                        muted: ReviewVm.muted;
+                                        ratio-changed(value) => {
+                                            ReviewVm.volume-changed(value);
+                                        }
+                                    }
+                                }
+
+                                RuleV {
+                                    rule-height: 16px;
+                                    y: (parent.height - self.height) / 2;
+                                }
+
+                                // ---------- how much screen it gets ----------
+                                HorizontalLayout {
+                                    spacing: 6px;
+
+                                    TransportBtn {
+                                        icon: ReviewVm.fullscreen ? Icons.fullscreen-exit : Icons.fullscreen;
+                                        clicked => {
+                                            ReviewVm.fullscreen-toggled();
+                                        }
+                                    }
+
+                                    TransportBtn {
+                                        icon: Icons.panel;
+                                        on: ReviewVm.panel-open;
+                                        // There is no panel to toggle in full
+                                        // screen -- it folds away on the way in
+                                        // and comes back on the way out
+                                        // (task1030).
+                                        disabled: ReviewVm.fullscreen;
+                                        clicked => {
+                                            ReviewVm.panel-toggled(!ReviewVm.panel-open);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Slint hit-tests a transparent element as readily as an
+                    // opaque one, so for the 180ms the bar spends fading out it
+                    // is still catching clicks the user can barely see -- a
+                    // half-gone stop button is not something to press by
+                    // accident. Last child, so it is over all of them; a click
+                    // brings the bar back instead of reaching one (task1020).
+                    if !root.controls-visible: TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => {
+                            root.poke();
+                        }
+                    }
+                }
+
+                // ---------- notification card (task151) ----------
+                // Outlives the auto-hide: what is left here is the screen's own
+                // failures (a marker that would not save, a screenshot that
+                // would not write), which have no other home. A finished export
+                // is the corner toast's now (task169). Absolutely positioned so
+                // its `if` children cannot re-solve the pane.
+                notice := Rectangle {
+                    width: min(460px, parent.width - 28px);
+                    height: notice-layout.preferred-height;
+                    x: parent.width - self.width - 14px;
+                    y: overlay.y - self.height - 12px;
+                    visible: ReviewVm.status-text != "";
+                    border-radius: Tokens.shape-s;
+                    border-width: 1px;
+                    border-color: Dark.chrome-hairline-strong;
+                    background: Dark.chrome-titlebar;
+                    drop-shadow-blur: 16px;
+                    drop-shadow-offset-y: 4px;
+                    drop-shadow-color: #00000099;
+
+                    notice-layout := VerticalLayout {
+                        width: 100%;
+                        padding: 10px;
+                        spacing: 4px;
+
+                        if ReviewVm.status-text != "": Text {
+                            text: ReviewVm.status-text;
+                            wrap: word-wrap;
+                            font-size: Tokens.type-caption-size;
+                            color: Dark.color-on-surface-variant;
+                        }
+                    }
+                }
+
+                // ---------- the rate chip's menu (task148, rehomed by task340)
+                // A sibling of `overlay`, not a child of the chip's slot any
+                // more. The menu is ~138px tall and opens upward, which puts it
+                // outside the chip's slot, outside the transport row *and*
+                // outside the overlay bar -- and slint's hit test does not
+                // descend past an ancestor whose rect does not contain the
+                // point. That is why task238 measured a menu that drew
+                // correctly and could never be hovered or clicked: the gap it
+                // tried to close was never the problem, the parent's size was.
+                // Growing the slot instead would have meant growing four levels
+                // of layout, each of which sets the transport's row height.
+                //
+                // Positioned by summing named siblings down the chain, exactly
+                // as `notice` above already reads `overlay.y`. This is *not*
+                // task148's `absolute-position` failure -- that was a window
+                // coordinate read across a layout boundary; these are plain
+                // bindings. `stage-area` clips, so both axes are parked inside
+                // it rather than being cut in half on a short window.
+                rate-menu := Rectangle {
+                    x: Math.min(
+                        stage-area.width - self.width,
+                        overlay.x + transport.x + rate-slot.x
+                            + (rate-slot.width - self.width) / 2);
+                    // Flush against the chip's top edge: any gap here is a strip
+                    // of nothing that would close the menu as the pointer
+                    // crossed it.
+                    y: Math.max(0px,
+                        overlay.y + transport.y + rate-slot.y - self.height);
+                    width: 104px;
+                    height: rate-menu-layout.preferred-height;
+                    visible: root.rate-menu-open;
+                    border-radius: Tokens.shape-m;
+                    border-width: 1px;
+                    border-color: Dark.chrome-hairline;
+                    background: Dark.color-surface-container-high;
+                    drop-shadow-blur: 32px;
+                    drop-shadow-offset-y: 12px;
+                    drop-shadow-color: #0000008c;
+
+                    // How many rate rows currently report hover. A count, not
+                    // an index: the exiting row and the entering one fire in no
+                    // guaranteed order, so an index would let the exit clobber
+                    // the enter and blink the menu shut mid-glide. +1/-1 is
+                    // order-independent, and `> 0` is the question being asked.
+                    property <int> hovered-rows: 0;
+
+                    // First, so the rows below keep their
+                    // clicks; this one only reports hover -- and only over the
+                    // padding, since a row shadows it everywhere else. See
+                    // `rate-menu-hovered`.
+                    rate-menu-hover := TouchArea { }
+
+                    rate-menu-layout := VerticalLayout {
+                        padding: 4px;
+
+                        for label[i] in ReviewVm.rate-labels: Rectangle {
+                            height: 26px;
+                            border-radius: Tokens.shape-xs;
+                            background: row-touch.has-hover
+                                ? Dark.chrome-hover
+                                : i == ReviewVm.rate-index
+                                    ? Dark.chrome-selected
+                                    : transparent;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 6px;
+
+                                // The current rate's mark,
+                                // always laid out so the
+                                // labels stay on one column.
+                                Rectangle {
+                                    width: 12px;
+                                    height: 12px;
+                                    y: (parent.height - self.height) / 2;
+
+                                    if i == ReviewVm.rate-index: AppIcon {
+                                        commands: Icons.success;
+                                        stroke-color: Dark.color-primary;
+                                        size: 12px;
+                                    }
+                                }
+
+                                Text {
+                                    text: label;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                    horizontal-stretch: 1;
+                                    font-weight: i == ReviewVm.rate-index ? 700 : 400;
+                                    color: i == ReviewVm.rate-index
+                                        ? Dark.color-primary
+                                        : Dark.color-on-surface-variant;
+                                }
+                            }
+
+                            row-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    ReviewVm.rate-selected(i);
+                                }
+                                // The row is the topmost TouchArea over its own
+                                // band, so this is the only place that knows the
+                                // pointer is still inside the menu there.
+                                changed has-hover => {
+                                    rate-menu.hovered-rows += self.has-hover ? 1 : -1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---------- right detail panel (round5 §4-D) ----------
+            // Always instantiated and animated to zero width rather than
+            // conditionally created: a conditional child re-solves the layout
+            // around it and drops whatever state lived inside (task127).
+            panel := Rectangle {
+                width: ReviewVm.panel-open ? 280px : 0px;
+                clip: true;
+                background: Tokens.chrome-sidebar;
+                // The mock's curve, the same one the titlebar slide and the
+                // clip tiles move on (`app.slint` / `clips.slint`).
+                //
+                // 240ms rather than `motion-duration-short`'s 100ms (user
+                // ruling 2026-09-14): 100ms is ~6 frames and the curve does
+                // not read at all in that. The same number as the titlebar
+                // slide, written out rather than taken from
+                // `titlebar-slide-duration` -- this is not the titlebar.
+                animate width {
+                    duration: 240ms;
+                    easing: Tokens.motion-curve;
+                }
+
+                // task3860. The column split the confirm step's overlay is
+                // built on, plus the rect its range band is clamped to. Pushed
+                // on `changed` like every other geometry a global carries.
+                // `panel-x` is measured rather than taken as
+                // `window.width - 280`: the width above animates, and for the
+                // length of that animation a computed edge would sit beside
+                // the real one with a live strip in between.
+                property <length> abs-x: panel.absolute-position.x;
+                property <length> abs-y: panel.absolute-position.y;
+                changed abs-x => {
+                    InlineEditVm.panel-x = self.abs-x;
+                }
+                changed abs-y => {
+                    InlineEditVm.panel-y = self.abs-y;
+                }
+                changed height => {
+                    InlineEditVm.panel-h = self.height;
+                }
+                init => {
+                    InlineEditVm.panel-x = self.abs-x;
+                    InlineEditVm.panel-y = self.abs-y;
+                    InlineEditVm.panel-h = self.height;
+                }
+
+                Rectangle {
+                    x: 0;
+                    width: 1px;
+                    height: 100%;
+                    background: Tokens.chrome-hairline;
+                }
+
+                // The mock has `.panel{overflow:hidden}`, but task3060 pushed the
+                // fixed part 68px taller and at the minimum window (720x480,
+                // `app.slint`) the bottom rows stopped being reachable at all.
+                // The user's ruling (2026-09-06) overrides the mock here: the
+                // panel scrolls. Everything above the marker list is still
+                // fixed and the list still takes whatever height is left and
+                // scrolls inside that -- the panel's own bar appears only once
+                // even that has run out (task3110).
+                Rectangle {
+                    x: 1px;
+                    width: 279px;
+                    height: 100%;
+                    background: transparent;
+
+                    panel-scroll := AppScroll {
+                        // The detail panel is the right-hand 280px of the review
+                        // pane, which is itself flush to the client's right edge,
+                        // so this lane sits in the band too (task4320). `mklist`
+                        // below does not: it lives inside this viewport, a whole
+                        // lane further in, so it keeps the default 0.
+                        right-inset: Tokens.resize-band-inset;
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: panel-scroll.visible-width;
+                        // Deliberately not `panel-layout.preferred-height`:
+                        // `mklist` is `vertical-stretch: 1`, so the layout's
+                        // preferred height collapses to its minimum and the
+                        // marker list would sit at 88px however tall the window
+                        // is. `max(visible-height, min-height)` leaves the tall
+                        // window exactly as it was -- the layout is handed the
+                        // full height and `mklist` absorbs the slack -- and
+                        // overflows only once the fixed part stops fitting.
+                        viewport-height: Math.max(panel-scroll.visible-height,
+                            panel-layout.min-height);
+
+                        // task3430. The panel's ground, declared before the
+                        // layout so it sits under every control in it: the
+                        // padding, the gaps between sections and the space
+                        // below the last row all fall through to here, and a
+                        // press on any of them ends an open edit. The panel's
+                        // buttons are `TouchArea`s and take no key focus, so
+                        // without this the fields simply stayed open behind
+                        // whatever was clicked.
+                        //
+                        // Both edits at once: only one of them can be open (the
+                        // marker rename lives in the list, the comment in the
+                        // export slot), and clearing the other is a no-op.
+                        // Clearing `editing-marker` is enough on its own -- the
+                        // teardown's blur is what reports the cancel -- while
+                        // the clip field's open state lives in Rust, so that
+                        // one is asked to close through its own callback.
+                        if root.editing-marker >= 0 || ReviewVm.clip-editing: TouchArea {
+                            x: 0;
+                            y: 0;
+                            width: panel-scroll.visible-width;
+                            height: panel-scroll.viewport-height;
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    root.editing-marker = -1;
+                                    if (ReviewVm.clip-editing) {
+                                        ReviewVm.clip-cancelled();
+                                    }
+                                }
+                            }
+                        }
+
+                        panel-layout := VerticalLayout {
+                            // 279 - 12: `AppScroll` always reserves its 12px
+                            // scrollbar lane (the mock's `scrollbar-gutter:
+                            // stable`). Those 12px come out of `padding-right`
+                            // (14px -> 2px) rather than out of the content, so
+                            // `fill` is unchanged: 267 - 14 - 2 = 251px, the
+                            // width every full-width child was handed before
+                            // the panel scrolled.
+                            width: panel-scroll.visible-width;
+                            padding-left: 14px;
+                            padding-right: 2px;
+                            padding-top: 14px;
+                            padding-bottom: 10px;
+                            spacing: 8px;
+
+                            // What a full-width child of the panel measures. The
+                            // mock's `.qr` chips are `1fr` grid cells and its
+                            // `.btn`s are block children, so both run edge to edge;
+                            // `Btn` and `Chip` pin their own width to their content
+                            // (`controls.slint`), which is why a `horizontal-stretch`
+                            // here does nothing and the width has to be handed in.
+                            property <length> fill:
+                                self.width - self.padding-left - self.padding-right;
+
+                            // ---------- 1. the range ----------
+                            // The heading used to carry the 「範囲を編集」 mode
+                            // toggle, the way the marker heading below carries
+                            // its add button. Task940 let the track band be
+                            // dragged whenever it was there; task1060 put that
+                            // behind the toggle so a stray drag on the timeline
+                            // could not quietly move a boundary.
+                            //
+                            // task3860 (round19 §1) folds the mode into the
+                            // 確定ステップ instead: pressing クリップに保存 is
+                            // now the one way in, so there is no second visual
+                            // vocabulary for "the boundaries are editable" and
+                            // no toggle to leave switched on. The heading keeps
+                            // its label and nothing takes the space the toggle
+                            // had -- the same shape the mock draws
+                            // (`mock/liveback-mock.html:891`).
+                            PanelSection {
+                                label: ReviewVm.range-section-label;
+                            }
+
+                            // round8 §2 (D案). The quick chips that used to sit
+                            // above this are gone: four presets and a way back
+                            // took five rows to say what two editable boundaries
+                            // say, and none of them could express "from here to
+                            // there". The 直近N row at the bottom of the block is
+                            // not that stack coming back (task4350): one row, and
+                            // inside the block rather than stacked on top of it --
+                            // see its own comment below.
+                            range-holder := Rectangle {
+                                height: range-block.preferred-height;
+                                border-radius: Tokens.shape-s;
+                                border-width: 1px;
+                                border-color: Tokens.chrome-hairline;
+                                background: Tokens.chrome-inset;
+                                clip: true;
+
+                                // task3860. The top of the confirm step's
+                                // second hole; its bottom is the comment
+                                // field's own rect, which `InlineEdit` already
+                                // publishes. Pushed on `changed` because the
+                                // panel scrolls under an open editor (task3110
+                                // measured that on the export row) and the
+                                // band has to travel with the block.
+                                property <length> abs-y: range-holder.absolute-position.y;
+                                changed abs-y => {
+                                    InlineEditVm.range-y = self.abs-y;
+                                }
+                                init => {
+                                    InlineEditVm.range-y = self.abs-y;
+                                }
+
+                                range-block := VerticalLayout {
+                                    start-row := RangeRow {
+                                        label: ReviewVm.range-start-label;
+                                        value: ReviewVm.range-start-text;
+                                        steppable: true;
+                                        enabled: ReviewVm.has-range;
+                                        // No `editable` (2026-09-11, task4340): the steppers follow
+                                        // the same rule as `playhead` (task3050) -- range-edit mode
+                                        // guarded the track against a stray drag, which a button
+                                        // cannot do. `editable: ReviewVm.clip-editing` stood here,
+                                        // carried over from the old mode by task3860, and it left the
+                                        // « » gone and the whole row at 0.38 outside the 確定ステップ.
+                                        // round19 §2-2 counted the 入口 to a range; a stepper is not
+                                        // one, it is the fine adjustment once a range exists.
+                                        back-hint: ReviewVm.range-start-back-hint;
+                                        forward-hint: ReviewVm.range-start-forward-hint;
+                                        playhead-hint: ReviewVm.range-start-playhead-hint;
+                                        stepped(seconds) => {
+                                            ReviewVm.range-stepped(0, seconds);
+                                        }
+                                        committed(text) => {
+                                            ReviewVm.range-edited(0, text);
+                                        }
+                                        playhead-clicked => {
+                                            ReviewVm.range-set-to-playhead(0);
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 1px;
+                                        background: Tokens.chrome-hairline;
+                                    }
+
+                                    end-row := RangeRow {
+                                        label: ReviewVm.range-end-label;
+                                        value: ReviewVm.range-end-text;
+                                        steppable: true;
+                                        enabled: ReviewVm.has-range;
+                                        // No `editable` (2026-09-11, task4340) -- see `start-row`.
+                                        back-hint: ReviewVm.range-end-back-hint;
+                                        forward-hint: ReviewVm.range-end-forward-hint;
+                                        playhead-hint: ReviewVm.range-end-playhead-hint;
+                                        stepped(seconds) => {
+                                            ReviewVm.range-stepped(1, seconds);
+                                        }
+                                        committed(text) => {
+                                            ReviewVm.range-edited(1, text);
+                                        }
+                                        playhead-clicked => {
+                                            ReviewVm.range-set-to-playhead(1);
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 1px;
+                                        background: Tokens.chrome-hairline;
+                                    }
+
+                                    length-row := RangeRow {
+                                        label: ReviewVm.range-length-label;
+                                        value: ReviewVm.range-length-text;
+                                        accent: true;
+                                        resettable: true;
+                                        enabled: ReviewVm.has-range;
+                                        reset-hint: ReviewVm.range-reset-hint;
+                                        reset-clicked => {
+                                            ReviewVm.range-reset();
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 1px;
+                                        background: Tokens.chrome-hairline;
+                                    }
+
+                                    // 直近N (design round19 §2-3, task3870;
+                                    // moved here by task4350). **round19 §2-3
+                                    // への差分**: that round put this row in the
+                                    // 動画の出力 section above 「クリップに保存」,
+                                    // outside this block. The user overruled that
+                                    // on 2026-09-10 in one line: 「動画の出力欄で
+                                    // 直近ボタンがあるけど、これは範囲選択の
+                                    // カテゴリじゃない?」 -- the chips write a
+                                    // *range*, and the section they sat in is
+                                    // about writing a *file*.
+                                    //
+                                    // What round8 §2 threw out is still thrown
+                                    // out: that was a five-row preset *stack*
+                                    // standing above the block, four presets plus
+                                    // a way back, none of which could say "from
+                                    // here to there". This is one row inside the
+                                    // block, under the three boundaries it fills
+                                    // in -- 「ここまでの N 秒」 said while
+                                    // watching, the same grammar as the block's
+                                    // own 「再生位置に合わせる」. Below the rows
+                                    // rather than above them: above, it reads as
+                                    // a header for 開始 and splits the
+                                    // 開始 / 終了 / 長さ column.
+                                    //
+                                    // No `if ReviewVm.clip-editing` guard any
+                                    // more, so the chips stay through the
+                                    // 確定ステップ (round19 §2-1 keeps the range
+                                    // block alive in the step, and this is that
+                                    // block). The guard existed for a hazard of
+                                    // the old *place*: the row sat directly above
+                                    // the primary button, so folding it moved the
+                                    // button 28px up under the cursor at the
+                                    // moment the press turned it into the comment
+                                    // field. Nothing rides up in here -- and a row
+                                    // that never folds is also what keeps this
+                                    // block's height, hence `InlineEditVm.range-y`
+                                    // and the step's hole, from moving when the
+                                    // step opens.
+                                    //
+                                    // The export scrim covers this block like the
+                                    // rest of the panel, so no `export-busy`
+                                    // guard either; 「書き出し中も非表示」 in
+                                    // round19 §2-3 was a property of the section
+                                    // this row left.
+                                    Rectangle {
+                                        height: 28px;
+
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            padding-top: 3px;
+                                            padding-bottom: 3px;
+                                            spacing: 6px;
+
+                                            for chip in ReviewVm.recent-chips: Rectangle {
+                                                horizontal-stretch: 1;
+                                                border-radius: Tokens.shape-s;
+                                                border-width: 1px;
+                                                border-color: Tokens.chrome-hairline;
+                                                background: chip-touch.has-hover
+                                                    ? Tokens.chrome-hover
+                                                    : transparent;
+
+                                                // No `on` state on purpose
+                                                // (round19 §2-3): the chip is an
+                                                // act, not a mode, and a lit chip
+                                                // would claim the range is still
+                                                // "the last 30 seconds" after the
+                                                // playhead has walked on.
+                                                Text {
+                                                    text: chip.label;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    font-size: 10.5px;
+                                                    color: chip-touch.has-hover
+                                                        ? Tokens.color-on-surface
+                                                        : Tokens.color-on-surface-variant;
+                                                }
+
+                                                chip-touch := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => {
+                                                        ReviewVm.recent-chip-clicked(
+                                                            chip.seconds);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+
+                            // ---------- 2. the export pair ----------
+                            // task3060 (design round18 §4-7). The two buttons below
+                            // write a video file out of the selection; the still
+                            // under the next heading writes the frame on screen.
+                            // Adjacent and unlabelled they read as one group, which
+                            // is what makes the still look like "a still of the
+                            // range". The mock's `.sec` carries `margin:6px 0 2px`,
+                            // which this component's 26px box already absorbs -- no
+                            // spacer, unlike the marker heading further down
+                            // (`margin-top:14px` there).
+                            // task3180 swapped this heading to the clip button's
+                            // own label while the comment field was open: the
+                            // button that opened the field is gone -- it *is*
+                            // the field -- so the screen right after the press
+                            // had no word left for what was being saved.
+                            // task3410 takes the swap back out (user, 2026-09-07):
+                            // a heading that changes under the press is the more
+                            // visible defect, and the wording is now general
+                            // enough ("the video output") to cover the field's
+                            // state too. What the field is for is carried by its
+                            // own trailing hint (comment / optional / Enter /
+                            // Esc, task3250), which is the part of 3180 that
+                            // stays.
+                            PanelSection {
+                                label: ReviewVm.export-section-label;
+                            }
+
+                            // Running and idle are the same slot: a job owns the
+                            // pipeline, so offering "start" beside "cancel" would
+                            // only produce the controller's "already running".
+                            // The running half is not drawn here -- task2130 lifts
+                            // it out to `export-row` at pane level so it stays on
+                            // top of the block-out cover. This box only holds its
+                            // place in the layout, which is also what gives that
+                            // copy something unconditional to anchor to: an id
+                            // declared inside an `if` cannot be read from outside
+                            // it. One height for both states: the mock gives `.prog`
+                            // and `.btn` the same 30px (task2290), so the panel
+                            // cannot shift when a job starts.
+                            //
+                            // Two rows since task2970, so the slot is 66px
+                            // (30 + 6 + 30) while the progress row that anchors
+                            // to it is still 30px: it sits on the top row, and
+                            // the block-out's scrim covers the rest.
+                            //
+                            // Task3870 briefly made it three rows -- the 直近N
+                            // chips sat above the pair and the slot was 94px --
+                            // and task4350 moved that row into the range block,
+                            // so the slot is back to the two buttons it had
+                            // before. The progress row's anchor below lost its
+                            // matching +28px in the same change.
+                            export-slot := Rectangle {
+                                width: panel-layout.fill;
+                                height: 66px;
+
+                                if !ReviewVm.export-busy: VerticalLayout {
+                                    spacing: 6px;
+
+                                    // The primary: no file dialog, straight to the
+                                    // clip folder. It becomes the comment field in
+                                    // place rather than opening anything, which is
+                                    // the one thing that makes it feel unlike the
+                                    // row below.
+                                    clip-row := Rectangle {
+                                        height: 30px;
+
+                                        if !ReviewVm.clip-editing: Btn {
+                                            width: parent.width;
+                                            label: ReviewVm.clip-label;
+                                            icon: Icons.export;
+                                            primary: true;
+                                            disabled: !ReviewVm.export-enabled;
+                                            clicked => { ReviewVm.clip-requested(); }
+                                        }
+
+                                        // task3180 / task3250.
+                                        // `InlineEdit.hint` is a trailing
+                                        // label, not a placeholder: it sits in
+                                        // the same HorizontalLayout as the
+                                        // input and keeps its width for as long
+                                        // as it is there. The guidance is long
+                                        // enough (ja 176px of the 233px inside
+                                        // the field) that leaving it up would
+                                        // hand the user a ~57px slot to type in.
+                                        // It is also only useful while there is
+                                        // nothing in the field, so it goes as
+                                        // soon as anything is -- and comes back
+                                        // if the text is deleted. The condition
+                                        // lives inside `InlineEdit` now, where
+                                        // the input's text already is; nothing
+                                        // has to be reset when the field
+                                        // reopens, because the `if` above tears
+                                        // the editor down and builds a fresh
+                                        // one whose input starts empty.
+                                        //
+                                        // task3410: the height is handed in
+                                        // rather than left to `InlineEdit`'s
+                                        // own 22px. That default exists so the
+                                        // field keeps exactly the height of the
+                                        // row it replaced, and the other four
+                                        // callers do replace 22px rows -- this
+                                        // is the one that replaces a 30px
+                                        // button, so a centred 22px box left the
+                                        // field visibly narrower than the button
+                                        // it took over from. Overridden at the
+                                        // call site, so `controls.slint` and the
+                                        // four other fields are untouched. With
+                                        // the box filling the row the `y:`
+                                        // centring is what would move it, so it
+                                        // goes.
+                                        if ReviewVm.clip-editing: InlineEdit {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            hint: ReviewVm.clip-hint;
+                                            hint-only-while-empty: true;
+                                            // Task4130. The one caller that
+                                            // opts in: this field opens empty
+                                            // and steals key focus, and
+                                            // round19 §1 wants the range block
+                                            // usable while the step is open.
+                                            // The rules (empty only, and what
+                                            // that costs) are written at the
+                                            // branch in `controls.slint`.
+                                            io-while-empty: true;
+                                            // Both halves, always. `fs`'s own
+                                            // `key-released` is what clears
+                                            // `review.key_down`, and the
+                                            // release of this key goes to the
+                                            // field, never to `fs` -- so
+                                            // without the second call
+                                            // `key_down` would stay `"i"` and
+                                            // the next press of the same key
+                                            // would be read as a repeat.
+                                            // `i` / `o` ignore `repeat` today,
+                                            // which makes it harmless now and
+                                            // no reason to leave it wrong.
+                                            // The `repeat` argument is `false`
+                                            // because slint's `KeyEvent.repeat`
+                                            // never arrives on Windows
+                                            // (KNOWLEDGE.md); `shift` is the
+                                            // real modifier, not a filled-in
+                                            // `false`.
+                                            shortcut-key(text, shift) => {
+                                                ReviewVm.key-pressed-cb(text, shift, false);
+                                                ReviewVm.key-released-cb(text);
+                                            }
+                                            init => {
+                                                self.begin-edit();
+                                            }
+                                            committed(value) => {
+                                                ReviewVm.clip-committed(value);
+                                            }
+                                            // Guarded like the marker row's
+                                            // (task3430): the ground area above
+                                            // closes this field by calling
+                                            // `clip-cancelled` itself, and the
+                                            // teardown that follows would
+                                            // otherwise call it a second time
+                                            // and re-render the whole pane for
+                                            // nothing.
+                                            cancelled => {
+                                                if (ReviewVm.clip-editing) {
+                                                    ReviewVm.clip-cancelled();
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Unchanged behaviour (task1050's save
+                                    // dialog), demoted to the secondary plate --
+                                    // one primary per screen. Dead while the
+                                    // comment field is open: starting an export
+                                    // there tears the field down under the
+                                    // block-out, which since task3430 throws the
+                                    // half-typed comment away rather than
+                                    // committing it -- either way the press
+                                    // would decide the draft's fate behind the
+                                    // user's back.
+                                    Btn {
+                                        height: 30px;
+                                        width: parent.width;
+                                        label: ReviewVm.export-label;
+                                        icon: Icons.export;
+                                        disabled: !ReviewVm.export-enabled || ReviewVm.clip-editing;
+                                        clicked => { ReviewVm.export-start(); }
+                                    }
+                                }
+                            }
+
+                            // ---------- 3. the still ----------
+                            // Outside the export section on purpose: this writes
+                            // the frame on screen, whatever the selection is.
+                            PanelSection {
+                                label: ReviewVm.still-section-label;
+                            }
+
+                            Btn {
+                                width: panel-layout.fill;
+                                label: ReviewVm.screenshot-label;
+                                icon: Icons.screenshot;
+                                clicked => { ReviewVm.screenshot-save(); }
+                            }
+
+                            Rectangle { height: 6px; }
+
+                            // ---------- track mixer (task1300) ----------
+                            // Only when the recording actually has several tracks:
+                            // one track means this is a second copy of the master
+                            // slider on the transport bar, which is what every
+                            // recording before task1260 would have got.
+                            if ReviewVm.audio-tracks.length > 1: PanelSection {
+                                label: ReviewVm.mixer-section-label;
+                            }
+
+                            if ReviewVm.audio-tracks.length > 1: VerticalLayout {
+                                spacing: 6px;
+
+                                for track[index] in ReviewVm.audio-tracks: MixerRow {
+                                    width: panel-layout.fill;
+                                    name: track.name;
+                                    volume-ratio: track.volume-ratio;
+                                    muted: track.muted;
+                                    volume-changed(ratio) => {
+                                        ReviewVm.track-volume-changed(index, ratio);
+                                    }
+                                    mute-toggled => {
+                                        ReviewVm.track-mute-toggled(index);
+                                    }
+                                }
+                            }
+
+                            if ReviewVm.audio-tracks.length > 1: Rectangle { height: 6px; }
+
+                            // ---------- 4. markers ----------
+                            // Heading, hotkey badge and the add button on one line,
+                            // as the mock has them: the button is the heading's own
+                            // verb, not a control the list happens to start with.
+                            PanelSection {
+                                label: ReviewVm.marker-section-label;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: end;
+
+                                    Text {
+                                        text: ReviewVm.marker-hotkey-text;
+                                        vertical-alignment: center;
+                                        // `.sec .hk`: the heading is 700, this is
+                                        // not -- it is a key, not a title.
+                                        font-size: 10.5px;
+                                        font-weight: 400;
+                                        letter-spacing: 0px;
+                                        color: Tokens.color-outline;
+                                    }
+
+                                    // `.sec .addbtn`: smaller and quieter than the
+                                    // shared `Btn`, which is 28px and owns a row.
+                                    add-marker := Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: add-marker-layout.preferred-width;
+                                        height: 22px;
+                                        border-radius: Tokens.shape-s;
+                                        border-width: 1px;
+                                        border-color: add-marker-touch.has-hover
+                                            ? Tokens.chrome-hairline-strong
+                                            : Tokens.chrome-hairline;
+                                        background: add-marker-touch.has-hover
+                                            ? Tokens.chrome-hover
+                                            : transparent;
+
+                                        add-marker-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { ReviewVm.add-marker(); }
+                                        }
+
+                                        add-marker-layout := HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            spacing: 4px;
+                                            alignment: center;
+
+                                            AppIcon {
+                                                commands: Icons.plus;
+                                                stroke-color: Tokens.color-on-surface;
+                                                size: 12px;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+
+                                            Text {
+                                                text: ReviewVm.add-marker-label;
+                                                vertical-alignment: center;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                letter-spacing: 0px;
+                                                color: Tokens.color-on-surface;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if ReviewVm.marker-rows.length == 0: Text {
+                                text: ReviewVm.markers-empty-text;
+                                wrap: word-wrap;
+                                font-size: 11px;
+                                color: Tokens.color-outline;
+                            }
+
+                            // `.mklist`: the part of the panel that scrolls
+                            // first, so 追加 and the hotkey hint above stay put
+                            // however many markers there are. Since task3110
+                            // the panel behind it scrolls too, but only once
+                            // this list has already shrunk to its minimum.
+                            // 36px minimum thumb, per the mock.
+                            mklist := AppScroll {
+                                vertical-stretch: 1;
+                                min-thumb: 36px;
+                                // Three rows: `MarkerListRow` is 28px and
+                                // `marker-column.spacing` is 2px, so 28*3 + 2*2
+                                // = 88px. Below that the list stops reading as
+                                // a list, and at 720x480 the fixed part above
+                                // would otherwise squeeze it to nothing
+                                // (task3110).
+                                min-height: 88px;
+                                // Same number as the minimum, and not
+                                // `AppScroll`'s own `preferred-height: 100%`:
+                                // that resolves to `parent.height`, which is
+                                // now driven by `panel-layout.min-height` via
+                                // the enclosing `panel-scroll.viewport-height`
+                                // -- a binding loop. `vertical-stretch: 1` is
+                                // what still hands this list every spare pixel
+                                // in a tall window; it is the only stretching
+                                // child of `panel-layout` (every other one
+                                // carries a fixed height).
+                                preferred-height: 88px;
+                                viewport-width: mklist.visible-width;
+                                viewport-height: marker-column.preferred-height;
+
+                                // The wheel that this list can no longer take
+                                // goes to the panel behind it, so the pointer
+                                // does not have to leave the list to carry on
+                                // down (task3110). It cannot bubble on its own:
+                                // an `AppScroll` answers the wheel in a
+                                // `TouchArea` inside its `Flickable`, and that
+                                // `Flickable` swallows a wheel it cannot use
+                                // whenever it has any overflow at all -- its
+                                // `process_wheel_event` sets `last_scroll_event`
+                                // on every `TouchPhase::Moved` and then returns
+                                // `EventAccepted` through `should_capture_scroll`
+                                // (`i-slint-core-1.17.1/items/flickable.rs`
+                                // :500-543, :560-566). So the leftover delta is
+                                // handed over explicitly instead.
+                                overflow-scrolled(delta) => {
+                                    panel-scroll.viewport-y = Math.clamp(
+                                        panel-scroll.viewport-y + delta,
+                                        -panel-scroll.overflow, 0px);
+                                }
+
+                                // task3430. The list's own ground, declared
+                                // before the rows so it sits under them: a
+                                // press on the gaps between rows, or on the
+                                // empty space below the last one, ends an open
+                                // rename. It has to live *inside* `mklist`
+                                // because `AppScroll` is a `Flickable` and
+                                // swallows the pointer over its own area, so
+                                // the panel's ground area below never sees a
+                                // press that landed in the list.
+                                //
+                                // Gated on there being an edit to end, so no
+                                // extra hit target sits over the list the rest
+                                // of the time -- the same shape `clips.slint`
+                                // uses for its menu.
+                                if root.editing-marker >= 0
+                                    || ReviewVm.clip-editing: TouchArea {
+                                    x: 0;
+                                    y: 0;
+                                    width: mklist.visible-width;
+                                    height: marker-column.preferred-height;
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.down) {
+                                            root.editing-marker = -1;
+                                            if (ReviewVm.clip-editing) {
+                                                ReviewVm.clip-cancelled();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                marker-column := VerticalLayout {
+                                    width: mklist.visible-width;
+                                    spacing: 2px;
+                                    alignment: start;
+
+                                    for row[index] in ReviewVm.marker-rows: MarkerListRow {
+                                        entry: row;
+                                        editing: root.editing-marker == index;
+                                        clicked => {
+                                            // A press on a row's body is a
+                                            // press outside the open field --
+                                            // the editor's own `TouchArea`
+                                            // keeps the ones that land inside
+                                            // it (task3430). Covers the row
+                                            // being edited as well as its
+                                            // neighbours: the field does not
+                                            // fill the row.
+                                            root.editing-marker = -1;
+                                            if (ReviewVm.clip-editing) {
+                                                ReviewVm.clip-cancelled();
+                                            }
+                                            ReviewVm.marker-clicked(index);
+                                        }
+                                        rename-requested => {
+                                            // The buttons go with the row's edit
+                                            // state, so the tip they raised has to
+                                            // go too -- nothing will report the
+                                            // un-hover of an element that is gone.
+                                            root.marker-hint = "";
+                                            root.editing-marker = index;
+                                        }
+                                        renamed(value) => {
+                                            root.editing-marker = -1;
+                                            ReviewVm.marker-renamed(index, value);
+                                        }
+                                        rename-cancelled => {
+                                            root.editing-marker = -1;
+                                        }
+                                        removed => {
+                                            root.marker-hint = "";
+                                            root.editing-marker = -1;
+                                            ReviewVm.marker-removed(index);
+                                        }
+                                        ranged => {
+                                            ReviewVm.marker-ranged(index);
+                                        }
+                                        range-hovered(on, row-bottom) => {
+                                            if on {
+                                                root.marker-hint-anchor-y
+                                                    = row-bottom;
+                                            }
+                                            root.marker-hint = on
+                                                ? ReviewVm.marker-range-hint
+                                                : "";
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ---------- 4. 起動時に自動録画 (round13 §1) ----------
+                            // Below the scrolling marker list and outside it, so it
+                            // is the panel's fixed floor however many markers there
+                            // are. mock `.arow`: inset plate, hairline that lifts on
+                            // hover, and the whole plate is the switch's hit area --
+                            // a 36px target for a setting is needlessly small.
+                            //
+                            // Instantiated conditionally: a session with no recorded
+                            // executable (a monitor recording, or anything from
+                            // before task2350) has nothing to register, and the row
+                            // carries no state of its own to lose.
+                            if ReviewVm.autorec-visible: autorec := Rectangle {
+                                // Sized by the text: the row has no tooltip any
+                                // more (task2720) -- the sub line says it all.
+                                height: autorec-layout.preferred-height;
+                                border-radius: Tokens.shape-s;
+                                border-width: 1px;
+                                border-color: autorec-touch.has-hover
+                                    ? Tokens.chrome-hairline-strong
+                                    : Tokens.chrome-hairline;
+                                background: Tokens.chrome-inset;
+
+                                autorec-layout := HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    padding-top: 9px;
+                                    padding-bottom: 9px;
+                                    spacing: 10px;
+
+                                    VerticalLayout {
+                                        spacing: 3px;
+                                        horizontal-stretch: 1;
+
+                                        Text {
+                                            text: ReviewVm.autorec-label;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            color: Tokens.color-on-surface;
+                                            overflow: elide;
+                                        }
+
+                                        Text {
+                                            text: ReviewVm.autorec-body;
+                                            wrap: word-wrap;
+                                            font-size: 10.5px;
+                                            color: Tokens.color-on-surface-variant;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+
+                                        Switch {
+                                            checked: ReviewVm.autorec-on;
+                                            // The row-wide TouchArea below sits on
+                                            // top of this one, so the switch's own
+                                            // clicks arrive there. Wired anyway so
+                                            // the two can never disagree.
+                                            toggled => {
+                                                ReviewVm.autorec-toggled();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Last child, so it covers the switch too and the
+                                // whole plate answers one click.
+                                autorec-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        ReviewVm.autorec-toggled();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 「範囲を編集」 had one of its own here, anchored under the
+                    // plate rather than under the range block below it, because
+                    // the toggle lived on the section heading and the block's
+                    // anchor dropped the tip three rows away from it (task3170).
+                    // task3860 deleted the toggle and this tip with it: the mode
+                    // it described is the 確定ステップ now, and the block's own
+                    // tip below covers what is left to explain.
+                    //
+                    // One tip for the range block: the steppers and the reset
+                    // are icon-only, and the mock puts a title on each of them.
+                    // Anchored under the block rather than under the row so it
+                    // cannot walk about while the pointer slides between them.
+                    Tooltip {
+                        x: Math.max(14px, parent.width - 14px - self.width);
+                        y: range-holder.absolute-position.y - parent.absolute-position.y
+                            + range-holder.height + 6px;
+                        armed: root.range-hint != "";
+                        label: root.range-hint;
+                    }
+
+                    // The marker list's own, anchored under the row that raised
+                    // it. task3050 gave the list its own tip because the range
+                    // block's anchor sat hundreds of pixels away, but hung it
+                    // under `mklist`, which is `vertical-stretch: 1` and so is
+                    // as tall as the panel's slack whatever the list holds: the
+                    // tip landed at the bottom of the list every time, a whole
+                    // panel away from a row near the top and outside the 280px
+                    // panel's `clip` when the list reached the floor (task3420).
+                    // The row reports its own bottom edge on hover instead --
+                    // ids inside a `for` cannot be read from out here -- and the
+                    // clamp keeps the plate inside the panel at either end, the
+                    // same 14px inset the `x` above uses.
+                    Tooltip {
+                        x: Math.max(14px, parent.width - 14px - self.width);
+                        y: Math.clamp(
+                            root.marker-hint-anchor-y - parent.absolute-position.y
+                                + 6px,
+                            14px, parent.height - self.height - 14px);
+                        armed: root.marker-hint != "";
+                        label: root.marker-hint;
+                    }
+                }
+            }
+        }
+
+        // 3 seconds of nothing hides the bar; anything at all brings it back.
+        // Stopped whenever the bar is pinned, so an un-hover starts a fresh
+        // countdown rather than resuming a half-spent one.
+        // The LIVE dot's 1.2s blink: half a period per tick, the opacity
+        // animation does the rest.
+        live-blink := Timer {
+            interval: 600ms;
+            running: ReviewVm.live-chip-visible;
+            triggered => {
+                root.live-dot-dim = !root.live-dot-dim;
+            }
+        }
+
+        idle := Timer {
+            interval: 3s;
+            running: root.controls-shown && !root.controls-pinned;
+            triggered => {
+                root.controls-shown = false;
+            }
+        }
+
+        // Runs only for the length of the fade-out, and stops itself by
+        // clearing the very condition that keeps it running.
+        fade-out := Timer {
+            interval: 180ms;
+            running: !root.controls-visible && root.controls-rendered;
+            triggered => {
+                root.controls-rendered = false;
+            }
+        }
+    }
+
+    // ---------- export block-out (task2130, round9 §2) ----------
+    // A running export owns the screen: the mock (`.exportov`) covers the whole
+    // window in rgba(5,7,10,.55) and leaves the progress row alone on top.
+    // Declared after `fs`, so it paints over everything the pane holds -- stage,
+    // transport, rate menu, panel -- and its TouchArea takes every hit that
+    // would otherwise reach them. The title bar and the rail carry their own
+    // copies (`app.slint`): slint has no z-index, so a single window-wide cover
+    // would bury the row with everything else, and the only way to keep the row
+    // reachable is to lay the cover in pieces that tile the window and draw the
+    // row after them.
+    if ReviewVm.export-busy: Rectangle {
+        background: #05070a8c;
+
+        // Swallows anything aimed at the pane behind it, the way the
+        // confirmation dialog's scrim does (`controls.slint`).
+        TouchArea { }
+    }
+
+    // The row itself, over the cover (the mock's `.prog` is z-31 against the
+    // cover's z-30) -- cancel is the only way to stop a job, so it is the one
+    // control the block-out must not take. `export-slot` above holds its place
+    // in the panel and hands over the `y`; the `x` comes from the panel's own
+    // geometry (280px wide, a 1px hairline and 14px of padding) rather than
+    // from `absolute-position.x`, which reads well off where a pane draws
+    // (measured in `settings.slint`'s language popup). Opaque, unlike the old
+    // in-panel row: it sits on a scrim now.
+    //
+    // Task2970 made the slot two rows tall; this row stays 30px and sits where
+    // the primary button was, which since task4350 is the slot's own first line
+    // again -- so no offset. Task3870 had put the 直近N chips on top of the pair
+    // and this row carried a +28px (22px of chips plus the layout's 6px) to stay
+    // on the button's row through it; task4350 moved the chips into the range
+    // block and the offset went with them. It is the button's row that this row
+    // has to keep, whatever the slot's first line happens to be: task2290's rule
+    // is that the panel must not shift when a job starts. The 36px below it is
+    // empty -- both buttons are inside the slot's `if !export-busy` -- and the
+    // scrim covers it like the rest of the panel.
+    //
+    // Task3110 made the panel scroll, so the slot can now be pushed off either
+    // end of it. `absolute-position` follows the scroll by itself -- the row
+    // stays on the slot while the slot is in view -- but this row is drawn at
+    // pane level, outside the panel's `clip`, so it would carry on out into the
+    // stage. Clamped to the panel's own band instead: cancel stays reachable
+    // wherever the panel happens to be scrolled to.
+    //
+    // The `x` is unaffected: the 12px scrollbar lane came out of the layout's
+    // `padding-right`, not out of the content, so the content still starts
+    // 15px in from the panel's left edge and is still 251px wide.
+    //
+    // The *width* is not (task4320). `panel-scroll` now steps its lane in from
+    // the window edge by the resize band, and it takes that width out of its
+    // viewport, so `panel-layout`'s fill is 251 - inset. This row is drawn at
+    // pane level, outside the panel, so nothing recomputes it for us -- it has
+    // to subtract the same inset or it hangs over the lane while an export runs.
+    if ReviewVm.export-busy: Rectangle {
+        x: root.width - 265px;
+        y: Math.clamp(
+            export-slot.absolute-position.y - root.absolute-position.y,
+            panel.absolute-position.y - root.absolute-position.y,
+            panel.absolute-position.y - root.absolute-position.y
+                + panel.height - self.height);
+        width: 251px - Tokens.resize-band-inset;
+        height: 30px;
+        border-radius: Tokens.shape-s;
+        border-width: 1px;
+        border-color: Tokens.chrome-hairline;
+        background: Tokens.color-surface-container-high;
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 8px;
+            spacing: 8px;
+
+            Text {
+                text: ReviewVm.export-running-text;
+                vertical-alignment: center;
+                font-size: 11.5px;
+                color: Tokens.color-on-surface-variant;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                y: (parent.height - self.height) / 2;
+                height: 4px;
+                border-radius: 2px;
+                background: Tokens.chrome-inset;
+                clip: true;
+
+                Rectangle {
+                    x: 0;
+                    width: parent.width * ReviewVm.export-percent / 100;
+                    height: 100%;
+                    background: Tokens.color-primary;
+                }
+            }
+
+            IconBtn {
+                box: 20px;
+                icon-size: 12px;
+                icon: Icons.close;
+                y: (parent.height - self.height) / 2;
+                clicked => { ReviewVm.export-cancel(); }
+            }
+        }
+    }
+}

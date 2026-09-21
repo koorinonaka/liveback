@@ -1,0 +1,53 @@
+// The session screen's label global and row model, split from sessions.slint
+// so the tile component can reference them without a circular import.
+
+// The screen's fixed Japanese labels. A global rather than ~20 properties
+// forwarded through `AppWindow`: slint exposes globals to Rust directly, so the
+// strings still have exactly one home (`ui_state::sessions`) and the window does
+// not have to carry a pass-through for each one.
+export global SessionLabels {
+    in-out property <string> recording;
+    in-out property <string> thumbnail-placeholder;
+    in-out property <string> note-placeholder;
+    // task1520 follow-up: the sub-line of a row nothing could read.
+    in-out property <string> unreadable-row;
+    in-out property <string> search-placeholder;
+    in-out property <string> view-list;
+    in-out property <string> view-thumbnail;
+    in-out property <string> open-directory;
+    in-out property <string> confirm-ok;
+    in-out property <string> confirm-cancel;
+}
+
+export struct SessionRow {
+    id: string,
+    // The name: whatever the session was renamed to, or its start time.
+    title: string,
+    // The one free line the user wrote about this recording (round5 §6-A).
+    // Empty means "never written", which the row draws as its placeholder.
+    note: string,
+    // "2026/08/11 12:00 · 3:20 · 412.0 MB", built in Rust so the column is one
+    // Text instead of three that have to agree about separators. No segment
+    // count -- that is an implementation unit (round5 §6-A).
+    // The list row's three right-aligned columns (task243). One joined
+    // sentence could not line up across rows; three fields can.
+    meta-date: string,
+    meta-duration: string,
+    meta-size: string,
+    // Just the date and time, short: what the thumbnail tile's caption band
+    // carries instead of the full meta line (round5 §6-A).
+    date: string,
+    // The session being written right now: it wears the only remaining pill,
+    // cannot be selected, and is the one row loadable while capturing.
+    recording: bool,
+    selected: bool,
+    selectable: bool,
+    // Excluded from the retention sweep (round5 §6-C).
+    protected: bool,
+    // task1520 follow-up: nothing could read this session. The row is here so
+    // the rows below it do not move; it says why and answers nothing.
+    unreadable: bool,
+    load-disabled: bool,
+    thumbnail: image,
+    has-thumbnail: bool,
+}

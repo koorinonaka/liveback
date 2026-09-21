@@ -1,0 +1,32 @@
+[package]
+name = "lvb-thumb"
+version = "0.1.0"
+edition = "2021"
+description = "Explorer thumbnail handler for .lvb session containers"
+
+[lib]
+name = "lvb_thumb"
+# The shell loads a thumbnail handler as an in-proc COM server, so this one has
+# to be a DLL. It deliberately does *not* depend on `livia`: that would drag
+# slint+skia into a cdylib, which is the exact combination the root Cargo.toml
+# records as crashing rustc (task120). The container format is shared by
+# including its source instead -- see `src/lib.rs`.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_PropertiesSystem",
+] }
+windows-core = "0.61"

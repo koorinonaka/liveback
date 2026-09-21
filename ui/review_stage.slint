@@ -1,0 +1,381 @@
+// The review pane's video stage (task128) and its gesture-feedback layers
+// (task119/round2 §10). Split from review.slint; state and callbacks all live
+// on the ReviewVm global, so only key-focus handback needs a callback here.
+
+import { Icons, AppIcon } from "icons.slint";
+import { ReviewVm } from "review_vm.slint";
+
+export component ReviewStage inherits Rectangle {
+    // Rung when a gesture lands here and key focus should return to the
+    // pane's FocusScope.
+    callback request-focus();
+    // Any pointer sign of life over the video (task151). The overlay controls
+    // hide themselves after 3s of nothing; this is what wakes them.
+    callback activity();
+    // How much of the stage's bottom edge the overlay controls are covering,
+    // so the first-run hint can sit clear of them.
+    in property <length> bottom-inset;
+    // The picture's drawn box inside this stage, from the layout that already
+    // computes it. Gestures are confined to it (task1010); the black around it
+    // is not the video.
+    in property <length> video-width;
+    in property <length> video-height;
+    property <length> video-x: (root.width - root.video-width) / 2;
+    property <length> video-y: (root.height - root.video-height) / 2;
+
+    // The ground either side of the picture, deliberately not a token
+    // (round2 §12, round5 §4-A-2). Not pure black: at #000 a dark frame and the
+    // letterbox merged into one shape and the video lost its edges.
+    background: #05070a;
+    clip: true;
+
+    // `contain` is what keeps the recording's own shape: the picture grows to
+    // whichever of the two axes runs out first and the remainder becomes
+    // letterbox above and below, or pillarbox left and right (round5 §4-A-2).
+    // Nothing here scales the two axes independently, so no combination of
+    // panel toggle, window resize and full screen can distort it.
+    if ReviewVm.stage-has-frame: Image {
+        width: 100%;
+        height: 100%;
+        image-fit: contain;
+        source: ReviewVm.stage-frame;
+    }
+
+    stage-touch := TouchArea {
+        mouse-cursor: pointer;
+        // No `double-clicked`: slint fires it on the second *release*, a whole
+        // press-and-hold after the user asked for full screen. Rust pairs the
+        // second press with the tap before it instead (task1010).
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down || event.kind == PointerEventKind.move) {
+                root.activity();
+            }
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.request-focus();
+                ReviewVm.stage-pressed(
+                    self.mouse-x - root.video-x,
+                    self.mouse-y - root.video-y,
+                    root.video-width,
+                    root.video-height,
+                );
+            }
+            if (event.kind == PointerEventKind.up) {
+                ReviewVm.stage-released();
+            }
+            if (event.kind == PointerEventKind.cancel) {
+                ReviewVm.stage-cancelled();
+            }
+        }
+    }
+
+    // Where the pointer sits inside the picture, as a fraction of its width --
+    // the same measure `stage_hit` feeds `stage_zone`, so the hint lights up
+    // exactly where a click would seek. The drawn band below clamps to 88px
+    // minimum, so on a narrow video its outer sliver sits past the trigger
+    // region -- the trigger follows the click zone, not the drawn width.
+    property <float> hover-ratio: (stage-touch.mouse-x - root.video-x) / root.video-width;
+    // Off the letterbox (it is not the video, task1010) and off during a
+    // press, when the gesture feedback takes over.
+    property <bool> zone-hover-armed: stage-touch.has-hover
+        && !stage-touch.pressed
+        && root.video-width > 0
+        && stage-touch.mouse-y >= root.video-y
+        && stage-touch.mouse-y < root.video-y + root.video-height;
+    property <bool> left-zone-hovered: root.zone-hover-armed
+        && root.hover-ratio >= 0 && root.hover-ratio < 0.25;
+    property <bool> right-zone-hovered: root.zone-hover-armed
+        && root.hover-ratio > 0.75 && root.hover-ratio < 1;
+
+    // ---- feedback layer (task119/round2 §10): never intercepts a
+    // click, only reports what the gesture beneath it did. ----
+
+    // Zone hints: each side appears while the pointer hovers its own seek
+    // zone and goes when it leaves. Measured off the picture, not the pane,
+    // so the band covers the strip that actually seeks (task1010) instead of
+    // running out over dead letterbox.
+    Rectangle {
+        x: root.video-x;
+        y: root.video-y;
+        width: Math.clamp(root.video-width * 0.25, 88px, 320px);
+        height: root.video-height;
+        opacity: root.left-zone-hovered ? 1.0 : 0.0;
+        animate opacity { duration: 160ms; }
+        background: @linear-gradient(90deg, #0000004d 0%, #00000000 100%);
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+            HorizontalLayout {
+                alignment: center;
+                AppIcon {
+                    commands: Icons.seek;
+                    stroke-color: #ffffffdb;
+                    size: 22px;
+                }
+            }
+            Text {
+                text: ReviewVm.stage-zone-seconds;
+                horizontal-alignment: center;
+                font-size: 12px;
+                font-weight: 600;
+                color: #ffffffdb;
+            }
+        }
+    }
+    Rectangle {
+        x: root.video-x + root.video-width - self.width;
+        y: root.video-y;
+        width: Math.clamp(root.video-width * 0.25, 88px, 320px);
+        height: root.video-height;
+        opacity: root.right-zone-hovered ? 1.0 : 0.0;
+        animate opacity { duration: 160ms; }
+        background: @linear-gradient(90deg, #00000000 0%, #0000004d 100%);
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+            HorizontalLayout {
+                alignment: center;
+                AppIcon {
+                    // The right zone seeks forward; `seek` itself points left.
+                    commands: Icons.seek-forward;
+                    stroke-color: #ffffffdb;
+                    size: 22px;
+                }
+            }
+            Text {
+                text: ReviewVm.stage-zone-seconds;
+                horizontal-alignment: center;
+                font-size: 12px;
+                font-weight: 600;
+                color: #ffffffdb;
+            }
+        }
+    }
+
+    // Tap circle / outcome circle. Scale+opacity only -- a mark
+    // that travels reads as the picture moving.
+    if ReviewVm.stage-feedback-kind == 1 || ReviewVm.stage-feedback-kind >= 3: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2 - 20px;
+        width: Math.clamp(root.height * 0.22, 64px, 120px);
+        height: self.width;
+        border-radius: self.width / 2;
+        border-width: 1px;
+        border-color: #ffffff24;
+        background: #0000009e;
+        // It used to be dropped by the same write that cleared the kind, so
+        // the mark blinked off (task1020). Rust now takes the opacity down
+        // first and holds the kind for the length of this fade.
+        opacity: ReviewVm.stage-feedback-shown ? 1.0 : 0.0;
+        animate opacity { duration: 180ms; }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+
+            if ReviewVm.stage-feedback-kind == 1: HorizontalLayout {
+                alignment: center;
+                AppIcon {
+                    commands: ReviewVm.stage-feedback-backward ? Icons.seek : Icons.seek-forward;
+                    stroke-color: #ffffffeb;
+                    size: 18px;
+                }
+            }
+
+            // Conditional, not an empty string: an empty Text still claims its
+            // ~24px line box, and that pushed the lone glyph of kinds 3-5
+            // half a line below the circle's centre.
+            if ReviewVm.stage-feedback-kind == 1: Text {
+                text: ReviewVm.stage-feedback-seconds;
+                horizontal-alignment: center;
+                font-size: 20px;
+                font-weight: 600;
+                color: #ffffffeb;
+            }
+
+            if ReviewVm.stage-feedback-kind >= 3: HorizontalLayout {
+                alignment: center;
+                AppIcon {
+                    commands: ReviewVm.stage-feedback-kind == 4 ? Icons.gap : Icons.loading;
+                    stroke-color: #ffffffeb;
+                    size: 22px;
+                }
+            }
+        }
+    }
+
+    // ---------- loading ring (task239) ----------
+    // A loaded session whose first frame has not arrived. Rust decides *when*
+    // (`ui_state::playback::stage_loading`, which is also what keeps this from
+    // stacking on top of the marks above); the spin is slint's own, so no
+    // frame of this animation costs a trip through the event loop.
+    //
+    // Nothing here rotates: slint 1.17 puts `rotation-angle` on `Image` and
+    // `Text` only -- neither `Rectangle` nor `Path` has it -- so the three dots
+    // are placed by trigonometry against `animation-tick()` instead, which is
+    // the same trick the picker's loading glyph uses to pulse.
+    if ReviewVm.stage-loading: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2 - 20px;
+        width: 48px;
+        height: 48px;
+        background: transparent;
+
+        for dot[i] in 3: Rectangle {
+            property <angle> at: (animation-tick() / 900ms) * 360deg + i * 120deg;
+            width: 7px;
+            height: 7px;
+            border-radius: 3.5px;
+            background: #ffffffeb;
+            x: parent.width / 2 - self.width / 2 + 18px * cos(self.at);
+            y: parent.height / 2 - self.height / 2 + 18px * sin(self.at);
+            // The tail fades, so this reads as one thing turning rather than
+            // three dots that happen to be moving.
+            opacity: i == 0 ? 1.0 : i == 1 ? 0.55 : 0.28;
+        }
+    }
+
+    // ---------- play / pause pulse (task239) ----------
+    // Kept entirely on this side: `changed playing` arms a one-shot timer and
+    // the fade is an `animate`, so a transport toggle costs one property write
+    // rather than a stream of notifications. Suppressed while any of the marks
+    // above is up, which is what keeps two glyphs off the same spot.
+    property <bool> pulse-shown;
+    property <bool> pulse-playing;
+    // `changed` only fires for a property of this element, so the global's
+    // `playing` is mirrored here to have something to watch.
+    property <bool> playing-mirror: ReviewVm.playing;
+
+    changed playing-mirror => {
+        if (ReviewVm.stage-feedback-kind == 0) {
+            self.pulse-playing = self.playing-mirror;
+            self.pulse-shown = true;
+            pulse-timer.restart();
+        }
+    }
+
+    pulse-timer := Timer {
+        // 420ms read as a flicker next to the 300ms in and 300ms out either
+        // side of it; the glyph is worth a beat of its own (task1020).
+        interval: 700ms;
+        running: root.pulse-shown;
+        triggered => {
+            root.pulse-shown = false;
+        }
+    }
+
+    Rectangle {
+        property <length> resting: Math.clamp(root.height * 0.22, 64px, 120px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2 - 20px;
+        // Grows as it goes, the same way the tap circle does. `Rectangle` has
+        // no `scale-x`, so the growth is the width and height themselves.
+        width: root.pulse-shown ? self.resting : self.resting * 1.35;
+        height: self.width;
+        border-radius: self.width / 2;
+        border-width: 1px;
+        border-color: #ffffff24;
+        background: #0000009e;
+        opacity: root.pulse-shown ? 0.95 : 0.0;
+        animate opacity, width { duration: 300ms; easing: ease-out; }
+
+        AppIcon {
+            commands: root.pulse-playing ? Icons.play : Icons.pause;
+            stroke-color: root.pulse-playing ? transparent : #ffffffeb;
+            fill-color: root.pulse-playing ? #ffffffeb : transparent;
+            size: 30px;
+        }
+    }
+
+    // Hold band: a state you are still in. Kind 2 is repeated seeking and
+    // never wears a rate (round2 §10); kind 6 is the centre hold's real x2
+    // playback, which is exactly the thing that badge would have been lying
+    // about, so it does (task650).
+    if ReviewVm.stage-feedback-kind == 2 || ReviewVm.stage-feedback-kind == 6: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2 - 20px;
+        width: band-layout.preferred-width;
+        height: 44px;
+        border-radius: 22px;
+        border-width: 1px;
+        border-color: #ffffff24;
+        background: #0000009e;
+
+        band-layout := HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 10px;
+            alignment: center;
+
+            AppIcon {
+                commands: ReviewVm.stage-feedback-kind == 6
+                    ? Icons.play
+                    : ReviewVm.stage-feedback-backward ? Icons.seek : Icons.seek-forward;
+                // `play` is a filled triangle; the seek glyphs are strokes.
+                stroke-color: ReviewVm.stage-feedback-kind == 6 ? transparent : #ffffffeb;
+                fill-color: ReviewVm.stage-feedback-kind == 6 ? #ffffffeb : transparent;
+                size: 18px;
+                y: (parent.height - self.height) / 2;
+            }
+
+            Text {
+                text: ReviewVm.stage-feedback-seconds;
+                vertical-alignment: center;
+                font-size: 18px;
+                font-weight: 600;
+                color: #ffffffeb;
+            }
+
+            // Dots count hold repeats, so the x2 band has none to show.
+            if ReviewVm.stage-feedback-kind == 2: HorizontalLayout {
+                spacing: 4px;
+                alignment: center;
+                for dot in 5: Rectangle {
+                    width: 5px;
+                    height: 5px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 2.5px;
+                    background: dot < ReviewVm.stage-feedback-dots
+                        ? #ffffffeb
+                        : #ffffff47;
+                }
+            }
+        }
+    }
+
+    // The one line under the circle for the neutral outcomes.
+    if ReviewVm.stage-feedback-line != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height) / 2 + 52px;
+        width: line-text.preferred-width + 20px;
+        height: 24px;
+        border-radius: 12px;
+        background: #0000009e;
+        // Same fade as the circle it sits under -- the two are one mark.
+        opacity: ReviewVm.stage-feedback-shown ? 1.0 : 0.0;
+        animate opacity { duration: 180ms; }
+
+        line-text := Text {
+            text: ReviewVm.stage-feedback-line;
+            font-size: 11px;
+            color: #ffffffdb;
+        }
+    }
+
+    // First-run hint pill.
+    if ReviewVm.stage-hint-visible: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 16px - root.bottom-inset;
+        width: hint-text.preferred-width + 24px;
+        height: 26px;
+        border-radius: 13px;
+        background: #0000009e;
+
+        hint-text := Text {
+            text: ReviewVm.stage-hint-text;
+            font-size: 11px;
+            color: #ffffffeb;
+        }
+    }
+}

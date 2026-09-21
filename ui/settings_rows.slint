@@ -1,0 +1,1110 @@
+// The settings screen's row primitives (switch/path/hotkey rows and the group
+// scaffolding), split from settings.slint which keeps the pane.
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { Chip, IconBtn, NumberField, SBtn, SelText, Switch, Tooltip } from "controls.slint";
+import { AutoCaptureEntry, SettingsLabels, SettingsVm } from "settings_vm.slint";
+
+// `.frow`'s border-top used to start every row here. Task310 took the rules out
+// of the settings screen entirely -- the group titles and the spacing already
+// say where one row ends and the next begins, and a rule per row turned a form
+// into a ledger.
+
+// `.frow` with a switch control.
+export component SwitchRow inherits VerticalLayout {
+    in property <string> label;
+    // round8 §3-1: the ring buffer toggle says what turning it off costs. The
+    // rows that already had one carry it in `PresetRow`; this is the same
+    // 12.5 / 10.5 pair.
+    in property <string> sub;
+    in property <bool> checked;
+    callback toggled(bool);
+
+    HorizontalLayout {
+        padding-top: 10px;
+        padding-bottom: 10px;
+        min-height: 38px;
+
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
+
+            SelText {
+                text: root.label;
+                font-size: 12.5px;
+                color: Tokens.color-on-surface;
+            }
+
+            if root.sub != "": SelText {
+                text: root.sub;
+                wrap: word-wrap;
+                font-size: 10.5px;
+                color: Tokens.color-on-surface-variant;
+            }
+        }
+
+        Switch {
+            y: (parent.height - self.height) / 2;
+            checked: root.checked;
+            toggled => {
+                root.toggled(!root.checked);
+            }
+        }
+    }
+}
+
+// task3040: a `SwitchRow` and a `PresetRow` folded onto one line -- the
+// switch decides whether the row's own quantity is in force, and the mock
+// draws both in the group's single 38px `.srow`, not a switch row over a sub
+// row (design round18-response §4-5, overwriting task1490's two-row shape).
+// Both call sites -- 保存領域's 保持容量 and 保持期間 rows -- share this
+// exact layout, so unlike the one-off rows above this earns the component.
+//
+// task3320 moves the switch to the end of the row. The order the design side
+// specified in round18-response §4-5 was, verbatim:
+//
+//     `ラベル | Switch | プリセットチップ | 自由入力 | 単位` の1行に統合
+//
+// and task3040 implemented exactly that. What it costs on the real screen is
+// that the switch lands mid-row -- five 44px chips, the field and the unit all
+// sit to its right -- so its left edge misses the column the five `SwitchRow`
+// switches in the 録画 group share, in the same scroll. The user reported that
+// on 2026-09-07 (「保存領域のトグルボタンは右のスイッチボタンと縦のラインが
+// ずれている」) and the user's call overrides the spec here: the order is now
+//
+//     ラベル | チップ | 自由入力 | 単位 | Switch
+//
+// The switch is the row's last child, so its right edge is the row's, which is
+// where `SwitchRow` (above) puts its own -- both are the fixed 36px `Switch`,
+// so the left edges line up too. The disagreement with §4-5 is not settled
+// silently: task3370 carries it to the design side on the next 便, alongside
+// the two items task3070 already put there.
+//
+// §4-5's *other* rule is untouched: only the value side (chips / field / unit)
+// dims when the switch is off; the switch stays outside that inner layout and
+// stays legible either way.
+export component SwitchPresetRow inherits VerticalLayout {
+    in property <string> label;
+    in property <bool> checked;
+    in property <[string]> presets;
+    // Index into `presets`, or -1 when the value is not one of them.
+    in property <int> selected: -1;
+    in property <string> value-text;
+    in property <string> placeholder;
+    in property <string> unit;
+    // Round2 7-2 / round6 3: the last draft typed here was out of range, so
+    // it was refused. `error-text` is the mock's `.errrow` sentence.
+    in property <bool> range-error;
+    in property <string> error-text;
+    callback toggled(bool);
+    callback preset-clicked(int);
+    callback value-edited(string);
+
+    spacing: 0;
+
+    row := HorizontalLayout {
+        // Same 38px row as every other settings row.
+        padding-top: 10px;
+        padding-bottom: 10px;
+        min-height: 38px;
+        spacing: 12px;
+
+        SelText {
+            text: root.label;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            font-size: 12.5px;
+            color: Tokens.color-on-surface;
+        }
+
+        HorizontalLayout {
+            horizontal-stretch: 0;
+            spacing: 6px;
+            alignment: end;
+            opacity: root.checked ? 1.0 : 0.38;
+
+            for preset[index] in root.presets: Chip {
+                label: preset;
+                on: index == root.selected;
+                height: 28px;
+                // 44px holds the widest bold caption (`120`) -- same pin as
+                // `PresetRow`'s own chips.
+                width: 44px;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    // Gated here, not a `disabled` flag: the dimmed row
+                    // already looks inert (same reasoning as `PresetRow`).
+                    if (root.checked) {
+                        root.preset-clicked(index);
+                    }
+                }
+            }
+
+            NumberField {
+                value: root.value-text;
+                placeholder: root.placeholder;
+                enabled: root.checked;
+                y: (parent.height - self.height) / 2;
+                error: root.range-error;
+                accepted(text) => {
+                    if (root.checked) {
+                        root.value-edited(text);
+                    }
+                }
+            }
+
+            if root.unit != "": SelText {
+                text: root.unit;
+                min-width: 26px;
+                height: 28px;
+                vertical-alignment: center;
+                y: (parent.height - self.height) / 2;
+                font-size: 11px;
+                color: Tokens.color-on-surface-variant;
+            }
+        }
+
+        // Last in the row, so its right edge is the row's -- which is where
+        // `SwitchRow` puts its own switch (task3320). See the header comment.
+        //
+        // Centred by a wrapper, not by `y: (parent.height - self.height) / 2`:
+        // a `HorizontalLayout` owns its children's `y` and overwrites that
+        // binding, so the 20px switch sat at the row's content top while the
+        // 28px chips beside it filled the line -- 4px high, which is the
+        // 「トグルスイッチのアライメントが上に寄ってる」 the user reported on
+        // 2026-09-16 (measured 100..121 against the chips' 101..128).
+        // `SwitchRow` never showed it because nothing in that row is taller
+        // than its switch. The wrapper is 36px wide, so the row's right edge
+        // is still the switch's.
+        VerticalLayout {
+            alignment: center;
+
+            sw := Switch {
+                checked: root.checked;
+                toggled => {
+                    root.toggled(!root.checked);
+                }
+            }
+        }
+    }
+
+    // The mock's `.errrow`. It is a sibling of the row above, so its own right
+    // edge is the *row's* right edge -- and since task3320 moved the switch to
+    // the end of the row, that is the switch's right edge, not the value side's
+    // (chips / field / unit). The padding pulls it back under the value side.
+    //
+    // The offset is derived, never a literal: `sw` is the switch and `row` is
+    // the line it sits on, so the gap is exactly the switch plus the row's own
+    // spacing. Resize the switch or change the row's spacing and this follows.
+    if root.range-error: HorizontalLayout {
+        padding-right: sw.width + row.spacing;
+
+        SelText {
+            text: root.error-text;
+            // `justify-content:flex-end` -- it lines up under the box it is
+            // about, not under the label.
+            horizontal-alignment: right;
+            font-size: 10.5px;
+            color: Tokens.color-error;
+        }
+    }
+}
+
+// `.srow.folder`: the mock's two-line folder row. Line 1 is the label (and its
+// one line of explanation); line 2 is the path plate across the full width with
+// the action buttons against its right edge. Actions come in through @children.
+//
+// task3070 stacks it, on the user's round18 §12 directive -- which overrides
+// task2380's one-line row, and lands back where task1480 had it before the
+// design side answered task1500 with the single line. The reason task2380 gave
+// still stands as a fact (a label column beside the plate squeezes the box
+// while 「録画中は変更できません」 is up); the two-line row is the shape that
+// stops it mattering, since neither line has to share its width.
+//
+// Sizes come from the mock (`mock/liveback-mock.html:497-501`): the row's own
+// `padding:2px 0` and `min-height:0` in place of the 38px every one-line row
+// carries, 22px under line 1, 5px between the lines, 12px along line 2. The
+// pieces themselves -- 28px plate, 12.5/10.5 label pair -- are carried over
+// unchanged.
+//
+// `readonly` is still gone (task1480): it dropped the box entirely for a
+// caller that never existed -- the export folder row that used it died in
+// task1050.
+export component PathRow inherits VerticalLayout {
+    in property <string> label;
+    // The one line of explanation the row is allowed, under its label -- the
+    // mock's `.s`. The buffer row uses it for "録画中は変更できません".
+    in property <string> sub;
+    // Still two properties, still split by `settings_ui::split_path_tail` on the
+    // Rust side -- they are just drawn as one run now (task310). Pinning the
+    // tail meant the last folder sat by itself against the right edge with a
+    // gap where the middle of the path had been, which read as two settings.
+    in property <string> head;
+    in property <string> tail;
+    // Readable from outside so the 既定に戻す button handed in through
+    // `@children` can fade in with the row (the mock's `data-when="pathhover"`).
+    // Same shape as `IconBtn.has-hover`, and the caller ORs the button's own
+    // hover in on top of it.
+    out property <bool> has-hover: touch.has-hover;
+
+    // `.srow.folder{padding:2px 0;min-height:0}`: the 38px floor was the
+    // one-line row's, and the form's own 6px gap plus these 2px is the
+    // separation the mock draws around the taller row.
+    padding-top: 2px;
+    padding-bottom: 2px;
+
+    // Wraps the row rather than sitting under it, so the pointer anywhere in
+    // it -- label, plate, buttons -- counts as hovering (task2570's shape on
+    // the auto-capture rows).
+    touch := TouchArea {
+        VerticalLayout {
+            // `.frow2{margin-top:5px}`.
+            spacing: 5px;
+
+            // Line 1: `.frow1{min-height:22px}`. It owns the full width now,
+            // so 「録画中は変更できません」 no longer competes with the plate.
+            VerticalLayout {
+                min-height: 22px;
+                alignment: center;
+                spacing: 2px;
+
+                SelText {
+                    text: root.label;
+                    // 12.5 / 10.5, not the 13 / 11 of prose: the mock sizes
+                    // this pair to the row it sits in (state 15).
+                    font-size: 12.5px;
+                    color: Tokens.color-on-surface;
+                }
+
+                if root.sub != "": SelText {
+                    text: root.sub;
+                    wrap: word-wrap;
+                    font-size: 10.5px;
+                    color: Tokens.color-on-surface-variant;
+                }
+            }
+
+            // Line 2: `.frow2{display:flex;gap:12px}` -- the plate takes the
+            // width and the buttons sit against its right edge.
+            HorizontalLayout {
+                spacing: 12px;
+
+                Rectangle {
+                    // `.srow.folder .pathbox{flex:1}`.
+                    horizontal-stretch: 1;
+                    // Same 28px as the `SBtn` beside it (`control-height-s`).
+                    // No `y:` any more: this line's own layout is 28px tall,
+                    // so there is nothing left to centre against (task3070).
+                    height: 28px;
+                    // The run is selectable now (task2380), and a read-only
+                    // `TextInput` has no `overflow: elide` -- the box cuts it
+                    // instead, at the head (task2690). Deliberate diff: the
+                    // ellipsis is gone, the part of a too-long path that is cut
+                    // is reached by dragging through it.
+                    clip: true;
+                    background: Tokens.chrome-field;
+                    border-width: 1px;
+                    // The plain hairline: this box is a field, not a card, and
+                    // the strong edge made the two path rows the loudest thing
+                    // on the page. round16 §3-1 names the path box among the
+                    // edges that step up in light, where the plain hairline is
+                    // what disappears instead.
+                    border-color: Tokens.chrome-control-border;
+                    border-radius: Tokens.shape-s;
+
+                    // One run, placed by hand rather than by a layout
+                    // (task2690): a path wider than the plate keeps its full
+                    // width and slides left, so the clip takes the head and the
+                    // last folder stays readable -- round12 §7-2's (c), the
+                    // mock's `direction:rtl`. Same trick as std's `LineEdit`,
+                    // which is how a `TextInput` scrolls at all. A path that
+                    // fits sits at the 10px inset exactly as before.
+                    SelText {
+                        property <length> room: parent.width - 20px;
+                        width: max(self.preferred-width, self.room);
+                        x: 10px + min(0px, self.room - self.width);
+                        height: parent.height;
+                        text: root.head + root.tail;
+                        vertical-alignment: center;
+                        font-size: 11.5px;
+                        color: Tokens.color-on-surface-variant;
+                    }
+                }
+
+                @children
+            }
+        }
+    }
+}
+
+// `.hkbox`: the two-state capture button. The halo of `.hkbox.wait` is a
+// growing box-shadow ring slint cannot draw; the border and fill pulse on the
+// mock's 1.4s beat instead (recorded as a deliberate diff).
+export component HotkeyRow inherits VerticalLayout {
+    in property <string> label;
+    in property <bool> capturing;
+    in property <string> draft;
+    // round8 §3-3: `draft` split into caps, decided in Rust (slint has no
+    // string split). Empty while a chord is being captured.
+    in property <[string]> keys;
+    // For the pane's single tooltip: this row's box is under the pointer, and
+    // it is in the state where clicking it would do something (round8 §3-3).
+    out property <bool> box-hovered: touch.has-hover && !root.capturing;
+    // Non-empty = the chord was refused, and this is the reason to show. A
+    // string rather than a flag because the two causes read differently
+    // (task880); task730 will decide it per row instead of for the pair.
+    in property <string> alert;
+    callback clicked;
+    callback captured(string, bool, bool, bool, bool) -> bool;
+    callback blurred;
+    callback reset;
+
+    HorizontalLayout {
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: Tokens.space-3;
+        min-height: 38px;
+
+        SelText {
+            text: root.label;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            font-size: 12.5px;
+            color: Tokens.color-on-surface;
+        }
+
+        // `.hkhint`: the reason sits *beside* the box, not in an `Alert`
+        // band under the row -- the mock keeps the row one line high.
+        if root.capturing || root.alert != "": SelText {
+            text: root.capturing ? SettingsLabels.capture-abort : root.alert;
+            vertical-alignment: center;
+            font-size: 10.5px;
+            color: root.capturing ? Tokens.color-outline : Tokens.color-error;
+        }
+
+        fs := FocusScope {
+            width: max(200px, hk-layout.preferred-width);
+            height: 28px;
+            y: (parent.height - self.height) / 2;
+
+            changed has-focus => {
+                if (!self.has-focus) {
+                    root.blurred();
+                }
+            }
+
+            key-pressed(event) => {
+                if (root.captured(event.text,
+                    event.modifiers.control, event.modifiers.alt,
+                    event.modifiers.shift, event.modifiers.meta)) {
+                    return accept;
+                }
+                return reject;
+            }
+
+            hk := Rectangle {
+                // hkpulse: the ring breathes 0 -> 4px -> 0 over 1.4s. Border
+                // and fill alpha ride that beat instead; a 1px hairline alone
+                // reads as static.
+                property <float> beat: abs(sin(animation-tick() / 1400ms * 180deg));
+
+                border-radius: Tokens.shape-s;
+                border-width: 1px;
+                border-color: root.capturing
+                    ? Tokens.color-primary.with-alpha(0.35 + 0.65 * self.beat)
+                    : root.alert != ""
+                        ? Tokens.color-error
+                        // `.hkbox` rests on the plain hairline and only goes
+                        // strong on hover -- the implementation had the two
+                        // ends swapped until task2160.
+                        : touch.has-hover ? Tokens.chrome-hairline-strong : Tokens.chrome-hairline;
+                // .hkbox.wait background:
+                // color-mix(in oklch, var(--color-primary), transparent 88%)
+                background: root.capturing
+                    ? Tokens.color-primary.with-alpha(0.06 + 0.10 * self.beat)
+                    : touch.has-hover
+                        ? Tokens.color-surface-container-high
+                        : Tokens.chrome-field;
+
+                hk-layout := HorizontalLayout {
+                    // task2380: the caps sit in the middle of the box, not
+                    // against its left edge. The mock's box is shrink-wrapped
+                    // so the question never comes up there; this one has a
+                    // 200px floor, and left-aligned caps in it read as a field
+                    // with a value typed into it rather than a chord.
+                    //
+                    // 9px + the pencil's 12px + its 5px gap, on *both* sides:
+                    // the pencil is out of this layout (it would pull the caps
+                    // left by half its width), and the symmetric padding both
+                    // centres them and keeps a long chord from running under
+                    // it.
+                    padding-left: 26px;
+                    padding-right: 26px;
+                    alignment: center;
+                    spacing: 5px;
+
+                    // Waiting for a chord: a sentence, not a chord.
+                    if root.capturing: Text {
+                        text: SettingsLabels.capture-armed;
+                        vertical-alignment: center;
+                        font-size: 11px;
+                        color: Tokens.color-on-surface-variant;
+                    }
+
+                    // round8 §3-3: one cap per key. A refused chord keeps
+                    // showing its keys -- the hint beside the box carries the
+                    // failure -- so this is what both resting states look like.
+                    if !root.capturing: HorizontalLayout {
+                        spacing: 5px;
+
+                        for key[index] in root.keys: HorizontalLayout {
+                            spacing: 5px;
+
+                            if index > 0: Text {
+                                text: "+";
+                                vertical-alignment: center;
+                                font-size: 10px;
+                                color: Tokens.color-outline;
+                            }
+
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: cap.preferred-width + 14px;
+                                height: cap.preferred-height + 8px;
+                                border-radius: Tokens.shape-xs;
+                                border-width: 1px;
+                                border-color: Tokens.chrome-hairline-strong;
+                                background: Tokens.color-surface-container-high;
+
+                                // The mock's `border-bottom-width: 2px`: a key
+                                // cap has a front edge. Slint's border is one
+                                // width on all four sides, so the extra pixel
+                                // is drawn as a strip (round8 逆提案).
+                                Rectangle {
+                                    y: parent.height - 2px;
+                                    height: 1px;
+                                    background: Tokens.chrome-hairline-strong;
+                                }
+
+                                cap := Text {
+                                    text: key;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                    font-family: "ui-monospace";
+                                    font-size: 10.5px;
+                                    color: Tokens.color-on-surface;
+                                }
+                            }
+                        }
+                    }
+
+                }
+
+                // The pencil the mock shows on hover, against the right edge.
+                // Outside `hk-layout` (task2380) so it does not count toward
+                // the width the caps are centred in. Opacity, never an `if`:
+                // an element that exists only while hovered deletes itself
+                // under the press and eats the click (task194-B).
+                AppIcon {
+                    commands: Icons.pencil;
+                    stroke-color: Tokens.color-outline;
+                    size: 12px;
+                    x: parent.width - 9px - self.width;
+                    y: (parent.height - self.height) / 2;
+                    opacity: (touch.has-hover && !root.capturing) ? 1.0 : 0.0;
+                }
+
+                touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        fs.focus();
+                        root.clicked();
+                    }
+                }
+            }
+        }
+
+        // Same 規定値に戻す as the two folder rows, and now drawn where the mock
+        // draws it: in the two loud states only (task2380 reverses task310's
+        // decision to keep it on the idle row). A chord that is still the
+        // shipped default has nothing to go back to, and the button sat there
+        // on every visit saying otherwise. `.sbtn.icon`, matching the folder
+        // row: a transparent `IconBtn` is for icon-dense areas like the
+        // transport, not a form row (round11 §1).
+        if root.capturing || root.alert != "": SBtn {
+            icon: Icons.reset;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                root.reset();
+            }
+        }
+    }
+    // The band that spelled out a refused chord is gone (task195): the same
+    // sentence is a toast now, which the user sees with the page closed too.
+    // The one-line hint above stays -- a toast cannot point at a row.
+}
+
+// task1470: the language row. Not a `PresetRow` any more -- the languages are
+// going to grow and a chip per language does not scale sideways, so only the
+// sentinel stays a chip and the languages move into a combo beside it. Same
+// grammar as the retention rows' 「なし」 chip + field: the exclusive sentinel
+// stands next to the value control and dims it while it is the answer.
+//
+// The popup itself is *not* here: it has to draw over the whole form, so the
+// pane owns it (like the sessions grid's `ContextMenu`). This row only says
+// where the box is and reports that it was clicked.
+export component LanguageRow inherits Rectangle {
+    in property <string> label;
+    in property <string> system-label;
+    in property <bool> system-selected;
+    // What the combo shows. While 「システム」 is the answer this stays legible
+    // but dim -- it is where the row goes back to, not what is deciding.
+    in property <string> value;
+    in property <bool> open;
+    callback system-clicked();
+    callback combo-clicked();
+
+    // Where the pane hangs the popup: the box's left edge and its underside.
+    out property <length> combo-x: combo.absolute-position.x;
+    out property <length> combo-y: combo.absolute-position.y + combo.height;
+    out property <length> combo-width: combo.width;
+
+    height: row.preferred-height;
+
+    row := HorizontalLayout {
+        spacing: 12px;
+
+        SelText {
+            text: root.label;
+            // 12.5px like every other settings row's label.
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            font-size: 12.5px;
+            color: Tokens.color-on-surface;
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: end;
+
+            // No 44px pin like the preset chips: 「システム」 does not fit one,
+            // and the chip is the *second* to last thing in a right-aligned
+            // row, so the 2px the selected weight adds moves nothing but its
+            // own left edge (recorded as a deliberate diff from the task's
+            // 44px, which came from the 「なし」 chip's two-character caption).
+            Chip {
+                label: root.system-label;
+                on: root.system-selected;
+                quiet: true;
+                height: 28px;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    root.system-clicked();
+                }
+            }
+
+            // The mock's `.freein` / `.hkbox` box: 28px, hairline, inset fill.
+            combo := Rectangle {
+                // A width, not a floor: `日本語` and `English` are different
+                // widths and the row must not shuffle when one replaces the
+                // other (task310's reason for pinning the chips). Since
+                // task2880 the theme row's options share the same number, so
+                // the two rows' 「システム」 chips start in the same column --
+                // hence a token rather than a literal.
+                width: Tokens.settings-trailing-width;
+                height: 28px;
+                y: (parent.height - self.height) / 2;
+                // Dimmed whole, box and all, exactly like the free field on a
+                // 「なし」 row -- and still clickable: picking a language here
+                // is what takes the row off 「システム」.
+                opacity: root.system-selected ? 0.38 : 1.0;
+                border-radius: Tokens.shape-s;
+                border-width: 1px;
+                border-color: (root.open || touch.has-hover)
+                    ? Tokens.color-outline
+                    : Tokens.chrome-hairline;
+                background: Tokens.chrome-inset;
+
+                HorizontalLayout {
+                    padding-left: 9px;
+                    padding-right: 8px;
+                    spacing: 6px;
+
+                    Text {
+                        text: root.value;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        font-size: 12px;
+                        color: Tokens.color-on-surface;
+                    }
+
+                    // Slint can rotate neither a Path nor its wrapper, so the
+                    // caret does not turn while the menu is open (round4 §2-A3
+                    // took the same trade for the drawer).
+                    VerticalLayout {
+                        alignment: center;
+
+                        AppIcon {
+                            commands: Icons.caret-down;
+                            stroke-color: Tokens.color-on-surface-variant;
+                            size: 12px;
+                        }
+                    }
+                }
+
+                touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.combo-clicked();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// round16: the theme row. A label and three chips, in `THEME_SETTINGS` order,
+// exactly one of them lit.
+//
+// Not the language row's chip-plus-combo shape: that split exists because the
+// language list will grow, and 「システム」 had to stay one visible click away
+// from a language nobody can read. Three themes fit on the line as they are.
+export component ThemeRow inherits Rectangle {
+    in property <string> label;
+    in property <[string]> choices;
+    in property <int> selected;
+    callback picked(int);
+
+    height: row.preferred-height;
+
+    row := HorizontalLayout {
+        spacing: 12px;
+
+        SelText {
+            text: root.label;
+            // 12.5px like every other settings row's label.
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            font-size: 12.5px;
+            color: Tokens.color-on-surface;
+        }
+
+        options := HorizontalLayout {
+            spacing: 6px;
+            alignment: end;
+
+            for choice[index] in root.choices: Chip {
+                label: choice;
+                on: root.selected == index;
+                quiet: true;
+                height: 28px;
+                // task2880: everything after the 「システム」 sentinel shares the
+                // width the language row pins its combo to, so the sentinel's
+                // left edge lands in the same column on both rows. The sentinel
+                // itself stays natural -- pinning it was the option the user
+                // turned down, since it leaves the controls beside it ragged.
+                // ponytail: the split assumes the sentinel plus exactly two
+                // options, which is what `THEME_SETTINGS` is. A third option
+                // would widen the group rather than re-divide it; make the
+                // divisor `root.choices.length - 1` if that ever happens.
+                width: index == 0
+                    ? self.min-width
+                    : (Tokens.settings-trailing-width - options.spacing) / 2;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    root.picked(index);
+                }
+            }
+        }
+    }
+}
+
+// task1980: a label over a list of strings, each with a × of its own, and one
+// line of explanation when there are none.
+//
+// Executables are still not added here: a registration names the recorded
+// application, which is what the review panel's toggle row knows (task2360).
+// What this screen is for is the other half -- an app that is registered but
+// never reviewed again still has to be removable.
+//
+// task3610 does put one add button on the label line, and it makes folder rules
+// only (task3600). That is not a walk-back of round13 §1 but its other side: a
+// folder has no recording behind it, so the review panel -- which only ever
+// knows the executable a session recorded -- cannot make one. Both kinds land
+// in the one list below, executables first, since both answer the same label.
+//
+// task2370 draws it the way round13 §1 settled: no plate, no border. It is a
+// list of names like the marker list, not three copies of the path field.
+// Since task2560 an entry can carry an icon and a display name (the mock's
+// `.appic2` / `.from` shape after all): `settings.json` now keeps the exe path
+// as display metadata, so the icon survives the app exiting. Entries that
+// never resolved metadata keep the bare mono exe name.
+//
+// Removal reports the string rather than the row index: the model is rewritten
+// from `settings.json` on every commit, and an index would name whatever landed
+// in that slot afterwards.
+export component ListRow inherits VerticalLayout {
+    in property <string> label;
+    // The line under the label, saying where entries are made. Same 12.5 / 10.5
+    // pair as `SwitchRow`'s.
+    in property <string> sub;
+    in property <[AutoCaptureEntry]> items;
+    in property <string> empty-text;
+    // task3610: the add button's label. Empty leaves the button off, so a
+    // caller that has nothing to add keeps the round13 §1 row exactly.
+    in property <string> add-label;
+    callback removed(string);
+    // The folder half (task3610), reported by path for the same reason the
+    // executable half is reported by name.
+    callback folder-removed(string);
+    callback add-clicked();
+
+    padding-top: 10px;
+    padding-bottom: 10px;
+    // `.lab{padding-bottom:6px}`: the label block and the list are one setting.
+    spacing: 6px;
+
+    // The label block takes the width and the add button sits against the right
+    // edge, the same shape `PathRow`'s second line uses for its buttons.
+    HorizontalLayout {
+        spacing: 12px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+
+            SelText {
+                text: root.label;
+                font-size: 12.5px;
+                color: Tokens.color-on-surface;
+            }
+
+            if root.sub != "": SelText {
+                text: root.sub;
+                wrap: word-wrap;
+                font-size: 10.5px;
+                color: Tokens.color-on-surface-variant;
+            }
+        }
+
+        if root.add-label != "": VerticalLayout {
+            alignment: center;
+
+            // Text only, no glyph (round21 §2-1 / task3830): the settings
+            // form's `SBtn` vocabulary is 「文字のみ」 or 「アイコンのみ」, and
+            // 「フォルダを追加」 already says folder. `SBtn` builds the glyph
+            // under an `if`, so leaving `icon` unset removes the element rather
+            // than zero-sizing it -- no empty slot survives on the left.
+            SBtn {
+                label: root.add-label;
+                clicked => {
+                    root.add-clicked();
+                }
+            }
+        }
+    }
+
+    // `.arempty`, indented to where the rows' text starts.
+    if root.items.length == 0: HorizontalLayout {
+        padding-left: 6px;
+
+        SelText {
+            text: root.empty-text;
+            wrap: word-wrap;
+            font-size: 11px;
+            color: Tokens.color-outline;
+        }
+    }
+
+    // `.arbox{gap:2px}`.
+    VerticalLayout {
+        spacing: 2px;
+
+        // The band is the `for` body, and the row proper sits inside it, so
+        // that the tooltip can be a sibling of the clip rather than a child of
+        // it (task2410). The clip is load-bearing (task2380) and a tip declared
+        // under it never leaves the 28px.
+        for item in root.items: Rectangle {
+            height: 28px;
+
+            Rectangle {
+                clip: true;
+                border-radius: Tokens.shape-s;
+                // `.ari:hover{background:var(--hover)}`. The × keeps the row
+                // lit while the pointer is on it.
+                background: (touch.has-hover || xbtn.has-hover || mbtn.has-hover)
+                    ? Tokens.chrome-hover
+                    : transparent;
+
+                // Wraps the content rather than sitting under it, so hovering
+                // the name or the × still counts as hovering the row.
+                touch := TouchArea {
+                    HorizontalLayout {
+                        // `.ari{padding:0 6px;gap:9px}`, minus what the ×'s
+                        // own 22px box already carries on its right.
+                        padding-left: 6px;
+                        padding-right: 3px;
+                        spacing: 9px;
+
+                        // task2560: the 16px app icon, only when both the
+                        // metadata row shape applies and an icon resolved.
+                        if item.kind == 0 && item.display != "" && item.icon.width > 0: VerticalLayout {
+                            alignment: center;
+
+                            Image {
+                                source: item.icon;
+                                width: 16px;
+                                height: 16px;
+                            }
+                        }
+
+                        // The app name (task2560), in the ordinary UI font --
+                        // this line is a name, not an identifier.
+                        if item.kind == 0 && item.display != "": SelText {
+                            text: item.display;
+                            vertical-alignment: center;
+                            font-size: 11.5px;
+                            color: Tokens.color-on-surface;
+                        }
+
+                        // Selectable, and so no `overflow: elide` -- the row
+                        // clips instead (task2380). An executable name is
+                        // short; this is the row where copying one comes up.
+                        // Beside a display name it steps down to the muted
+                        // sub role; alone it is the whole row, as before.
+                        if item.kind == 0: SelText {
+                            text: item.executable;
+                            min-width: 0px;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            font-family: "ui-monospace";
+                            font-size: item.display == "" ? 11.5px : 10.5px;
+                            color: item.display == ""
+                                ? Tokens.color-on-surface
+                                : Tokens.color-on-surface-variant;
+                        }
+
+                        // task3610: a folder rule draws a folder glyph where
+                        // the app icon goes, so the two kinds are told apart at
+                        // the left edge rather than by reading the text.
+                        if item.kind == 1: VerticalLayout {
+                            alignment: center;
+
+                            AppIcon {
+                                commands: Icons.folder;
+                                stroke-color: Tokens.color-on-surface-variant;
+                                size: 16px;
+                            }
+                        }
+
+                        // task3830 (round21 §2-3): the rule reads as its last
+                        // folder plus the path leading there, not as one long
+                        // path. The name takes the same 11.5px `on-surface` an
+                        // app's display name takes, and the parent the same
+                        // 10.5px muted run the exe name takes beside it -- one
+                        // shape for both kinds of row. No `horizontal-stretch`
+                        // and no `min-width` here on purpose: the name is what
+                        // identifies the rule, so it is the half that never
+                        // gives way.
+                        //
+                        // Both runs are the UI font, not mono: a rule is a
+                        // place, not an identifier, and the mono run beside an
+                        // app name is what says "this is the exe".
+                        if item.kind == 1: SelText {
+                            text: item.display;
+                            vertical-alignment: center;
+                            font-size: 11.5px;
+                            color: Tokens.color-on-surface;
+                        }
+
+                        // The parent path, and the only part of the row that
+                        // gives way: it has the stretch, the zero min-width and
+                        // the clip, so a long rule slides left and keeps its
+                        // *last* folders readable, exactly as `PathRow`'s plate
+                        // does (task2690) -- the clip takes the head. Declared
+                        // even when the string is empty (a volume root has no
+                        // parent) so the row keeps a stretcher and the buttons
+                        // stay against the right edge.
+                        if item.kind == 1: Rectangle {
+                            clip: true;
+                            min-width: 0px;
+                            horizontal-stretch: 1;
+
+                            SelText {
+                                property <length> room: parent.width;
+                                width: max(self.preferred-width, self.room);
+                                x: min(0px, self.room - self.width);
+                                height: parent.height;
+                                text: item.parent-path;
+                                vertical-alignment: center;
+                                font-size: 10.5px;
+                                color: Tokens.color-on-surface-variant;
+                            }
+                        }
+
+                        // task3730: a rule the guard turns down is in the file
+                        // but `poll` never acts on it, and until now nothing on
+                        // the row said so. Words rather than a dimmed row
+                        // (案 A) or a hidden control (案 B): 「淡い＝無効」 is
+                        // not a convention this list has, and taking the
+                        // toggle away still would not say why.
+                        //
+                        // The muted trailing run at the end of the rule, the
+                        // same secondary role the exe name plays beside a
+                        // display name. Deliberately no `horizontal-stretch` /
+                        // no `min-width: 0px`: it keeps its preferred width so
+                        // the parent path -- which has both, plus the clip --
+                        // is what gives way, and the folder name stays readable
+                        // the way task2690 settled and task3830 made explicit.
+                        // The 28px band above is unchanged; this is a run
+                        // inside the row, not a second line.
+                        if item.kind == 1 && item.ignored: SelText {
+                            text: SettingsLabels.auto-capture-ignored;
+                            vertical-alignment: center;
+                            font-size: 10.5px;
+                            color: Tokens.color-on-surface-variant;
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+
+                            // task2570: window/monitor toggle, same hover
+                            // convention as the × beside it. The glyph shows
+                            // the mode the entry is *in*; the tooltip names
+                            // what a click switches to.
+                            mbtn := IconBtn {
+                                icon: item.capture-monitor
+                                    ? Icons.monitor
+                                    : Icons.window;
+                                box: 22px;
+                                icon-size: 12px;
+                                opacity: (touch.has-hover || self.has-hover || xbtn.has-hover)
+                                    ? 1.0
+                                    : 0.0;
+                                clicked => {
+                                    if (item.kind == 1) {
+                                        SettingsVm.auto-capture-folder-monitor-toggled(item.executable);
+                                    } else {
+                                        SettingsVm.auto-capture-monitor-toggled(item.executable);
+                                    }
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+
+                            // Opacity, never an `if`: an element that only
+                            // exists while hovered deletes itself under the
+                            // press and eats the click (task194-B). The width
+                            // is held either way, so the name does not shift
+                            // on hover.
+                            xbtn := IconBtn {
+                                icon: Icons.close;
+                                box: 22px;
+                                icon-size: 12px;
+                                opacity: (touch.has-hover || self.has-hover || mbtn.has-hover)
+                                    ? 1.0
+                                    : 0.0;
+                                clicked => {
+                                    if (item.kind == 1) {
+                                        root.folder-removed(item.executable);
+                                    } else {
+                                        root.removed(item.executable);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Last child and opening upward, so it draws over the rows
+            // declared before it as well as its own (task2360's shape). Armed
+            // by the ×'s hover alone: the mock puts the title on `.x`, not on
+            // the row. Right-aligned because that is where the × is.
+            Tooltip {
+                x: Math.max(0px, parent.width - self.width);
+                y: -self.height - 6px;
+                armed: xbtn.has-hover;
+                label: SettingsLabels.auto-capture-remove-hint;
+            }
+
+            // task2570: the toggle's tip, aligned to its own button -- one
+            // 22px box plus the layout's 9px gap left of the ×.
+            Tooltip {
+                x: Math.max(0px, parent.width - self.width - 31px);
+                y: -self.height - 6px;
+                armed: mbtn.has-hover;
+                label: item.capture-monitor
+                    ? SettingsLabels.auto-capture-window-hint
+                    : SettingsLabels.auto-capture-monitor-hint;
+            }
+        }
+    }
+}
+
+// `.grp-title`.
+// A row that only states something (task4140). No `TouchArea`, no
+// `@children`, no control of any kind: the user's 2026-09-09 ruling was one
+// status row and 「押せるものは1つも足さない」, and a row nobody can press must
+// not be built out of one that can. Neither existing row would have done --
+// `PathRow` carries the head/tail plate and hands `@children` a button strip,
+// `ListRow` draws an empty state and an add button -- so both are heavier than
+// 「状態を述べるだけの行」.
+//
+// The 12.5 / 10.5 pair is `SwitchRow`'s and `PathRow`'s first line verbatim, so
+// the row sits at the same weight as every label above it in the form. Both
+// runs wrap: this label is composed from feature names in Rust rather than
+// being a fixed caption, so its length is not something this side can promise.
+export component StatusRow inherits VerticalLayout {
+    in property <string> label;
+    in property <string> sub;
+
+    // `SwitchRow`'s box, minus the switch it made room for.
+    padding-top: 10px;
+    padding-bottom: 10px;
+    min-height: 38px;
+    alignment: center;
+    spacing: 2px;
+
+    SelText {
+        text: root.label;
+        wrap: word-wrap;
+        font-size: 12.5px;
+        color: Tokens.color-on-surface;
+    }
+
+    if root.sub != "": SelText {
+        text: root.sub;
+        wrap: word-wrap;
+        font-size: 10.5px;
+        color: Tokens.color-on-surface-variant;
+    }
+}
+
+export component GroupTitle inherits VerticalLayout {
+    in property <string> title;
+
+    // `.gt{margin:16px 0 4px}`. This was 32px above, which is twice what the
+    // mock asks and enough to push the last group below the fold on a short
+    // window. The first title in the form sets `first: true` for the mock's
+    // `.gt:first-child{margin-top:0}`.
+    in property <bool> first;
+    padding-top: root.first ? 0px : Tokens.space-4;
+    padding-bottom: Tokens.space-1;
+
+    SelText {
+        text: root.title;
+        // Small and dim on purpose (mock state 15): a group title is a
+        // signpost, and one that reads as loudly as the settings themselves
+        // competes with them for the eye.
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.66px;
+        color: Tokens.color-outline;
+    }
+}

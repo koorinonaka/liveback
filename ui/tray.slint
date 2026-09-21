@@ -1,0 +1,105 @@
+// The notification-area icon (task130). A `SystemTrayIcon` is a top-level
+// component with no window of its own, and -- per the element's docs -- it does
+// not share globals with `AppWindow`, so the three menu titles are plain
+// properties set from Rust rather than a shared label global.
+//
+// Titles and order match the Tauri build's tray menu (`lib.rs` setup): open,
+// stop, quit. Stop stays enabled while idle because stopping an idle capture is
+// a no-op, not an error.
+
+export component TrayIcon inherits SystemTrayIcon {
+    // A png rather than the ico: slint's `@image-url` reads png/jpeg/svg, not
+    // ico. The 16px asset carries the tray-specific 3-marker glyph (task174);
+    // picked over 24px because this machine runs at 100% scale (96dpi).
+    //
+    // Four static assets, picked by state and by the taskbar's theme (round6 §1
+    // design answer, task2220): recording swaps in the red-dot badge -- static,
+    // never blinking -- and the light taskbar gets the deeper red plus the light
+    // glyph. All four are `@image-url` rather than `Image`s pushed from Rust so
+    // they stay embedded in the binary; the tray is not next to a file tree.
+    //
+    // **`assets/tray-icon/` is tray-only: drawing anything from it in a window
+    // breaks the tray icon, silently.** slint turns an `@image-url` into an
+    // HICON with `Image::to_rgba8()`, which returns None once a renderer has
+    // uploaded that image to a GPU texture, and the tray swallows the failure
+    // (`i-slint-core/items/system_tray/windows.rs` swallows both the conversion
+    // and the `Shell_NotifyIcon` failure). No error, no log -- the symptom in
+    // task2220 was the recording badge never going away on stop.
+    //
+    // That is why `liveback-tray-16.png` and `liveback-tray-light-16.png` are
+    // separate files from `app-icon/liveback-16.png` and
+    // `app-icon/light/liveback-light-16.png`: a different `@image-url` path gets
+    // its own cache entry, so the window can draw the `app-icon/` original while
+    // the tray keeps its own. They must stay **the same pixels but different
+    // bytes** -- identical bytes get folded into one static by constant merging,
+    // and the cache is keyed on the pointer, so the tray would share the
+    // window's entry again and break exactly as above (task2470).
+    //
+    // Break either rule and the build stops, via two guards in `build.rs`:
+    // `reject_tray_assets_outside_tray_slint` panics if `assets/tray-icon/`
+    // appears in any `.slint` other than this one, and
+    // `reject_tray_app_icon_byte_twins` panics if a tray PNG has the same bytes
+    // as an `assets/app-icon/` PNG.
+    icon: root.recording
+        ? (root.light-taskbar
+            ? @image-url("../assets/tray-icon/liveback-tray-light-rec-16.png")
+            : @image-url("../assets/tray-icon/liveback-tray-rec-16.png"))
+        : (root.light-taskbar
+            ? @image-url("../assets/tray-icon/liveback-tray-light-16.png")
+            : @image-url("../assets/tray-icon/liveback-tray-16.png"));
+
+    // Re-exposed rather than set directly: `tooltip` is inherited from
+    // `SystemTrayIcon`, and an inherited property gets no generated setter.
+    in property <string> tooltip-text;
+    tooltip: root.tooltip-text;
+
+    in property <string> open-label;
+    in property <string> stop-label;
+    in property <string> quit-label;
+    // Follows the tooltip: the capture pipeline pushes both through the sink.
+    in property <bool> recording;
+    // `SystemUsesLightTheme` from Rust: the notification area follows the system
+    // theme, not the app theme, so slint's `Palette.color-scheme` (which a
+    // windowless tray component has no window to read from) is not the source.
+    in property <bool> light-taskbar;
+
+    callback open();
+    callback stop();
+    callback quit();
+
+    // Left-click on the icon itself (Windows: right-click opens the menu).
+    clicked => {
+        root.open();
+    }
+
+    Menu {
+        MenuItem {
+            title: root.open-label;
+            activated => {
+                root.open();
+            }
+        }
+
+        MenuItem {
+            title: root.stop-label;
+            // Greyed out while idle: stopping would be a no-op anyway, and an
+            // always-active 停止 reads as "the app thinks it's recording".
+            enabled: root.recording;
+            activated => {
+                root.stop();
+            }
+        }
+
+        // Separator before 終了, per the round6 §1 design answer (task2220).
+        // slint drops separators at the head and tail of a menu and merges
+        // runs of them, so this only ever draws as the one line it is.
+        MenuSeparator {}
+
+        MenuItem {
+            title: root.quit-label;
+            activated => {
+                root.quit();
+            }
+        }
+    }
+}

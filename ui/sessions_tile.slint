@@ -1,0 +1,588 @@
+// One session as a list row or a thumbnail tile (round5 §6-A, task172). Split
+// from sessions.slint, which keeps the pane (toolbar, grid, dialogs).
+//
+// There are no buttons on a row any more. The old action cluster -- recover /
+// load / folder / discard, four controls repeated down the whole list -- is
+// gone: the sweep made recover meaningless, loading is the double-click, and
+// the other two live in the right-click menu. A row is information now.
+
+import { Dark, Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { IconBtn, Pill, PillVariant, InlineEdit } from "controls.slint";
+import { SessionLabels, SessionRow } from "sessions_model.slint";
+
+export component SessionTile inherits Rectangle {
+    in property <SessionRow> entry;
+    // Trailing cells of the last row: they hold the columns' width and draw
+    // nothing. Not an `if` around the body, which would take the tile's height
+    // with it and collapse the row.
+    in property <bool> blank;
+    in property <bool> thumbnail-view;
+    in property <length> media-height;
+    in property <length> cell-height;
+    // Whether this row's note is being edited in place. The title is not
+    // editable any more (the user, 2026-09-19).
+    in property <bool> editing-note;
+    // Whether the pointer is on this row. Computed by the pane from the
+    // marquee surface's position rather than by a TouchArea here: a TouchArea
+    // on the row would win the press and the drag-select could no longer start
+    // from a row (task079).
+    in property <bool> hovered;
+    // The one rule for hover decoration on this row (task690): a row a click
+    // cannot load stays undecorated, so hovering it while capturing says
+    // nothing rather than promising something that will not happen. Named and
+    // referenced instead of repeated, because the row's own small TouchAreas
+    // take the hover away from the marquee surface and each has to answer to
+    // the same rule -- they live inside `if` subtrees, so a single derived
+    // flag here cannot see them. They also stop *taking* the pointer under the
+    // same rule: `opacity: 0` in slint still hit-tests, so an invisible pencil
+    // stayed clickable and swallowed the click meant for the row.
+    property <bool> hover-allowed: !root.entry.load-disabled && !root.entry.unreadable;
+    property <bool> show-hover: root.hovered && root.hover-allowed;
+    // The note's pencil answers to readability alone, not to `hover-allowed`
+    // (the user, 2026-09-19): while a capture runs every other row is
+    // `load-disabled`, and gating the pencil on that left it on the LIVE row
+    // only. A note can be written on any row that has a manifest.
+    property <bool> note-editable: !root.entry.unreadable;
+    callback note-edit-requested();
+    callback note-committed(string);
+    callback edit-cancelled();
+    /// The open editor's current text, on every keystroke (task1340).
+    callback edit-draft-changed(string);
+    callback protect-toggled();
+    /// task2030 判断5: stop *this* recording, and only this one.
+    callback stop-requested();
+
+    // Passed in, not `inner.preferred-height`: Rust resolves a pointer position
+    // back to a row from the same numbers, and a height that only the layout
+    // knows cannot be mirrored there. (It still has to be explicit at all --
+    // see task124: a Rectangle takes no size from its children, so the row
+    // would collapse to 0 and stop hit-testing while painting correctly.)
+    height: root.cell-height;
+
+    // Round5 §6-A: no rounding and no outline on a list row. Consecutive
+    // selections used to break into separate rounded cards with the border
+    // cutting between them; a flat full-width wash lets neighbours read as one
+    // band. The tile keeps its card shape, because tiles are cards.
+    border-radius: (root.blank || !root.thumbnail-view) ? 0px : Tokens.shape-m;
+    // A tile is one rounded rectangle (t260916-a2a3): the thumbnail and the
+    // caption band are cut by this clip, so their square corners no longer
+    // poke out past the rounded outline drawn over them below. Tiles only --
+    // a list row has no radius and nothing that should be cut.
+    clip: root.thumbnail-view && !root.blank;
+    // No border here: the tile's edge is the outline drawn over its contents
+    // below (task1330). One here was invisible under the children, and with
+    // the clip above it stopped being harmless -- slint clips the children to
+    // the inside of a border, so the picture and the band pulled 1-2px in
+    // from the outline and this border showed through under it
+    // (t260916-a2a3, measured: every edge pixel of a plain tile changed).
+    background: root.blank
+        ? transparent
+        : root.entry.selected
+            // 0.20, up from 0.12: on the tile it competes with a thumbnail
+            // behind it, and on a list row it is the whole of the signal
+            // besides the 2px bar (task1130).
+            // On a tile it now sits wholly under the caption band's own
+            // wash, and the two together are the colour a selected band has
+            // always shown. Dropping this one was tried and measured
+            // (t260916-a2a3): the band went from #91bccb to #bed7e3 in light
+            // and from #305e73 to #1b3745 in dark -- next to the plain band's
+            // #1f2530, a selection you could no longer see.
+            ? Tokens.color-primary.with-alpha(0.20)
+            : root.thumbnail-view
+                ? Tokens.chrome-sidebar
+                : (root.show-hover ? Tokens.chrome-hover : transparent);
+
+    // The 2px edge that says "selected" without an outline around the whole row.
+    if !root.blank && !root.thumbnail-view && root.entry.selected: Rectangle {
+        x: 0;
+        width: 2px;
+        height: 100%;
+        background: Tokens.color-primary;
+    }
+
+    // ---------- thumbnail tile ----------
+    // The mock's `.htile`: the thumbnail runs to the tile's own edges (only
+    // the tile's `clip` rounds it) and the caption is a band under it, not a
+    // card with a picture inset in it (task184).
+    // The layout fills the tile exactly, so the band's bottom is the tile's.
+    if !root.blank && root.thumbnail-view: VerticalLayout {
+        Rectangle {
+            height: root.media-height;
+            clip: true;
+            background: root.entry.has-thumbnail ? Tokens.chrome-inset : Tokens.color-gap-bg;
+
+            if root.entry.has-thumbnail: Image {
+                width: 100%;
+                height: 100%;
+                image-fit: cover;
+                source: root.entry.thumbnail;
+            }
+
+            if !root.entry.has-thumbnail: VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+                HorizontalLayout {
+                    alignment: center;
+                    AppIcon {
+                        commands: Icons.gap;
+                        stroke-color: Tokens.color-gap-fg;
+                        size: 20px;
+                    }
+                }
+                Text {
+                    text: SessionLabels.thumbnail-placeholder;
+                    horizontal-alignment: center;
+                    font-size: 10px;
+                    color: Tokens.color-on-surface-variant;
+                }
+            }
+
+            // Top-right, beside the padlock (t260917-2d61, user ruling
+            // 2026-09-17): the top-left belongs to the selected badge. When
+            // the padlock is there too the pill steps left of it by the
+            // lock's 22px and a 4px gap, and centres on the lock's row.
+            if root.entry.recording: Pill {
+                x: parent.width - self.width - 6px - (root.entry.protected ? 22px + 4px : 0px);
+                y: 6px + (22px - self.height) / 2;
+                label: SessionLabels.recording;
+                variant: PillVariant.error;
+                icon: Icons.record;
+                strong: true;
+                // round16 §2-2: over the picture, so it stays in the dark set.
+                // The twin in the caption row below does not -- that band is
+                // page, and follows the theme.
+                on-thumbnail: true;
+            }
+
+            // Protected only. An unprotected tile shows nothing: the badge is
+            // for spotting the ones the sweep will not touch, and drawing an
+            // "off" state on every tile would bury the ones that are on.
+            if root.entry.protected: Rectangle {
+                x: parent.width - self.width - 6px;
+                y: 6px;
+                width: 22px;
+                height: 22px;
+                border-radius: Tokens.shape-xs;
+                border-width: 1px;
+                border-color: Dark.chrome-hairline;
+                background: #0d0f11d1;
+
+                AppIcon {
+                    commands: Icons.lock;
+                    stroke-color: Dark.color-tertiary;
+                    size: 12px;
+                }
+            }
+
+            // How long the recording runs, bottom-right over the picture --
+            // the one number a tile has room for, and the same field the list
+            // view puts in its duration column. Hidden when there is no
+            // honest answer: `duration_text` writes an em dash for a session
+            // whose manifest carries no span, and a chip saying "—" would be
+            // noise on every unreadable tile.
+            if root.entry.meta-duration != "—": Rectangle {
+                x: parent.width - self.width - 6px;
+                y: parent.height - self.height - 6px;
+                width: duration-text.preferred-width + 10px;
+                height: 16px;
+                border-radius: Tokens.shape-xs;
+                background: #0d0f11d1;
+
+                duration-text := Text {
+                    text: root.entry.meta-duration;
+                    font-size: 10px;
+                    color: Dark.color-on-surface;
+                }
+            }
+        }
+
+        // Name and date only (round5 §6-A): a tile is for finding the
+        // recording by sight, and size / note are what the list view is for.
+        // Length is the one exception -- it is over the picture as a chip
+        // above, not in this band, so the caption stays two lines.
+        // The mock's `cap2` band -- its own plate, not a margin.
+        Rectangle {
+            // The rest of the tile, not `caption.preferred-height`: the pane
+            // sizes the tile from its own constant (`cell-height`), and when
+            // the text measured taller than that the band hung ~3px below
+            // the outline with square corners (t260916-a2a3).
+            height: root.cell-height - root.media-height;
+            // The wash lives here, on the caption band, and not over the
+            // thumbnail (task1330). The band is the one part of a tile that is
+            // always opaque and always visible, so a colour on it is a colour
+            // you can actually see -- and it is the same trade the list row
+            // makes, where the wash is on chrome rather than on the picture.
+            // A scrim over the thumbnail would dim the very thing the user is
+            // looking at.
+            background: root.entry.selected
+                ? Tokens.color-primary.with-alpha(0.20)
+                : Tokens.color-surface-container-high;
+
+            caption := VerticalLayout {
+                alignment: start;
+                padding-left: 9px;
+                padding-right: 9px;
+                padding-top: 7px;
+                padding-bottom: 7px;
+                spacing: 2px;
+
+                Text {
+                    text: root.entry.title;
+                    overflow: elide;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Tokens.color-on-surface;
+                }
+
+                Text {
+                    text: root.entry.date;
+                    overflow: elide;
+                    font-size: 10.5px;
+                    color: Tokens.color-on-surface-variant;
+                }
+            }
+        }
+    }
+
+    // The tile's edge, drawn *over* its contents (task1330).
+    //
+    // The border on the tile's own `Rectangle` above is set correctly and is
+    // invisible: the thumbnail runs to the tile's edges and the caption band
+    // under it is opaque, and in slint a child paints over its parent's
+    // background *and* its border. Measured before this: selecting a tile
+    // changed 280 pixels, all of them inside the badge; hovering changed none.
+    //
+    // Fill-less and hit-test-free -- it is an outline, not a surface, so it
+    // must not eat the click that selects the tile.
+    if !root.blank && root.thumbnail-view: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        border-radius: Tokens.shape-m;
+        // 2px when selected (task1130). At 1px the selected edge and the
+        // neutral white hover edge were the same weight, so a tile you had
+        // picked looked like a tile the pointer happened to be over.
+        border-width: root.entry.selected ? 2px : 1px;
+        border-color: root.entry.selected
+            ? Tokens.color-primary
+            // The mock's htile hover is a neutral white edge (round7 §2-5).
+            : (root.show-hover ? #ffffff8c : Tokens.chrome-hairline);
+    }
+
+    // ---------- list row ----------
+    if !root.blank && !root.thumbnail-view: HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 12px;
+
+        Rectangle {
+            width: 64px;
+            height: 36px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Tokens.shape-xs;
+            border-width: 1px;
+            border-color: Tokens.chrome-hairline;
+            background: Tokens.chrome-inset;
+            clip: true;
+
+            if root.entry.has-thumbnail: Image {
+                width: 100%;
+                height: 100%;
+                image-fit: cover;
+                source: root.entry.thumbnail;
+            }
+
+            if !root.entry.has-thumbnail: AppIcon {
+                commands: Icons.gap;
+                stroke-color: Tokens.color-gap-fg;
+                size: 16px;
+            }
+        }
+
+        // Two lines: what it is called, and what you wrote about it.
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            alignment: center;
+
+            HorizontalLayout {
+                spacing: 6px;
+                height: 20px;
+
+                Text {
+                    text: root.entry.title;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    font-size: 12.5px;
+                    font-weight: 600;
+                    color: Tokens.color-on-surface;
+                }
+
+                if root.entry.recording: Pill {
+                    label: SessionLabels.recording;
+                    variant: PillVariant.error;
+                    icon: Icons.record;
+                    y: (parent.height - self.height) / 2;
+                    strong: true;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+                height: 22px;
+
+                // The note text takes no clicks of its own (task184). It used
+                // to sit under a full-width TouchArea that opened the editor
+                // on a plain click -- which both broke the one-gesture-one-
+                // meaning rule (a click on a row selects it) and swallowed the
+                // double-click that loads the session. The pencil is the entry
+                // point here, exactly as it is for the title above; the
+                // context menu and F2 are the others.
+                // task1520 follow-up: nothing could be read out of this
+                // session, so there is no note to show and no editor to open.
+                // The row is here to hold its place and say that.
+                if root.entry.unreadable: Text {
+                    text: SessionLabels.unreadable-row;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    font-size: 11px;
+                    color: Tokens.color-on-surface-variant;
+                }
+
+                if !root.editing-note && !root.entry.unreadable: HorizontalLayout {
+                    spacing: 5px;
+
+                    Text {
+                        text: root.entry.note == ""
+                            ? SessionLabels.note-placeholder
+                            : root.entry.note;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        font-size: 11px;
+                        // The empty placeholder sits a step back until the
+                        // row is hovered, where it lifts to look like the
+                        // field it is (round5 §6-A).
+                        color: root.entry.note != ""
+                            ? Tokens.color-on-surface-variant
+                            : root.hovered
+                                ? Tokens.color-on-surface-variant
+                                : Tokens.color-outline;
+                    }
+
+                    // Mounted and faded rather than put behind `if
+                    // root.hovered` (task184 verification): `hovered` is
+                    // computed from the marquee surface *underneath* the row,
+                    // and this button's own TouchArea takes that hover away
+                    // the moment the pointer reaches the pencil -- an `if`
+                    // deleted it exactly when it was about to be clicked.
+                    // `opacity: 0` still hit-tests, and the button's own hover
+                    // holds it visible once the pointer is on it.
+                    note-pen := IconBtn {
+                        box: 18px;
+                        icon-size: 11px;
+                        icon: Icons.pencil;
+                        y: (parent.height - self.height) / 2;
+                        disabled: !root.note-editable;
+                        opacity: ((root.hovered && root.note-editable) || note-pen.has-hover) ? 1 : 0;
+                        clicked => {
+                            root.note-edit-requested();
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                if root.editing-note: InlineEdit {
+                    horizontal-stretch: 1;
+                    text: root.entry.note;
+                    hint: "Enter";
+                    y: (parent.height - self.height) / 2;
+                    init => {
+                        self.begin-edit();
+                    }
+                    edited(value) => {
+                        root.edit-draft-changed(value);
+                    }
+                    committed(value) => {
+                        root.note-committed(value);
+                    }
+                    // Guarded on this row's own edit state (task3430): blur
+                    // cancels, so the teardown that follows `editing-note`
+                    // going false delivers a `cancelled` of its own -- and by
+                    // then the pane may have opened another row, which an
+                    // unguarded forward would close again.
+                    cancelled => {
+                        if (root.editing-note) {
+                            root.edit-cancelled();
+                        }
+                    }
+                }
+            }
+        }
+
+        // `.meta`: three columns, each at least 56px and right-aligned, which
+        // is the whole reason the list reads as a table. `flex:none` in the
+        // mock -- a long title must eat its own words, not this.
+        HorizontalLayout {
+            spacing: 18px;
+            // ponytail: no tabular-nums here. slint's `Text` exposes no
+            // font-variant, so the columns are aligned by their box rather
+            // than by digit width; at 11px the drift inside one column is
+            // under a pixel. Revisit if slint grows the property.
+            Text {
+                text: root.entry.meta-date;
+                min-width: 56px;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                font-size: 11px;
+                color: Tokens.color-on-surface-variant;
+            }
+            Text {
+                text: root.entry.meta-duration;
+                min-width: 56px;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                font-size: 11px;
+                color: Tokens.color-on-surface-variant;
+            }
+            Text {
+                text: root.entry.meta-size;
+                min-width: 56px;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                font-size: 11px;
+                color: Tokens.color-on-surface-variant;
+            }
+        }
+
+        // Protected rows light this permanently; unprotected ones only show it
+        // while the pointer is on the row, so a list of unprotected sessions
+        // stays a list of sessions rather than a column of padlocks.
+        //
+        // Faded rather than unmounted, for the same reason as the pencils
+        // above (task184 verification): `protect-touch` takes the row's hover
+        // away from the marquee surface, so an unprotected row's padlock used
+        // to vanish under the pointer and the click went to the row instead.
+        // That also lets the 22px slot stay put, which is what the removed
+        // spacer was for.
+        // A LIVE row takes the stop button in this slot instead (round9 §1-4):
+        // the same 22x22 footprint, so the columns beside it do not shift, and
+        // no padlock -- a session still being appended to is never swept.
+        //
+        // Always mounted and always drawn, unlike the padlock: it is an action
+        // the row exists to offer, and an `if` on hover is what task194-B and
+        // task1980's follow-up both fell into. Only its background follows the
+        // pointer.
+        if root.entry.recording: Rectangle {
+            width: 22px;
+            height: 22px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: stop-touch.has-hover || stop-touch.pressed
+                ? Tokens.color-error-container
+                : transparent;
+
+            stop-touch := TouchArea {
+                enabled: root.hover-allowed;
+                mouse-cursor: pointer;
+                clicked => {
+                    root.stop-requested();
+                }
+            }
+
+            // A square inside a ring, drawn from two Rectangles rather than
+            // taken from `Icons.stop` (user, 2026-09-15: 「ライブ中の停止ボタンが
+            // 分かりにくい」, and 「ラベルいらない」 -- so the glyph has to carry
+            // it alone). `Icons.stop` on its own is a 9px grey rounded square on
+            // a dark row: at that size it reads as a speck, not a control, which
+            // is the same finding task810 made about the review screen's stop at
+            // 8px. That one bought its legibility with the word beside it and
+            // the picker's with a plate; this slot has room for neither.
+            //
+            // The ring is what a transport's stop button looks like everywhere
+            // else, and it triples the mark's footprint without growing the
+            // 22px hit target. Red at rest rather than grey, because this is the
+            // one control on the screen that ends a recording -- the same
+            // `color-error` family the LIVE pill on the row already uses. The
+            // *square* is load-bearing against that pill: a red **dot** would
+            // read as "recording" rather than as the way out of it (the
+            // distinction `picker_modal.slint`'s go-button comment draws).
+            Rectangle {
+                property <brush> ink: stop-touch.has-hover || stop-touch.pressed
+                    ? Tokens.color-on-error-container
+                    : Tokens.color-error;
+
+                width: 17px;
+                height: 17px;
+                border-radius: self.width / 2;
+                border-width: 1.5px;
+                border-color: self.ink;
+
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 1.5px;
+                    background: parent.ink;
+                }
+            }
+        }
+
+        if !root.entry.recording: Rectangle {
+            width: 22px;
+            height: 22px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Tokens.shape-s;
+            // `protected` is state, not hover, so it stays lit on a row the
+            // hover rule silences (task690).
+            opacity: (root.entry.protected || root.show-hover || protect-touch.has-hover)
+                ? 1
+                : 0;
+            background: protect-touch.pressed
+                ? Tokens.chrome-active
+                : protect-touch.has-hover ? Tokens.chrome-hover : transparent;
+
+            protect-touch := TouchArea {
+                enabled: root.hover-allowed;
+                mouse-cursor: pointer;
+                clicked => {
+                    root.protect-toggled();
+                }
+            }
+
+            AppIcon {
+                commands: Icons.lock;
+                // Lit permanently once protected; merely available otherwise.
+                stroke-color: root.entry.protected
+                    ? Tokens.color-tertiary
+                    : Tokens.color-outline;
+                size: 13px;
+            }
+        }
+    }
+
+    // ---------- selected badge (task1130) ----------
+    // Tiles only: a list row already says it with the bar at its left edge,
+    // and a disc floating over a row of text would be the loudest thing in the
+    // list. Last child, so it sits over the thumbnail rather than under it.
+    // Top-left (t260917-2d61): top-right is the padlock's, and the badge sat
+    // exactly on it. The thumbnail starts at the tile's origin, so 6px here is
+    // 6px from the picture's corner too, well inside the tile's rounded clip.
+    if !root.blank && root.thumbnail-view && root.entry.selected: Rectangle {
+        x: 6px;
+        y: 6px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: Tokens.color-primary;
+
+        AppIcon {
+            commands: Icons.check;
+            stroke-color: Tokens.color-on-primary;
+            size: 14px;
+            weight: 2.5px;
+        }
+    }
+}
