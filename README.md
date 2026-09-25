@@ -1,43 +1,62 @@
+<div align="center">
+
+<img src="assets/app-icon/liveback-128.png" width="96" alt="Liveback">
+
 # Liveback
 
-**選んだウィンドウを録りっぱなしにしておいて、「さっきの」をあとから切り出す。**
+**録りながら見返せて、残したい場面だけをすぐ書き出せる録画アプリ**
 
-ゲームで良いプレイが出た瞬間、バグの再現手順、配信の事故 — 「録画しておけばよかった」を無くすための Windows 用リプレイバッファです。録画ボタンを押す必要はありません。対象のウィンドウを選んでおくだけで直近の映像と音を保持し続け、必要になったところだけを MP4 に書き出せます。
+<a href="https://github.com/koorinonaka/liveback/releases/latest"><img src="docs/assets/download.svg" alt="ダウンロード" height="52"></a>
 
-![確認画面 — 録画をタイムラインで見返す](docs/assets/review.png)
+![確認画面：録画をタイムラインで見返す](docs/assets/review.png)
 
-## Features
+</div>
 
-- **ウィンドウ単位の常時録画** — 録画ボタンは無し。選んだウィンドウの直近 5〜120 分だけを保持し続けるリングバッファ。他のウィンドウや通知は映り込みません
-- **軽い** — GPU のハードウェアエンコーダで 30 / 60 / 120 fps。品質一定モードなので静止画面はほとんど容量を消費しません
-- **対象アプリの音だけ録る** — Discord の通話や通知音は入りません（全アプリの音への切り替えも可）
-- **見返して、切り出す** — 録画を止めずにタイムラインを巻き戻し、マーカー（`Ctrl+Shift+R`）で印を付け、必要な範囲だけを高速に MP4 へ書き出し
-- **壊れにくい** — 1 セッション = 1 ファイル。強制終了しても直前までの録画は復旧されます
-- **完全ローカル** — テレメトリなし、アカウント不要。録画・設定・ログは一切送信しません（外向きの通信は更新確認だけで、設定でオフにできます）
+## コンセプト
 
-そのほか: 履歴の検索・メモ・保護、日本語 / English UI、HDR→SDR 変換（モニターの SDR コンテンツ白レベルに追従）、トレイ常駐、Windows ログイン時起動
+### 録画中でも見返せる
+
+録画を止めずにタイムラインを巻き戻して、さっきの場面をその場で確認できます。気になった瞬間はホットキー（`Ctrl+Shift+R`）でマーカーを付けておけます。
+
+### 一度設定すれば、あとは自動で録画
+
+ゲームやアプリを登録しておくと、起動したタイミングで録画が始まります。Windows ログイン時の起動とトレイ常駐を組み合わせれば、録り忘れがありません。
+
+### 軽量動作
+
+GPU のハードウェアエンコーダで録画し、ゲームや作業への負荷がほとんどかからないように設計しています。
+
+### 気に入った範囲をすぐ書き出す
+
+見返して範囲を選べば、その部分だけを MP4 として書き出せます。
+
+## 主な機能
+
+- **録画対象**：アプリを選んで録画（画面全体も可）。通知や他のアプリは映り込みません
+- **録画の残し方**：直近の一定時間だけを残すリングバッファ録画と、止めるまで録り続ける無制限録画を切り替え
+- **音声**：対象アプリの音だけを録音（全アプリの音にも切り替え可）
+- **フレームレート**：30 / 60 / 120 fps
+- 履歴の検索・メモ・保護、日本語 / English UI
 
 ## 動作環境
 
 - Windows 11 22H2 以降（x64）
-- D3D11 / Media Foundation 対応のハードウェア H.264 エンコーダを持つ GPU（NVIDIA / AMD / Intel の近年の GPU なら搭載されています）
+- ハードウェア H.264 エンコーダを持つ GPU（NVIDIA / AMD / Intel）
 - 録画先ドライブに 10 GiB 以上の空き
-
-対象にできるのは通常ウィンドウとボーダーレスウィンドウです。排他フルスクリーンは対象外なので、ゲーム側の表示設定を「ボーダーレス」にしてください。マイク録音はありません。
 
 ## インストール
 
-インストーラー（`Liveback_<version>_x64-setup.exe`）を実行してください。ユーザー単位のインストールで、管理者権限（UAC）は要りません。
+<a href="https://github.com/koorinonaka/liveback/releases/latest"><img src="docs/assets/download.svg" alt="ダウンロード" height="52"></a>
 
-ソースからビルドする場合は [docs/development.md](docs/development.md) を参照してください。
+[Releases](https://github.com/koorinonaka/liveback/releases/latest) から `Liveback_<version>_x64-setup.exe` をダウンロードして実行してください。管理者権限は要りません。
 
 ## 使い方
 
-1. **対象** でゲームやアプリのウィンドウを選ぶ — その場で録画が始まります
-2. あとは遊ぶだけ。見返したくなったら **確認** でタイムラインをシークして、マーカーやプレビューで場所を探す
-3. 残したい範囲を選んで **書き出し** — 完成した MP4 のパスが表示されます
+1. **対象** で録画したいアプリを選ぶと、録画が始まります
+2. **確認** でタイムラインをシークし、マーカーやプレビューで見返したい場面を探します
+3. （必要なときだけ）残したい範囲を選んで **書き出し** します
 
-ウィンドウを閉じてもトレイに常駐して録画を続けます。停止と終了はトレイメニューから。
+ウィンドウを閉じてもトレイに常駐して録画を続けます。停止と終了はトレイメニューから行えます。
 
 ## 設定
 
@@ -45,48 +64,30 @@
 
 | 設定 | 内容 |
 | --- | --- |
-| リングバッファ録画 | オンで保持時間を超えた古い映像から自動削除。オフで録りっぱなし |
-| 保持時間 | 5 分〜120 分 |
+| リングバッファ録画 | オンにすると直近の一定時間（5〜120 分）だけを残し、それより古い映像は自動で削除します。ディスク容量を一定に抑えたいときに便利です。オフにすると止めるまで無制限に録り続けます |
 | フレームレート | 30 / 60 / 120 fps |
-| 他のアプリの音も録音 | 対象アプリの音だけ（既定）⇄ 全アプリの音。次の録画から適用 |
+| 他のアプリの音も録音 | 対象アプリの音だけ（既定）⇄ 全アプリの音 |
 | 保持容量 / 保持期間で自動削除 | 古いセッションを容量（GB）や日数で自動削除。保護したセッションは残ります |
-| 録画バッファフォルダ | 録画データの保存先ドライブを変更 |
+| 録画バッファフォルダ | 録画データの保存先を変更 |
 | ホットキー | マーカー追加などのグローバルホットキー |
 
-## 録画データとプライバシー
+## 開発
 
-- 録画は `.lvb` という独自コンテナ 1 ファイルに保存されます（既定: `%LOCALAPPDATA%\Liveback\buffer\`、設定で変更可）
-- 録画・設定・ログは一切送信しません。外向きの通信は更新確認のみで、設定でオフにできます
-- ログ（`%LOCALAPPDATA%\com.liveback.desktop\logs\`）には個人情報・音声内容・任意のファイルパスを書き出さない設計で、7 日で自動削除されます
-- セッションの「破棄」はごみ箱への移動です。誤操作してもごみ箱から戻せます
-
-## よくあるトラブル
-
-| 症状 | 対応 |
-| --- | --- |
-| 録画を開始できない | GPU ドライバを更新。対象の解像度や fps を下げて再試行 |
-| 黒画面になる | 対象を最小化しない。排他フルスクリーンではなくボーダーレスにする |
-| 音が入らない | 対象アプリが音を出しているか確認し、対象を選び直して録画を再開 |
-| 他アプリの音が入らない | 設定「他のアプリの音も録音」をオンにして**録画を開始し直す** |
-| ホットキーが「登録失敗」 | 他アプリが同じキーを使用中。設定で別のキーに変更 |
-| 容量不足 | 録画先ドライブに 10 GiB 以上の空きを確保。保持時間・保持容量を見直す |
-| 強制終了で壊れた | アプリを再起動すると復旧候補が表示され、直前までの録画が再生できます |
+ビルド方法・テスト・インストーラー作成・内部構造は [docs/development.md](docs/development.md) を参照してください。
 
 ## ライセンス
 
-Liveback 自身は [MIT License](LICENSE) です。
+[MIT License](LICENSE)
 
-UI ツールキットの [Slint](https://slint.dev/) は
-**Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0** の条件で
-利用しています。
+<a href="https://slint.dev/"><img src="https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png" height="24" alt="Made with Slint" align="absmiddle"></a>
+UI は [Slint](https://slint.dev/) を Royalty-free Desktop, Mobile, and Web Applications License 2.0 のもとで利用しています。
 
-[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev/)
+<details>
+<summary>主な依存とライセンス</summary>
 
-主な依存と、そのライセンス:
-
-| | |
+| 依存 | ライセンス |
 | --- | --- |
-| [Slint](https://slint.dev/)（UI、`i-slint-*` 含む） | GPL-3.0-only **OR** Slint Royalty-free 2.0 **OR** 商用（本プロジェクトは Royalty-free 2.0 を選択） |
+| [Slint](https://slint.dev/)（UI、`i-slint-*` 含む） | GPL-3.0-only OR Slint Royalty-free 2.0 OR 商用（本プロジェクトは Royalty-free 2.0 を選択） |
 | [wgpu / wgpu-hal](https://wgpu.rs/)（`vendor/wgpu-hal` にパッチ版を同梱） | MIT OR Apache-2.0 |
 | [skia-safe](https://github.com/rust-skia/rust-skia)（描画） | MIT |
 | [windows / windows-core](https://github.com/microsoft/windows-rs)（Win32 バインディング） | MIT OR Apache-2.0 |
@@ -94,6 +95,4 @@ UI ツールキットの [Slint](https://slint.dev/) は
 
 そのほかの依存はすべて MIT / Apache-2.0 / Zlib です。
 
-## 開発
-
-ビルド方法・テスト・インストーラー作成・内部構造は [docs/development.md](docs/development.md) へ。
+</details>
