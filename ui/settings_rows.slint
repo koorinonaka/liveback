@@ -1,0 +1,828 @@
+// The settings screen's pieces (t260927-fde8): the DS SettingsGroup card and
+// its SettingsRow, and the rows whose control is more than one element
+// (PresetField, PathField, HotkeyField, the auto-record entries). The pane in
+// settings.slint only arranges them.
+//
+// Sizes are the DS's (`bundle.css` `.lb-sgroup*` / `.lb-srow*` / `.lb-path*` /
+// `.lb-hotkey*`, Version 14).
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import {
+    Btn, BtnVariant, ControlSize, IconBtn, Keycap, PresetField, PressFocus, SegmentTabs, SelText,
+    Switch, Tooltip,
+} from "controls.slint";
+import { AutoCaptureEntry, SettingsLabels, SettingsVm } from "settings_vm.slint";
+
+// `.lb-field__msg`: a 14px glyph and one 12px line. `tone` colours both:
+// muted, `danger` (error) or `warning` (t260928-7e9a).
+component FieldMessage inherits HorizontalLayout {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> error;
+    in property <bool> warning;
+
+    property <color> tone: root.error ? Tokens.danger : root.warning ? Tokens.warning : Tokens.ink-muted;
+
+    spacing: 6px;
+
+    VerticalLayout {
+        alignment: center;
+
+        AppIcon {
+            commands: root.icon;
+            stroke-color: root.tone;
+            size: 14px;
+        }
+    }
+
+    Text {
+        text: root.text;
+        wrap: word-wrap;
+        vertical-alignment: center;
+        font-size: 12px;
+        line-height-factor: Tokens.type-caption-line-height;
+        color: root.tone;
+    }
+}
+
+// `.lb-sgroup`: a heading, one or two sentences on what the group changes, and
+// the card the rows sit in. `error` is a refusal said under the card, in
+// danger (t260928-7e9a: the auto-record folder the guard turned down).
+export component SettingsGroup inherits VerticalLayout {
+    in property <string> title;
+    in property <string> description;
+    in property <string> error;
+
+    spacing: Tokens.space-3;
+
+    VerticalLayout {
+        spacing: 2px;
+
+        Text {
+            text: root.title;
+            font-size: 15px;
+            font-weight: 600;
+            color: Tokens.ink;
+        }
+
+        if root.description != "": Text {
+            text: root.description;
+            wrap: word-wrap;
+            font-size: 12px;
+            line-height-factor: Tokens.type-caption-line-height;
+            color: Tokens.ink-muted;
+        }
+    }
+
+    Rectangle {
+        border-radius: Tokens.radius-lg;
+        border-width: 1px;
+        border-color: Tokens.line;
+        background: Tokens.raised;
+
+        // 1px in, so the rows' separators end on the card's edge rather
+        // than on top of it.
+        VerticalLayout {
+            padding: 1px;
+
+            @children
+        }
+    }
+
+    if root.error != "": FieldMessage {
+        icon: Icons.error;
+        text: root.error;
+        error: true;
+    }
+}
+
+// `.lb-srow + .lb-srow`: the 1px `line` above every row but a card's first.
+component RowRule inherits Rectangle {
+    y: 0;
+    height: 1px;
+    background: Tokens.line;
+}
+
+// The text half of a row: 14px 500 name over a 12px muted line.
+component RowText inherits VerticalLayout {
+    in property <string> title;
+    in property <string> description;
+
+    alignment: center;
+    spacing: 2px;
+
+    Text {
+        text: root.title;
+        wrap: word-wrap;
+        font-size: 14px;
+        font-weight: 500;
+        color: Tokens.ink;
+    }
+
+    if root.description != "": Text {
+        text: root.description;
+        wrap: word-wrap;
+        font-size: 12px;
+        line-height-factor: Tokens.type-caption-line-height;
+        color: Tokens.ink-muted;
+    }
+}
+
+// `.lb-srow`: name and description on the left, the control handed in through
+// `@children` on the right. At least 60 high, 12 / 16 inside, 24 between the
+// text and the control. `disabled` dims both to 45% and leaves them in place.
+export component SettingsRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> disabled;
+    in property <bool> first;
+
+    min-height: 60px;
+
+    if !root.first: RowRule { }
+
+    HorizontalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        padding-left: Tokens.space-4;
+        padding-right: Tokens.space-4;
+        spacing: Tokens.space-6;
+
+        RowText {
+            horizontal-stretch: 1;
+            title: root.title;
+            description: root.description;
+            opacity: root.disabled ? 0.45 : 1.0;
+        }
+
+        // A `HorizontalLayout` would pin a 22px switch to the row's top;
+        // this centres whatever it is handed.
+        VerticalLayout {
+            alignment: center;
+            opacity: root.disabled ? 0.45 : 1.0;
+
+            @children
+        }
+    }
+}
+
+// `.lb-srow.is-stacked`: the control takes the full width under the text.
+export component StackedRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> first;
+
+    min-height: 60px;
+
+    if !root.first: RowRule { }
+
+    VerticalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        padding-left: Tokens.space-4;
+        padding-right: Tokens.space-4;
+        // `.lb-srow.is-stacked`: 6 between the text and the control.
+        spacing: 6px;
+
+        if root.title != "": RowText {
+            title: root.title;
+            description: root.description;
+        }
+
+        @children
+    }
+}
+
+// A row whose value is a PresetField, with the optional Switch that decides
+// whether the value is in force (保存領域's two limits). Its own component,
+// not a `SettingsRow` child, because below 720px the field moves under the
+// text (NarrowWindow) and `@children` cannot be placed in two spots.
+export component PresetSettingsRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> first;
+    // The field goes under the text.
+    in property <bool> narrow;
+    // Dims the name too (保持時間 while the ring buffer is off).
+    in property <bool> disabled;
+    // The row's own switch, at the right end.
+    in property <bool> has-switch;
+    in property <bool> checked;
+    in property <[string]> presets;
+    in property <int> selected: -1;
+    in property <string> value-text;
+    in property <string> placeholder;
+    in property <string> unit;
+    in property <bool> range-error;
+    in property <string> error-text;
+    callback toggled(bool);
+    callback preset-clicked(int);
+    callback value-edited(string);
+
+    property <bool> field-on: !root.disabled && (!root.has-switch || root.checked);
+
+    min-height: 60px;
+
+    if !root.first: RowRule { }
+
+    VerticalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        padding-left: Tokens.space-4;
+        padding-right: Tokens.space-4;
+        // 6 when the field drops under the text, as a stacked row.
+        spacing: 6px;
+        alignment: center;
+
+        HorizontalLayout {
+            spacing: Tokens.space-6;
+
+            RowText {
+                horizontal-stretch: 1;
+                title: root.title;
+                description: root.description;
+                opacity: root.disabled ? 0.45 : 1.0;
+            }
+
+            if !root.narrow: VerticalLayout {
+                alignment: center;
+                opacity: root.field-on ? 1.0 : 0.45;
+
+                PresetField {
+                    presets: root.presets;
+                    selected: root.selected;
+                    value-text: root.value-text;
+                    placeholder: root.placeholder;
+                    unit: root.unit;
+                    enabled: root.field-on;
+                    range-error: root.range-error;
+                    error-text: root.error-text;
+                    preset-clicked(index) => {
+                        root.preset-clicked(index);
+                    }
+                    value-edited(text) => {
+                        root.value-edited(text);
+                    }
+                }
+            }
+
+            if root.has-switch: VerticalLayout {
+                alignment: center;
+
+                Switch {
+                    label: root.title;
+                    checked: root.checked;
+                    toggled => {
+                        root.toggled(!root.checked);
+                    }
+                }
+            }
+        }
+
+        if root.narrow: HorizontalLayout {
+            alignment: end;
+            opacity: root.field-on ? 1.0 : 0.45;
+
+            PresetField {
+                presets: root.presets;
+                selected: root.selected;
+                value-text: root.value-text;
+                placeholder: root.placeholder;
+                unit: root.unit;
+                enabled: root.field-on;
+                range-error: root.range-error;
+                error-text: root.error-text;
+                preset-clicked(index) => {
+                    root.preset-clicked(index);
+                }
+                value-edited(text) => {
+                    root.value-edited(text);
+                }
+            }
+        }
+    }
+}
+
+// A path cut at its head so the last folder stays readable (the DS's
+// `direction: rtl`). A read-only `TextInput` has no `overflow: elide`, so the
+// run keeps its full width and slides left inside a clip (task2690).
+component TailText inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: 12px;
+    in property <bool> mono: true;
+    in property <color> ink: Tokens.ink;
+    // 500 for a title (DS `.lb-mono-title`, t260928-7e9a).
+    in property <int> font-weight: 400;
+
+    clip: true;
+    min-width: 0px;
+    height: run.preferred-height;
+
+    run := SelText {
+        width: max(self.preferred-width, parent.width);
+        x: min(0px, parent.width - self.width);
+        text: root.text;
+        font-family: root.mono ? Tokens.font-family-mono : Tokens.font-family;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        color: root.ink;
+    }
+}
+
+// The DS PathField: the folder in a 32px `sunken` box with a `line-strong`
+// edge, then 変更… and 開く, and 既定に戻す only once the folder has been
+// moved. `note` is why the row cannot change right now.
+export component PathField inherits VerticalLayout {
+    in property <string> path;
+    in property <bool> disabled;
+    in property <bool> modified;
+    in property <string> note;
+    callback browse();
+    callback open();
+    callback reset();
+
+    spacing: 6px;
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+
+        Rectangle {
+            horizontal-stretch: 1;
+            height: Tokens.size-control-md;
+            border-radius: Tokens.radius-sm;
+            border-width: 1px;
+            border-color: Tokens.line-strong;
+            background: Tokens.sunken;
+
+            // The whole path on hover (DS PathField: the head is cut, the
+            // title carries all of it; t260928-7e9a). A parent `TouchArea`
+            // sees the hover over its children too, so the text stays
+            // selectable under it.
+            path-hover := TouchArea {
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: Tokens.space-2;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        AppIcon {
+                            commands: Icons.folder;
+                            stroke-color: Tokens.ink-faint;
+                            size: 16px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+
+                        TailText {
+                            text: root.path;
+                            ink: root.disabled ? Tokens.ink-muted : Tokens.ink;
+                        }
+                    }
+                }
+            }
+
+            Tooltip {
+                x: 0;
+                y: -self.height - 6px;
+                armed: path-hover.has-hover;
+                label: root.path;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            Btn {
+                label: SettingsLabels.export-change;
+                size: ControlSize.sm;
+                disabled: root.disabled;
+                clicked => {
+                    root.browse();
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            Btn {
+                label: SettingsLabels.directory-open;
+                size: ControlSize.sm;
+                clicked => {
+                    root.open();
+                }
+            }
+        }
+
+        if root.modified: VerticalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: reset-btn.width;
+                height: reset-btn.height;
+
+                reset-btn := IconBtn {
+                    icon: Icons.reset;
+                    label: SettingsLabels.directory-reset;
+                    size: ControlSize.sm;
+                    disabled: root.disabled;
+                    clicked => {
+                        root.reset();
+                    }
+                }
+
+                Tooltip {
+                    x: parent.width - self.width;
+                    y: -self.height - 6px;
+                    armed: reset-btn.has-hover;
+                    label: SettingsLabels.directory-reset;
+                }
+            }
+        }
+    }
+
+    if root.note != "": FieldMessage {
+        icon: Icons.info;
+        text: root.note;
+    }
+}
+
+// The DS HotkeyField. Pressing the box arms it; the next chord is handed to
+// Rust (`captured`), which decides whether it registers. Waiting: an `accent`
+// edge inside a 3px `accent-soft` ring that breathes out to 5px on a 1.2s
+// beat. The beat reads `animation-tick()` only inside the `if` that exists
+// while armed, so a resting field asks for no frames (KNOWLEDGE: the
+// animation-tick rule); `reduce-motion` holds the ring at 3px. Refused: the
+// original chord stays on a `danger-soft` box with the reason under it.
+export component HotkeyField inherits VerticalLayout {
+    in property <bool> capturing;
+    in property <[string]> keys;
+    // Non-empty = the chord was refused, and this is why.
+    in property <string> alert;
+    callback clicked;
+    callback captured(string, bool, bool, bool, bool) -> bool;
+    callback blurred;
+    callback reset;
+
+    property <bool> refused: !root.capturing && root.alert != "";
+
+    spacing: 6px;
+
+    HorizontalLayout {
+        alignment: end;
+        spacing: Tokens.space-1;
+
+        fs := FocusScope {
+            width: max(148px, face.preferred-width);
+            height: Tokens.size-control-md;
+
+            changed has-focus => {
+                if (!self.has-focus) {
+                    root.blurred();
+                }
+            }
+
+            key-pressed(event) => {
+                if (root.captured(event.text,
+                    event.modifiers.control, event.modifiers.alt,
+                    event.modifiers.shift, event.modifiers.meta)) {
+                    return accept;
+                }
+                return reject;
+            }
+
+            if root.capturing: Rectangle {
+                property <float> beat: Tokens.reduce-motion
+                    ? 0
+                    : (1 - cos(animation-tick() / 1200ms * 360deg)) / 2;
+                property <length> spread: 3px + 2px * self.beat;
+                x: -self.spread;
+                y: -self.spread;
+                width: parent.width + 2 * self.spread;
+                height: parent.height + 2 * self.spread;
+                border-radius: Tokens.radius-sm + self.spread;
+                background: Tokens.accent-soft;
+            }
+
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                border-radius: Tokens.radius-sm;
+                border-width: 1px;
+                border-color: root.capturing
+                    ? Tokens.accent
+                    : root.refused
+                        ? Tokens.danger
+                        : touch.has-hover ? Tokens.line-control : Tokens.line-strong;
+                background: root.refused ? Tokens.danger-soft : Tokens.sunken;
+
+                face := HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: center;
+
+                    if root.capturing: Text {
+                        text: SettingsLabels.capture-armed;
+                        vertical-alignment: center;
+                        font-size: 13px;
+                        font-weight: 500;
+                        color: Tokens.ink-muted;
+                    }
+
+                    if !root.capturing: VerticalLayout {
+                        alignment: center;
+
+                        // md, 20px (DS HotkeyField draws `<Keycap>` at
+                        // its default size).
+                        Keycap {
+                            keys: root.keys;
+                            size: ControlSize.md;
+                        }
+                    }
+                }
+
+                touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        fs.focus();
+                        root.clicked();
+                    }
+                }
+            }
+        }
+
+        // 既定に戻す, in the two loud states only (task2380): a chord that is
+        // still the shipped default has nothing to go back to.
+        if root.capturing || root.refused: VerticalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: reset-btn.width;
+                height: reset-btn.height;
+
+                reset-btn := IconBtn {
+                    icon: Icons.reset;
+                    label: SettingsLabels.directory-reset;
+                    size: ControlSize.sm;
+                    clicked => {
+                        root.reset();
+                    }
+                }
+
+                Tooltip {
+                    x: parent.width - self.width;
+                    y: -self.height - 6px;
+                    armed: reset-btn.has-hover;
+                    label: SettingsLabels.directory-reset;
+                }
+            }
+        }
+    }
+
+    if root.capturing: HorizontalLayout {
+        alignment: end;
+        spacing: 6px;
+
+        VerticalLayout {
+            alignment: center;
+
+            Keycap {
+                keys: ["Esc"];
+                size: ControlSize.sm;
+            }
+        }
+
+        Text {
+            text: SettingsLabels.capture-abort;
+            vertical-alignment: center;
+            font-size: 12px;
+            color: Tokens.ink-muted;
+        }
+    }
+
+    if root.refused: HorizontalLayout {
+        alignment: end;
+
+        FieldMessage {
+            icon: Icons.warning;
+            text: root.alert;
+            error: true;
+        }
+    }
+}
+
+// One auto-record registration (決めたこと 3): bolt + the exe name in mono
+// over its folder, or folder + the rule's path over 「このフォルダの中の
+// アプリすべて」. At the right end, what to record (ウィンドウ / 画面) and ×.
+// Removal and the toggle report the string rather than the index: the model is
+// rebuilt from `settings.json` after every commit.
+export component AutoCaptureRow inherits Rectangle {
+    in property <AutoCaptureEntry> item;
+    in property <bool> first;
+
+    min-height: 60px;
+
+    if !root.first: RowRule { }
+
+    HorizontalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        padding-left: Tokens.space-4;
+        padding-right: Tokens.space-4;
+        spacing: Tokens.space-3;
+
+        VerticalLayout {
+            alignment: center;
+
+            AppIcon {
+                commands: root.item.kind == 1 ? Icons.folder : Icons.bolt;
+                stroke-color: Tokens.ink-muted;
+                size: 20px;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            alignment: center;
+            spacing: 2px;
+
+            TailText {
+                text: root.item.executable;
+                font-size: 13px;
+                font-weight: 500;
+            }
+
+            // task3730: a folder rule the guard turns down is in the file but
+            // never acted on, and the row says so in words.
+            if root.item.kind == 0 && root.item.parent-path != "": TailText {
+                text: root.item.parent-path;
+                ink: Tokens.ink-muted;
+            }
+
+            if root.item.kind == 1 && !root.item.ignored: Text {
+                text: SettingsLabels.auto-capture-folder-all;
+                wrap: word-wrap;
+                font-size: 12px;
+                line-height-factor: Tokens.type-caption-line-height;
+                color: Tokens.ink-muted;
+            }
+
+            // A rule that is not acted on is a warning (DS 知らせ方 / 色:
+            // colour, glyph and words together, t260928-7e9a). The words are
+            // the user's 2026-09-09 ruling.
+            if root.item.kind == 1 && root.item.ignored: FieldMessage {
+                icon: Icons.warning;
+                text: SettingsLabels.auto-capture-ignored;
+                warning: true;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            SegmentTabs {
+                size: ControlSize.sm;
+                segments: [SettingsLabels.auto-capture-window, SettingsLabels.auto-capture-screen];
+                selected: root.item.capture-monitor ? 1 : 0;
+                selected-changed(index) => {
+                    if ((index == 1) != root.item.capture-monitor) {
+                        if (root.item.kind == 1) {
+                            SettingsVm.auto-capture-folder-monitor-toggled(root.item.executable);
+                        } else {
+                            SettingsVm.auto-capture-monitor-toggled(root.item.executable);
+                        }
+                    }
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            xbtn := IconBtn {
+                icon: Icons.close;
+                label: SettingsLabels.auto-capture-remove-hint;
+                size: ControlSize.sm;
+                clicked => {
+                    if (root.item.kind == 1) {
+                        SettingsVm.auto-capture-folder-removed(root.item.executable);
+                    } else {
+                        SettingsVm.auto-capture-removed(root.item.executable);
+                    }
+                }
+            }
+        }
+    }
+
+    // Opening upward, so it draws over the rows declared before it (task2360).
+    Tooltip {
+        x: Math.max(0px, parent.width - self.width - Tokens.space-4);
+        y: -self.height + 6px;
+        armed: xbtn.has-hover;
+        label: SettingsLabels.auto-capture-remove-hint;
+    }
+}
+
+// `.lb-srow--add`: the ghost 「フォルダを追加…」 at the foot of the list.
+export component AddRow inherits Rectangle {
+    in property <string> label;
+    in property <bool> first;
+    callback clicked();
+
+    min-height: 48px;
+
+    if !root.first: RowRule { }
+
+    HorizontalLayout {
+        padding-top: 8px;
+        padding-bottom: 8px;
+        padding-left: 10px;
+        padding-right: 10px;
+        alignment: start;
+
+        VerticalLayout {
+            alignment: center;
+
+            Btn {
+                label: root.label;
+                icon: Icons.plus;
+                variant: BtnVariant.ghost;
+                clicked => {
+                    root.clicked();
+                }
+            }
+        }
+    }
+}
+
+// The settings index (`.lb-settings__link`): 34 high, 16px glyph and 10 to
+// the 13px word. The current group sits on `fill` in 600 with an
+// `accent-text` glyph; the glyph plays its motion once on hover (t260927-0e84).
+export component IndexLink inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> current;
+    callback clicked();
+
+    height: 34px;
+    border-radius: Tokens.radius-sm;
+    background: root.current ? Tokens.fill : touch.has-hover ? Tokens.fill-hover : transparent;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+
+        VerticalLayout {
+            alignment: center;
+
+            AppIcon {
+                commands: root.icon;
+                size: 16px;
+                active: touch.has-hover || keys.has-focus;
+                stroke-color: root.current
+                    ? Tokens.accent-text
+                    : touch.has-hover ? Tokens.ink : Tokens.ink-muted;
+            }
+        }
+
+        // Out of the layout's sizing: the weight follows the scroll
+        // position, and the page's width must not follow the weight.
+        Rectangle {
+            horizontal-stretch: 1;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: root.label;
+                vertical-alignment: center;
+                overflow: elide;
+                font-size: 13px;
+                font-weight: root.current ? 600 : 500;
+                color: root.current || touch.has-hover ? Tokens.ink : Tokens.ink-muted;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // A Tab stop; Enter / Space goes to the section (t260928-d9b4).
+    keys := PressFocus {
+        ring-radius: root.border-radius;
+        pressed => {
+            root.clicked();
+        }
+    }
+}

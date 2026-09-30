@@ -1,0 +1,685 @@
+// The session history screen (task125, round5 §6 by task172), in the DS
+// HistoryScreen's shape since t260927-9a17: a top row with the search and the
+// view switch on the right (no count since t260928-e029), the sessions under
+// date headings, and a footer that is the selection bar while something is
+// selected and the StorageMeter otherwise.
+//
+// Every decision about *which* rows exist, what they say, where they sit and
+// what a click selects comes from Rust (`ui_state::sessions`), where the tests
+// are.
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { EmptyState, ContextMenu, MenuEntry, AppScroll, Tooltip, SearchField, SegmentTabs, ControlSize, SelectionBar, StorageMeter } from "controls.slint";
+import { SessionLabels, SessionRow, SessionsVm } from "sessions_model.slint";
+import { SessionTile, TileEntry } from "sessions_tile.slint";
+export { SessionLabels, SessionRow, SessionsVm }
+
+export component SessionsPane inherits FocusScope {
+    in property <[SessionRow]> rows;
+    in property <bool> thumbnail-view;
+    in property <string> empty-text;
+    // The empty state's second caption line, used only by the "no sessions at
+    // all" nothing (task3800).
+    in property <string> empty-sub-text;
+    // *Which* nothing, and not the same question as `empty-text != ""`: only
+    // "no sessions at all" takes the top row and the footer down with it.
+    // Hiding the top row on `empty-text` would take the search field away the
+    // moment a query stopped matching -- with the query still applied and no
+    // way left to clear it.
+    in property <bool> no-sessions;
+    // Which row, if any, is being edited in place.
+    in property <int> editing-row: -1;
+    in property <bool> editing-note;
+    // The menu: its entries and whether it is up. *Where* it goes is this
+    // file's business (task1400): only here are the scroll offsets in scope.
+    in property <[MenuEntry]> menu-entries;
+    in property <bool> menu-open;
+    // A menu opened from a focused 「…」 takes the keys (t260928-d9b4).
+    // Closing takes that focus to the grave (slint hands it to nobody), so
+    // the list claims it back -- only then: a pointer's menu never held it.
+    property <bool> menu-keyboard;
+    property <bool> menu-up: root.menu-open;
+    changed menu-up => {
+        if (!self.menu-up && root.menu-keyboard) {
+            root.menu-keyboard = false;
+            keys.focus();
+        }
+    }
+
+    // Coordinates plus the geometry that produced them, not a row id: the
+    // hit-test lives in Rust (where it is tested), but the numbers it needs
+    // travel with the event rather than being mirrored there.
+    //   (x, y, cell-width, cell-height, columns, shift, ctrl)
+    callback pressed(length, length, length, length, int, bool, bool);
+    callback marquee(length, length, length, length, length, length, int);
+    callback marquee-ended();
+    // Same hit-test, different verb: double-click loads, right-click (or the
+    // row's 「…」) opens the menu. (x, y, cell-width, cell-height, columns)
+    callback row-activated(length, length, length, length, int);
+    callback row-menu-requested(length, length, length, length, int);
+    callback menu-selected(int);
+    callback menu-dismissed();
+    callback search-changed(string);
+    // F2 on the list: opens the selected row's comment.
+    callback note-edit-selected();
+    // Ctrl+A on the list: every row the list is showing.
+    callback select-all();
+    callback note-edit-requested(int);
+    callback note-committed(int, string);
+    callback edit-cancelled();
+    /// The open editor's current text, on every keystroke (task1340).
+    callback edit-draft-changed(string);
+    /// task2030: the LIVE row's stop button, by row index.
+    callback stop-requested(int);
+    callback set-view(bool);
+    // (first row index, row count) on screen, for the thumbnail queue
+    // (task188). It must not trigger a re-render.
+    callback visible-range-changed(int, int);
+
+    // The content face in app.slint is this pane's ground (t260916-ebdb), so
+    // the pane paints none of its own -- which lets it be a `FocusScope`
+    // (t260928-d9b4): an ancestor of every control on it, where the list's
+    // keys land whoever holds the focus. `keys` below is only a sibling of
+    // the rows, so a key a focused row control rejected never reached it.
+    // Never a Tab stop, never focused by a click.
+    focus-on-click: false;
+    focus-on-tab-navigation: false;
+
+    // The list's keys (task172), whoever holds the focus on the pane: `keys`
+    // rejects them all and they bubble here with everything a focused control
+    // did not take for itself (t260928-d9b4).
+    key-pressed(event) => {
+        if (event.text == Key.F2) {
+            root.note-edit-selected();
+            return EventResult.accept;
+        }
+        // Enter opens the one selected row (t260928-23aa), as the
+        // menu's first entry advertises.
+        if (event.text == Key.Return) {
+            SessionsVm.open-selected();
+            return EventResult.accept;
+        }
+        // Delete is the selection bar's discard held down (DS
+        // HistoryScreen): the fill runs while the key is down and
+        // confirms at 1 s; let go early and the hint shows. `repeat`
+        // never arrives on Windows, so the press and the release are
+        // the pair (KNOWLEDGE「`KeyEvent.repeat`」).
+        if (event.text == Key.Delete) {
+            if (SessionsVm.selected > 0) {
+                root.delete-held = true;
+            }
+            return EventResult.accept;
+        }
+        if (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+            root.select-all();
+            return EventResult.accept;
+        }
+        // Escape closes the menu first; with no menu it clears the
+        // selection (DS HistoryScreen).
+        if (event.text == Key.Escape) {
+            if (root.menu-open) {
+                root.menu-dismissed();
+                return EventResult.accept;
+            }
+            if (SessionsVm.selected > 0) {
+                SessionsVm.clear-selection();
+                return EventResult.accept;
+            }
+            // Nothing left to close and a control holds the focus: it
+            // comes back to the list (t260928-d9b4).
+            if (!keys.has-focus) {
+                keys.focus();
+                return EventResult.accept;
+            }
+        }
+        return EventResult.reject;
+    }
+    key-released(event) => {
+        if (event.text == Key.Delete) {
+            root.delete-held = false;
+            return EventResult.accept;
+        }
+        return EventResult.reject;
+    }
+
+    // ---------- the grid's geometry ----------
+    // The same numbers `ui_state::sessions::GridMetrics` carries for the hit
+    // test: 24 each side for the list (DS `.lb-page__scroll`), 4 more for the
+    // tile grid (`.lb-sessiongrid`), rows 2 apart, tiles 8 / 12, and a date
+    // heading 16 + 16 + 4 tall counting the row gap before it (t260928-23aa):
+    // the grid starts one gap down, so every heading, the first included,
+    // sits 16 under the row above and 4 over its own first row in both views.
+    property <length> pad-x: root.thumbnail-view ? 28px : 24px;
+    property <length> gap-x: 12px;
+    property <length> gap-y: root.thumbnail-view ? 8px : 2px;
+    property <length> pad-top: root.gap-y;
+    property <length> heading-pitch: 36px - root.gap-y;
+    property <length> pad-bottom: 24px;
+    property <length> inner-width: root.width - 2 * root.pad-x;
+    // Tiles: the DS's `minmax(224px, 1fr)` auto columns.
+    property <int> columns: root.thumbnail-view
+        ? Math.max(1, Math.floor((root.inner-width + root.gap-x) / (224px + root.gap-x)))
+        : 1;
+    property <length> cell-width: (root.inner-width - (root.columns - 1) * root.gap-x) / root.columns;
+    // The tile's picture: 16:9 inside its 6px padding.
+    property <length> media-height: Math.max(0px, (root.cell-width - 12px) * 9 / 16);
+    // A tile is 6 + picture + 10 + two lines (20 + 18, 2 apart) + 10
+    // (t260928-e029). The hit test gets this same value with every press.
+    property <length> cell-height: root.thumbnail-view ? root.media-height + 66px : 72px;
+    property <length> row-pitch: root.cell-height + root.gap-y;
+    property <int> last: root.rows.length - 1;
+    property <int> line-count: root.rows.length == 0 ? 0 : root.rows[root.last].line + 1;
+    property <int> heading-count: root.rows.length == 0 ? 0 : root.rows[root.last].heading-offset;
+    property <length> content-height: root.pad-top + root.line-count * root.row-pitch
+        - (root.line-count > 0 ? root.gap-y : 0px)
+        + root.heading-count * root.heading-pitch + root.pad-bottom;
+
+    // The columns Rust places the date groups with. `init` too, because a
+    // pane built at its final width never sees a change.
+    changed columns => {
+        SessionsVm.columns-changed(self.columns);
+    }
+    init => {
+        SessionsVm.columns-changed(self.columns);
+    }
+
+    // DS NarrowWindow: below 700 the created column goes. The app column is
+    // gone at every width (the user, 2026-09-28): its mark sits in front of
+    // the name.
+    property <bool> show-start: root.width >= 700px;
+
+    // Which half of the view switch the pointer is on, republished from the
+    // top row (an `if` block's ids are out of reach of the tooltip layer).
+    property <int> view-hovered: -1;
+    // The Delete key's hold, handed to the selection bar (DS: Delete is the
+    // discard button held down).
+    property <bool> delete-held;
+    // True for the first moments after the pane is entered (t260925-f297), and
+    // again after switching to the tiles (t260928-23aa, the user's ruling on
+    // DS 「リスト -> サムネイルの切り替えでも浮かぶ」). Not on the way back to the
+    // list: the DS names only the tiles.
+    property <bool> entering: true;
+    changed thumbnail-view => {
+        if (root.thumbnail-view) {
+            root.entering = true;
+        }
+    }
+    // ponytail: wall clock from mount; rows that arrive after the window come in
+    // flat. Gate it on the first non-empty `rows` if a slow folder makes that show.
+    Timer {
+        interval: TileEntry.cap + Tokens.duration-slow;
+        running: root.entering;
+        triggered => {
+            root.entering = false;
+        }
+    }
+    // Which row the pointer is on, for the surface's cursor.
+    property <int> hover-index: -1;
+
+    // Where the right-click menu goes, in the pane's own coordinates
+    // (task1400). Written where `scroll` is in scope.
+    property <length> menu-px;
+    property <length> menu-py;
+
+    // Clicking the pane's own chrome closes the open menu (task1230).
+    // Declared first, so everything else keeps its own hit test.
+    if root.menu-open: TouchArea {
+        width: 100%;
+        height: 100%;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.menu-dismissed();
+            }
+        }
+    }
+
+    VerticalLayout {
+        // ---------- top row (DS `.lb-page__head`) ----------
+        // 64 tall at least, 16 / 32 / 12 inside. No screen title: the rail
+        // already says where you are (DS HistoryScreen).
+        if !root.no-sessions: HorizontalLayout {
+            min-height: 64px;
+            padding-top: 16px;
+            padding-left: 32px;
+            padding-right: 32px;
+            padding-bottom: 12px;
+            spacing: Tokens.space-4;
+
+            // Search at the left edge, the view switch at the right
+            // (t260929-7037, user ruling 2026-09-29).
+            SearchField {
+                horizontal-stretch: 0;
+                width: 260px;
+                y: (parent.height - self.height) / 2;
+                placeholder: SessionLabels.search-placeholder;
+                search-changed(text) => {
+                    root.search-changed(text);
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            HorizontalLayout {
+                spacing: Tokens.space-2;
+
+                SegmentTabs {
+                    y: (parent.height - self.height) / 2;
+                    size: ControlSize.md;
+                    segments: ["", ""];
+                    icons: [Icons.view-list, Icons.view-grid];
+                    // Icon-only: the tooltip's words are their accessible names (t260928-13e9).
+                    labels: [SessionLabels.view-list, SessionLabels.view-thumbnail];
+                    selected: root.thumbnail-view ? 1 : 0;
+                    selected-changed(index) => {
+                        root.set-view(index == 1);
+                    }
+                    changed hovered => {
+                        root.view-hovered = self.hovered;
+                    }
+                }
+            }
+        }
+
+        if root.empty-text != "": EmptyState {
+            vertical-stretch: 1;
+            icon: SessionsVm.list-failed ? Icons.error : Icons.clock;
+            label: root.empty-text;
+            sub: root.empty-sub-text;
+        }
+
+        // ---------- column headings (DS SessionHeader) ----------
+        // The row's own columns, 32 tall, 11px 500 `ink-faint`.
+        if root.empty-text == "" && !root.thumbnail-view: HorizontalLayout {
+            height: 32px;
+            padding-left: root.pad-x + 12px;
+            padding-right: root.pad-x + 12px;
+            spacing: 16px;
+
+            Rectangle { width: 18px; }
+            Rectangle { width: 96px; }
+
+            Text {
+                horizontal-stretch: 1;
+                text: SessionLabels.column-window;
+                vertical-alignment: center;
+                font-size: 11px;
+                font-weight: 500;
+                letter-spacing: 0.44px;
+                color: Tokens.ink-faint;
+            }
+
+            // Created and length right-aligned, as their figures are.
+            if root.show-start: Text {
+                width: 88px;
+                text: SessionLabels.column-start;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                font-size: 11px;
+                font-weight: 500;
+                letter-spacing: 0.44px;
+                color: Tokens.ink-faint;
+            }
+
+            Text {
+                width: 64px;
+                text: SessionLabels.column-length;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                font-size: 11px;
+                font-weight: 500;
+                letter-spacing: 0.44px;
+                color: Tokens.ink-faint;
+            }
+
+            Text {
+                width: 72px;
+                text: SessionLabels.column-size;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                font-size: 11px;
+                font-weight: 500;
+                letter-spacing: 0.44px;
+                color: Tokens.ink-faint;
+            }
+
+            Rectangle { width: 28px; }
+        }
+
+        // The list's keys (task172): zero-sized and a sibling, so the rows
+        // below keep their absolute geometry. It takes focus on every press on
+        // the list, and loses it to the search field or an open editor.
+        keys := FocusScope {
+            height: 0px;
+            // Not a Tab stop (t260928-d9b4): it draws no ring; Esc brings the
+            // focus back here from any control.
+            focus-on-tab-navigation: false;
+            // Leaving the list with the key down must not leave a hold running.
+            changed has-focus => {
+                if (!self.has-focus) {
+                    root.delete-held = false;
+                }
+            }
+        }
+
+        if root.empty-text == "": scroll := AppScroll {
+            vertical-stretch: 1;
+            // Flush against the client's right edge (task4320).
+            right-inset: Tokens.resize-band-inset;
+            viewport-width: scroll.visible-width;
+            // The rows' own height, or the whole visible area when there are
+            // too few rows to fill it (task680): the space below the last row
+            // still selects nothing and starts a marquee.
+            viewport-height: Math.max(root.content-height, scroll.visible-height);
+
+            // Declared before the grid so it sits *under* it: the row's own
+            // small controls keep their hit test, and everything else falls
+            // through to here, which is what selects and what starts a marquee
+            // (task079).
+            surface := TouchArea {
+                x: 0;
+                y: 0;
+                width: scroll.viewport-width;
+                height: scroll.viewport-height;
+                // The hand over a row, the arrow over the gaps (t260916-cf5f).
+                mouse-cursor: root.hover-index >= 0 ? MouseCursor.pointer : MouseCursor.default;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down
+                        && event.button == PointerEventButton.left) {
+                        if (root.menu-open) {
+                            root.menu-dismissed();
+                        }
+                        keys.focus();
+                        root.pressed(
+                            surface.mouse-x,
+                            surface.mouse-y,
+                            root.cell-width,
+                            root.cell-height,
+                            root.columns,
+                            event.modifiers.shift,
+                            event.modifiers.control,
+                        );
+                    }
+                    // Re-targets rather than closes: Rust re-runs the hit test
+                    // and either opens over the new row or, off any row, sets
+                    // no menu at all (task1120).
+                    if (event.kind == PointerEventKind.down
+                        && event.button == PointerEventButton.right) {
+                        keys.focus();
+                        root.menu-px = scroll.x + scroll.viewport-x + surface.mouse-x;
+                        root.menu-py = scroll.y + scroll.viewport-y + surface.mouse-y;
+                        root.row-menu-requested(
+                            surface.mouse-x,
+                            surface.mouse-y,
+                            root.cell-width,
+                            root.cell-height,
+                            root.columns,
+                        );
+                    }
+                    if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                        root.marquee-ended();
+                    }
+                }
+                moved => {
+                    if (surface.pressed) {
+                        root.marquee(
+                            surface.pressed-x,
+                            surface.pressed-y,
+                            surface.mouse-x,
+                            surface.mouse-y,
+                            root.cell-width,
+                            root.cell-height,
+                            root.columns,
+                        );
+                    }
+                }
+                double-clicked => {
+                    root.row-activated(
+                        surface.mouse-x,
+                        surface.mouse-y,
+                        root.cell-width,
+                        root.cell-height,
+                        root.columns,
+                    );
+                }
+            }
+
+            // A plain container at the viewport origin: the rows place
+            // themselves from Rust's placement, and only the ones near the
+            // window exist.
+            grid := Rectangle {
+                x: 0;
+                y: 0;
+                width: scroll.visible-width;
+                height: root.content-height;
+                background: transparent;
+
+                // The window (task181), in grid lines. Headings push rows
+                // *down*, so the top line takes the whole heading budget off
+                // first -- a lower bound -- and the bottom one is an upper
+                // bound because every line is at least a pitch below the one
+                // before. `line-first` (Rust) turns the two into row indices.
+                property <int> first-line: Math.max(
+                    0,
+                    Math.floor((-scroll.viewport-y - root.pad-top - root.heading-count * root.heading-pitch) / root.row-pitch),
+                );
+                property <int> end-line: Math.ceil((-scroll.viewport-y + scroll.visible-height) / root.row-pitch) + 2;
+                property <int> first: self.first-line < SessionsVm.line-first.length
+                    ? SessionsVm.line-first[self.first-line]
+                    : root.rows.length;
+                property <int> end: self.end-line < SessionsVm.line-first.length
+                    ? SessionsVm.line-first[self.end-line]
+                    : root.rows.length;
+                property <int> count: Math.max(0, self.end - self.first);
+
+                changed first => {
+                    root.visible-range-changed(self.first, self.count);
+                }
+                changed count => {
+                    root.visible-range-changed(self.first, self.count);
+                }
+                // A pane built with the rows already there never sees a
+                // change, and Rust grows the cell pool from this report.
+                init => {
+                    root.visible-range-changed(self.first, self.count);
+                }
+
+                // The cells are a pool Rust only ever grows (`SessionsVm.slots`,
+                // t260928-e029), never a `for i in count`: slint builds an int
+                // repeater a fresh model on every re-evaluation and throws every
+                // cell away with it, so each scroll step and each listing re-ran
+                // every tile's entrance. Row `r` lives in slot `r mod n`, so a
+                // row that stays on screen keeps its cell -- and its hover --
+                // as the list scrolls.
+                for slot[i] in SessionsVm.slots: cell := SessionTile {
+                    property <int> n: SessionsVm.slots.length;
+                    property <int> index: grid.first + Math.mod(i - Math.mod(grid.first, cell.n) + cell.n, cell.n);
+                    property <SessionRow> placed: root.rows[Math.max(0, Math.min(cell.index, root.last))];
+                    property <length> top: root.pad-top + cell.placed.line * root.row-pitch
+                        + cell.placed.heading-offset * root.heading-pitch;
+                    // The pointer is inside this row's rectangle, or on one of
+                    // its own controls -- whose TouchArea takes the hover away
+                    // from the surface under it.
+                    property <bool> over: (surface.has-hover
+                        && surface.mouse-x >= self.x && surface.mouse-x < self.x + self.width
+                        && surface.mouse-y >= cell.top && surface.mouse-y < cell.top + self.height)
+                        || (!cell.blank && self.control-hover);
+                    x: root.pad-x + cell.placed.column * (root.cell-width + root.gap-x);
+                    y: cell.top;
+                    width: root.cell-width;
+                    blank: cell.index >= grid.end || cell.index > root.last;
+                    entry: cell.placed;
+                    entering: root.entering;
+                    enter-order: cell.index - grid.first;
+                    thumbnail-view: root.thumbnail-view;
+                    media-height: root.media-height;
+                    cell-height: root.cell-height;
+                    show-start: root.show-start;
+                    hovered: cell.over;
+                    changed over => {
+                        if (self.over) {
+                            root.hover-index = cell.index;
+                        } else if (root.hover-index == cell.index) {
+                            root.hover-index = -1;
+                        }
+                    }
+                    editing-note: root.editing-row == cell.index && root.editing-note;
+                    note-edit-requested => { root.note-edit-requested(cell.index); }
+                    note-committed(value) => { root.note-committed(cell.index, value); }
+                    edit-cancelled => { root.edit-cancelled(); }
+                    edit-draft-changed(value) => { root.edit-draft-changed(value); }
+                    stop-requested => { root.stop-requested(cell.index); }
+                    // A pointer press claims the list's keys; a key press
+                    // leaves the focus on the box it came from (t260928-d9b4).
+                    check-toggled(by-key) => {
+                        if (!by-key) {
+                            keys.focus();
+                        }
+                        SessionsVm.check-toggled(cell.index);
+                    }
+                    // The 「…」: the same menu a right-click opens, from the
+                    // button's own corner.
+                    more-requested(mx, my, by-key) => {
+                        keys.focus();
+                        root.menu-keyboard = by-key;
+                        root.menu-px = scroll.x + scroll.viewport-x + self.x + mx;
+                        root.menu-py = scroll.y + scroll.viewport-y + cell.top + my;
+                        root.row-menu-requested(
+                            self.x + self.width / 2,
+                            cell.top + self.height / 2,
+                            root.cell-width,
+                            root.cell-height,
+                            root.columns,
+                        );
+                    }
+
+                    // The group's date heading, in the gap this row's
+                    // `heading-offset` opened above it (DS `.lb-sessions__group`:
+                    // 16 / 12 / 4 inside, 11px 600, 0.06em).
+                    if !cell.blank && cell.placed.heading != "": Text {
+                        x: 12px - (root.thumbnail-view ? 4px : 0px);
+                        y: -20px;
+                        height: 16px;
+                        text: cell.placed.heading;
+                        vertical-alignment: center;
+                        font-size: 11px;
+                        font-weight: 600;
+                        letter-spacing: 0.66px;
+                        color: Tokens.ink-muted;
+                    }
+                }
+            }
+
+            // ---------- marquee band (round7 section 2-12) ----------
+            if surface.pressed: Rectangle {
+                x: Math.min(surface.pressed-x, surface.mouse-x);
+                y: Math.min(surface.pressed-y, surface.mouse-y);
+                width: Math.abs(surface.mouse-x - surface.pressed-x);
+                height: Math.abs(surface.mouse-y - surface.pressed-y);
+                background: Tokens.accent.with-alpha(0.08);
+                border-width: 1px;
+                border-color: Tokens.accent.with-alpha(0.55);
+            }
+        }
+
+        // ---------- footer (DS `.lb-page__foot`) ----------
+        // 60 tall at least, 10 / 32 inside, a 1px `line` on top, `surface`.
+        // There with no sessions too (t260928-23aa): the meter's empty track
+        // still says how much room there is.
+        Rectangle {
+            min-height: 60px;
+            background: Tokens.surface;
+
+            // t260928-c743: where the toast has to stay above while the
+            // selection bar (whose hold-to-discard is at the right end) is up.
+            property <length> abs-top: self.absolute-position.y;
+            init => {
+                SessionsVm.foot-top = self.abs-top;
+            }
+            changed abs-top => {
+                SessionsVm.foot-top = self.abs-top;
+            }
+
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Tokens.line;
+            }
+
+            HorizontalLayout {
+                padding-top: 10px;
+                padding-bottom: 10px;
+                padding-left: 32px;
+                padding-right: 32px;
+
+                if SessionsVm.selected > 0: SelectionBar {
+                    count: SessionsVm.selection-count;
+                    text: SessionsVm.selection-text;
+                    clear-label: SessionLabels.clear-selection;
+                    protect-label: SessionsVm.protect-label;
+                    discard-label: SessionsVm.discard-label;
+                    hold-hint: SessionLabels.hold-to-discard;
+                    warning-text: SessionsVm.protected-text;
+                    refused-text: SessionsVm.has-live ? SessionLabels.live-cannot-discard : "";
+                    key-held: root.delete-held;
+                    clear => {
+                        SessionsVm.clear-selection();
+                    }
+                    protect => {
+                        SessionsVm.protect-selection();
+                    }
+                    discard => {
+                        root.delete-held = false;
+                        SessionsVm.discard-selection();
+                    }
+                }
+
+                if SessionsVm.selected == 0 && SessionsVm.storage-limit > 0: HorizontalLayout {
+                    alignment: start;
+                    StorageMeter {
+                        y: (parent.height - self.height) / 2;
+                        compact: true;
+                        used: SessionsVm.storage-used;
+                        protected-size: SessionsVm.storage-protected;
+                        limit: SessionsVm.storage-limit;
+                        label: SessionLabels.storage-label;
+                        protected-label: SessionLabels.storage-protected;
+                        note: SessionsVm.storage-note;
+                    }
+                }
+
+                if SessionsVm.selected == 0 && SessionsVm.storage-limit <= 0: Text {
+                    text: SessionsVm.unlimited-text;
+                    vertical-alignment: center;
+                    font-family: Tokens.font-family-mono;
+                    font-size: 12px;
+                    color: Tokens.ink-muted;
+                }
+            }
+        }
+    }
+
+    // ---------- right-click menu (round5 §6-D) ----------
+    // 破棄 is a hold entry (DS Menu): no confirm dialog follows it.
+    if root.menu-open: ContextMenu {
+        x: Math.clamp(root.menu-px, 4px, root.width - self.width - 4px);
+        y: Math.clamp(root.menu-py, 4px, root.height - self.height - 4px);
+        entries: root.menu-entries;
+        hold-danger: true;
+        keyboard: root.menu-keyboard;
+        chosen(index) => {
+            root.menu-selected(index);
+        }
+    }
+
+    // ---------- tooltip layer (task290) ----------
+    // The view switch's two icons: right-aligned under the top row.
+    Tooltip {
+        x: Math.max(12px, root.width - 32px - self.width);
+        y: 16px + Tokens.size-control-md + 10px;
+        armed: !root.no-sessions && root.view-hovered >= 0;
+        label: root.view-hovered == 0 ? SessionLabels.view-list : SessionLabels.view-thumbnail;
+    }
+}

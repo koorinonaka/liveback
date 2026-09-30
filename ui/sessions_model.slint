@@ -1,0 +1,135 @@
+// The session screen's label global and row model, split from sessions.slint
+// so the tile component can reference them without a circular import.
+
+// The screen's fixed labels. A global rather than ~20 properties forwarded
+// through `AppWindow`: slint exposes globals to Rust directly, so the strings
+// still have exactly one home (`ui_state::sessions`) and the window does not
+// have to carry a pass-through for each one.
+export global SessionLabels {
+    in-out property <string> recording;
+    in-out property <string> thumbnail-placeholder;
+    in-out property <string> note-placeholder;
+    // task1520 follow-up: the sub-line of a row nothing could read.
+    in-out property <string> unreadable-row;
+    in-out property <string> search-placeholder;
+    in-out property <string> view-list;
+    in-out property <string> view-thumbnail;
+    in-out property <string> open-directory;
+    // Unread since t260927-9a17 took the confirm dialog away; still pushed by
+    // the bin's label setup.
+    in-out property <string> confirm-ok;
+    in-out property <string> confirm-cancel;
+    // t260927-9a17, pushed by `history/render.rs`.
+    in-out property <string> column-window;
+    in-out property <string> column-start;
+    in-out property <string> column-length;
+    in-out property <string> column-size;
+    in-out property <string> whole-screen;
+    in-out property <string> stop-recording;
+    in-out property <string> clear-selection;
+    // The 「…」's accessible name (t260928-13e9).
+    in-out property <string> more-actions;
+    in-out property <string> hold-to-discard;
+    in-out property <string> live-cannot-discard;
+    in-out property <string> storage-label;
+    in-out property <string> storage-protected;
+}
+
+// The page's own tallies and its footer (t260927-9a17): the selection bar
+// and the StorageMeter. A global for the same reason as the labels -- Rust
+// writes them and wires the callbacks directly.
+export global SessionsVm {
+    // The selection bar: shown while `selected` is above 0.
+    in-out property <int> selected;
+    // t260928-c743: the footer's top edge in window coordinates, pushed from
+    // `sessions.slint` (a global cannot bind to geometry). The toast in
+    // `app.slint` sits above it while the selection bar is up.
+    in-out property <length> foot-top;
+    // 「N 件」 and the rest of the bar's words (t260928-13e9).
+    in-out property <string> selection-count;
+    in-out property <string> selection-text;
+    in-out property <string> protect-label;
+    in-out property <string> discard-label;
+    // 「保護中 N 件を含みます」, or "".
+    in-out property <string> protected-text;
+    // A recording is in the pile: the discard is refused and says why.
+    in-out property <bool> has-live;
+    // The StorageMeter, in GB. `limit` 0 is no limit, which draws
+    // `unlimited-text` alone.
+    in-out property <float> storage-used;
+    in-out property <float> storage-protected;
+    in-out property <float> storage-limit;
+    // The warning line beside the meter, empty when there is nothing to say:
+    // protected sessions alone over the limit (t260928-e309 F10).
+    in-out property <string> storage-note;
+    in-out property <string> unlimited-text;
+
+    callback clear-selection();
+    callback protect-selection();
+    callback discard-selection();
+    // Enter on the list (t260928-23aa): opens the one selected row, as the
+    // menu's first entry does.
+    callback open-selected();
+    // The listing itself would not read (t260928-23aa): the EmptyState takes
+    // the error glyph.
+    in-out property <bool> list-failed;
+    // The first row index on each grid line (`ui_state::sessions::place`):
+    // what turns the pane's window, which it can only reckon in lines, into
+    // row indices.
+    in-out property <[int]> line-first;
+    // The grid's cell pool (t260928-e029): one entry per cell, set once and
+    // only ever grown by Rust as the visible range asks for more. Its values
+    // are unused; what matters is that it stays the same model, so the cells
+    // -- and their entrance -- are never rebuilt.
+    in-out property <[int]> slots;
+
+    // The thumbnail grid's column count, whenever the pane's width changes it:
+    // Rust places the date groups, and a group starts a fresh line.
+    callback columns-changed(int);
+    // A row's checkbox: the same as a Ctrl-press on it.
+    callback check-toggled(int);
+}
+
+export struct SessionRow {
+    id: string,
+    // The recorded window's name, or the start time when there is none.
+    title: string,
+    // The one free line the user wrote about this recording: the comment
+    // (round5 §6-A; the UI word since t260927-9a17). Empty means "never
+    // written", which the row draws as its hover placeholder.
+    note: string,
+    // The list's right-hand columns (task243): created, the length and the
+    // size. The tile reuses the first two.
+    meta-date: string,
+    meta-duration: string,
+    meta-size: string,
+    // The session being written right now: REC on the picture, 録画中 in the
+    // length column, and the stop button.
+    recording: bool,
+    selected: bool,
+    selectable: bool,
+    // Excluded from the retention sweep (round5 §6-C).
+    protected: bool,
+    // task1520 follow-up: nothing could read this session. The row is here so
+    // the rows below it do not move; it says why and answers nothing.
+    unreadable: bool,
+    load-disabled: bool,
+    thumbnail: image,
+    has-thumbnail: bool,
+    // The app's mark in front of the name (t260927-9a17, t260928-e029): the
+    // executable's own icon when one was read, the DS monogram (letter + one
+    // of eight hues) when not, and the display glyph for a monitor recording.
+    app-icon: image,
+    has-app-icon: bool,
+    app-letter: string,
+    app-hue: int,
+    whole-screen: bool,
+    marker-count: int,
+    // Where the row sits under its date heading (`ui_state::sessions::place`):
+    // y is `line * row-pitch + heading-offset * heading-pitch`.
+    column: int,
+    line: int,
+    heading-offset: int,
+    // The group's heading, on its first row only.
+    heading: string,
+}

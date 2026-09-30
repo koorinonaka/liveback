@@ -1,0 +1,640 @@
+// One session as a list row or a thumbnail tile, in the DS SessionRow /
+// SessionTile shapes (t260927-9a17). Split from sessions.slint, which keeps
+// the pane (top row, grid, footer).
+//
+// A row carries no action cluster (round5 §6-A): loading is the double-click
+// or Enter, the rest is the 「…」 menu and the selection bar. What it does
+// carry: the checkbox, the LIVE row's stop, the comment line (itself the way
+// in to its editor), and the 「…」.
+
+import { Dark, Motion, Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { IconBtn, IconBtnVariant, InlineEdit, Checkbox, AppMonogram, Tooltip } from "controls.slint";
+import { SessionLabels, SessionRow } from "sessions_model.slint";
+
+// The stagger of the tiles' entrance (t260925-f297), shared by this tile and
+// `ClipTile`: 30ms per tile in reading order, capped at 240ms so the ninth tile
+// on comes in with the eighth and a long list does not keep trickling in.
+// Claude's pick, not a motion-reference value; kept out of `Tokens` on purpose.
+export global TileEntry {
+    out property <duration> step: 30ms;
+    out property <duration> cap: 240ms;
+    // How long a pane counts as "just entered": tiles built in this window
+    // come in, tiles built after it (scroll, search, a new recording) do not.
+    out property <duration> window: self.cap + Tokens.duration-base;
+    public pure function delay(order: int) -> duration {
+        order * self.step > self.cap ? self.cap : order * self.step
+    }
+}
+
+// The entrance (t260925-f297; DS SessionTile, t260928-23aa): the content
+// comes up 8px and in, staggered, `duration-slow` on `easing-enter`, while the
+// pane says so. The block this wraps sits behind an `if` on the view, so
+// switching views remounts it and `init` runs again, while the cell itself
+// persists (t260928-e029). `duration-slow` is 0 under reduce-motion, but slint
+// still waits out a `delay` before a 0ms change (report 01 F5), so the
+// stagger goes with it.
+component TileRise inherits Rectangle {
+    in property <bool> entering;
+    in property <int> order;
+    property <length> rise: 8px;
+    y: root.rise;
+    opacity: 0;
+    init => {
+        self.opacity = 1;
+        self.rise = 0;
+    }
+    animate opacity, rise {
+        duration: root.entering ? Tokens.duration-slow : 0ms;
+        delay: root.entering && !Tokens.reduce-motion ? TileEntry.delay(root.order) : 0ms;
+        easing: Motion.easing-enter;
+    }
+}
+
+// The picture's corner labels (DS `.lb-thumb__dur` / `.lb-thumb__live`), on
+// the `stage-veil`: the length bottom-right, REC top-left while recording.
+component ThumbFace inherits Rectangle {
+    in property <SessionRow> entry;
+    in property <length> radius;
+    // lg on a tile, sm on a list row.
+    in property <bool> large;
+
+    border-radius: root.radius;
+    clip: true;
+    background: Tokens.stage;
+
+    if root.entry.has-thumbnail: Image {
+        width: 100%;
+        height: 100%;
+        image-fit: cover;
+        source: root.entry.thumbnail;
+    }
+
+    if !root.entry.has-thumbnail: AppIcon {
+        commands: Icons.gap;
+        stroke-color: Dark.on-stage-muted;
+        size: root.large ? 20px : 16px;
+    }
+
+    // The DS's inset 1px white edge at 8%.
+    Rectangle {
+        border-radius: root.radius;
+        border-width: 1px;
+        border-color: #ffffff14;
+    }
+
+    if !root.entry.recording && root.entry.meta-duration != "—": Rectangle {
+        property <length> inset: root.large ? 6px : 4px;
+        x: parent.width - self.width - self.inset;
+        y: parent.height - self.height - self.inset;
+        width: dur.preferred-width + (root.large ? 10px : 8px);
+        height: root.large ? 18px : 16px;
+        border-radius: 3px;
+        background: Dark.stage-veil;
+
+        dur := Text {
+            text: root.entry.meta-duration;
+            font-family: Tokens.font-family-mono;
+            font-size: Tokens.type-overline-size;
+            font-weight: Tokens.type-label-weight;
+            color: Dark.on-stage;
+        }
+    }
+
+    if root.entry.recording: Rectangle {
+        x: 4px;
+        y: 4px;
+        width: rec.preferred-width + 9px;
+        height: 16px;
+        border-radius: 3px;
+        background: Dark.stage-veil;
+
+        rec := HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 5px;
+            spacing: 4px;
+            alignment: center;
+
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: Tokens.live;
+            }
+
+            Text {
+                text: "REC";
+                vertical-alignment: center;
+                font-family: Tokens.font-family-mono;
+                font-size: Tokens.type-key-size;
+                font-weight: Tokens.type-key-weight;
+                color: Dark.on-stage;
+            }
+        }
+    }
+}
+
+// The app's 16px mark: its own icon, the monogram, or the display glyph.
+component AppMark inherits Rectangle {
+    in property <SessionRow> entry;
+    in property <length> size: 16px;
+
+    width: root.size;
+    height: root.size;
+
+    if root.entry.whole-screen: AppIcon {
+        commands: Icons.monitor;
+        stroke-color: Tokens.ink-muted;
+        size: root.size;
+    }
+
+    if !root.entry.whole-screen && root.entry.has-app-icon: Image {
+        width: root.size;
+        height: root.size;
+        source: root.entry.app-icon;
+        image-fit: contain;
+    }
+
+    if !root.entry.whole-screen && !root.entry.has-app-icon: AppMonogram {
+        letter: root.entry.app-letter;
+        hue: root.entry.app-hue;
+        size: root.size;
+    }
+}
+
+// The title line: the app's mark, the window name, the padlock and the marker
+// flag. The mark leads on both views since the app column went (t260928-e029).
+component TitleLine inherits HorizontalLayout {
+    in property <SessionRow> entry;
+
+    spacing: 6px;
+    height: 20px;
+
+    AppMark {
+        y: (parent.height - self.height) / 2;
+        entry: root.entry;
+    }
+
+    Text {
+        text: root.entry.title;
+        overflow: elide;
+        vertical-alignment: center;
+        font-size: Tokens.type-body-strong-size;
+        font-weight: Tokens.type-body-strong-weight;
+        color: Tokens.ink;
+    }
+
+    if root.entry.protected: AppIcon {
+        y: (parent.height - self.height) / 2;
+        commands: Icons.lock;
+        stroke-color: Tokens.ink-muted;
+        size: 14px;
+    }
+
+    if root.entry.marker-count > 0: HorizontalLayout {
+        spacing: 2px;
+
+        AppIcon {
+            y: (parent.height - self.height) / 2;
+            commands: Icons.marker-fill;
+            stroke-color: Tokens.marker;
+            fill-color: Tokens.marker;
+            size: 14px;
+        }
+
+        Text {
+            text: root.entry.marker-count;
+            vertical-alignment: center;
+            font-family: Tokens.font-family-mono;
+            font-size: Tokens.type-key-size;
+            font-weight: Tokens.type-key-weight;
+            color: Tokens.marker-text;
+        }
+    }
+
+    Rectangle {
+        horizontal-stretch: 1;
+    }
+}
+
+export component SessionTile inherits Rectangle {
+    in property <SessionRow> entry;
+    // Trailing cells of the window: they hold their place and draw nothing.
+    in property <bool> blank;
+    in property <bool> thumbnail-view;
+    in property <length> media-height;
+    in property <length> cell-height;
+    // The list's narrow step (DS NarrowWindow): no created column below 700.
+    in property <bool> show-start: true;
+    // Whether this row's comment is being edited in place.
+    in property <bool> editing-note;
+    // Whether the pointer is on this row. Computed by the pane from the
+    // marquee surface's position rather than by a TouchArea here: a TouchArea
+    // on the row would win the press and the drag-select could no longer start
+    // from a row (task079).
+    in property <bool> hovered;
+    // The one rule for hover decoration on this row: only a row nothing could
+    // read stays undecorated (t260928-23aa). A row that will not load while
+    // something records still lights -- its menu's 「確認で開く」 is what says
+    // no (task690's rule dimmed every other row for the whole recording).
+    // The row's small controls keep answering on their own hover, because
+    // they take it away from the surface.
+    property <bool> hover-allowed: !root.entry.unreadable;
+    property <bool> show-hover: root.hovered && root.hover-allowed;
+    // The comment answers to readability alone (the user, 2026-09-19): a
+    // comment can be written on any row that has a manifest.
+    property <bool> note-editable: !root.entry.unreadable;
+    // The corner controls and the placeholder follow this. The pane folds
+    // `control-hover` into `hovered`, so the row stays lit while the pointer
+    // is on one of its own controls (t260928-e029).
+    property <bool> lit: root.hovered;
+    // Whether the pointer is on one of this row's controls, whose TouchAreas
+    // take the hover away from the pane's surface. Their ids live inside `if`
+    // blocks, out of reach here, so each reports into a flag; each flag counts
+    // only while its block is mounted, or a control unmounted under the
+    // pointer (the comment opening the editor) would hold the row lit.
+    property <bool> check-hovered;
+    property <bool> note-hovered;
+    property <bool> stop-hovered;
+    property <bool> more-hovered;
+    property <bool> tile-check-hovered;
+    property <bool> tile-more-hovered;
+    property <bool> list-mounted: !root.blank && !root.thumbnail-view;
+    property <bool> tile-mounted: !root.blank && root.thumbnail-view;
+    out property <bool> control-hover: (root.list-mounted
+            && (root.check-hovered
+                || (root.note-hovered && !root.editing-note && root.note-editable)
+                || (root.stop-hovered && root.entry.recording)
+                || (root.more-hovered && !root.entry.recording)))
+        || (root.tile-mounted && (root.tile-check-hovered || root.tile-more-hovered));
+
+    // The entrance: set by the pane for as long as it has just been entered or
+    // switched to the tiles; `TileRise` inside each view's block does the rest.
+    in property <bool> entering;
+    in property <int> enter-order;
+
+    callback note-edit-requested();
+    callback note-committed(string);
+    callback edit-cancelled();
+    /// The open editor's current text, on every keystroke (task1340).
+    callback edit-draft-changed(string);
+    /// task2030 判断5: stop *this* recording, and only this one.
+    callback stop-requested();
+    // The checkbox: the same as a Ctrl-press on the row.
+    // `by-key`: the box's own key focus pressed it, and keeps the focus.
+    callback check-toggled(bool);
+    // The 「…」: this row's menu, opened at the button.
+    // The last flag as on `check-toggled`: the menu takes the keys.
+    callback more-requested(length, length, bool);
+
+    // Passed in: Rust resolves a pointer position back to a row from the same
+    // numbers (`ui_state::sessions::placed_rects`).
+    height: root.cell-height;
+
+    // DS: radius-md on a row, radius-lg on a tile. Hover `fill-hover`,
+    // selection `accent-soft` -- no edge strip (DS SessionRow 「しない」).
+    border-radius: root.thumbnail-view ? Tokens.radius-lg : Tokens.radius-md;
+    background: root.blank
+        ? transparent
+        : root.entry.selected
+            ? Tokens.accent-soft
+            : root.show-hover ? Tokens.fill-hover : transparent;
+    // The hover fill fades (DS `.lb-session` / `.lb-stile`, `duration-fast`;
+    // t260925-f297's ask, lost in 9a17) -- except on the frame this cell is
+    // handed a different row. The pool re-keys a cell as the list scrolls, and
+    // a fade then would carry the last row's fill onto the new one (the
+    // darkening 9a17 took the fade away for). `rekeyed` is a plain binding, so
+    // it is already true when the new row's background is evaluated; the
+    // timer settles it a tick later (t260928-23aa).
+    property <string> settled-id;
+    property <bool> rekeyed: root.entry.id != root.settled-id;
+    Timer {
+        interval: 1ms;
+        running: root.rekeyed;
+        triggered => {
+            root.settled-id = root.entry.id;
+        }
+    }
+    animate background {
+        duration: root.rekeyed || root.blank ? 0ms : Tokens.duration-fast;
+    }
+
+    // ---------- thumbnail tile (DS SessionTile) ----------
+    // 6 / 6 / 10 inside, the picture, 10px, then two lines.
+    if !root.blank && root.thumbnail-view: TileRise {
+        entering: root.entering;
+        order: root.enter-order;
+
+        VerticalLayout {
+            padding-left: 6px;
+            padding-right: 6px;
+            padding-top: 6px;
+            padding-bottom: 10px;
+            spacing: 10px;
+
+            thumb := Rectangle {
+                height: root.media-height;
+
+                ThumbFace {
+                    entry: root.entry;
+                    radius: Tokens.radius-md;
+                    large: true;
+                }
+
+                // The selected tile's picture wears a 2px `accent` ring.
+                if root.entry.selected: Rectangle {
+                    x: -2px;
+                    y: -2px;
+                    width: parent.width + 4px;
+                    height: parent.height + 4px;
+                    border-radius: Tokens.radius-md + 2px;
+                    border-width: 2px;
+                    border-color: Tokens.accent;
+                }
+
+                // The corner controls on the `stage-veil`: shown while hovered or
+                // selected. Faded, not unmounted, because their own TouchAreas take
+                // the hover away from the surface (task184).
+                Rectangle {
+                    x: 8px;
+                    y: 8px;
+                    width: 22px;
+                    height: 22px;
+                    border-radius: Tokens.radius-xs + 2px;
+                    background: Dark.stage-veil;
+                    opacity: (root.lit || root.entry.selected || tile-check.has-hover || tile-check.key-focused) && root.entry.selectable ? 1 : 0;
+                    visible: root.entry.selectable;
+
+                    tile-check := Checkbox {
+                        x: 2px;
+                        y: 1px;
+                        reader-label: root.entry.title;
+                        checked: root.entry.selected;
+                        changed has-hover => {
+                            root.tile-check-hovered = self.has-hover;
+                        }
+                        toggled => {
+                            root.check-toggled(self.key-focused);
+                        }
+                    }
+                }
+
+                // The 「…」 on the `stage-veil`, as the DS's `.lb-stile__more`.
+                Rectangle {
+                    x: parent.width - self.width - 6px;
+                    y: 6px;
+                    width: tile-more.width;
+                    height: tile-more.height;
+                    border-radius: Tokens.radius-sm;
+                    background: Dark.stage-veil;
+                    // Hover, focus or selection (DS SessionTile), like the check.
+                    // The key focus too (t260928-d9b4): the ring inherits this opacity.
+                    opacity: root.lit || root.entry.selected || tile-more.has-hover || tile-more.key-focused ? 1 : 0;
+                    visible: !root.entry.unreadable;
+
+                    tile-more := IconBtn {
+                        icon: Icons.more;
+                        label: SessionLabels.more-actions;
+                        variant: IconBtnVariant.stage;
+                        changed has-hover => {
+                            root.tile-more-hovered = self.has-hover;
+                        }
+                        clicked => {
+                            root.more-requested(parent.x + 6px + self.width / 2, parent.y + 6px + self.height, self.key-focused);
+                        }
+                    }
+                }
+            }
+
+            // Two lines (t260928-e029): the mark and the name, then when it was
+            // made. No comment line -- a tile cannot edit one.
+            VerticalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+                spacing: 2px;
+
+                TitleLine {
+                    entry: root.entry;
+                }
+
+                Text {
+                    height: 18px;
+                    text: root.entry.unreadable
+                        ? SessionLabels.unreadable-row
+                        : root.entry.recording ? SessionLabels.recording : root.entry.meta-date;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    font-family: root.entry.recording || root.entry.unreadable ? Tokens.font-family : Tokens.font-family-mono;
+                    font-size: Tokens.type-caption-size;
+                    font-weight: root.entry.recording ? Tokens.type-body-strong-weight : Tokens.type-caption-weight;
+                    color: root.entry.unreadable
+                        ? Tokens.ink-faint
+                        : root.entry.recording ? Tokens.live-text : Tokens.ink-muted;
+                }
+            }
+        }
+    }
+
+    // ---------- list row (DS SessionRow) ----------
+    // Columns 18 / 96 / 1fr / 88 / 64 / 72 / 28, 16 apart, inside 8 / 12. No
+    // app column since t260928-e029: the mark leads the name.
+    if !root.blank && !root.thumbnail-view: TileRise {
+        entering: root.entering;
+        order: root.enter-order;
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 16px;
+
+            Rectangle {
+                width: 18px;
+
+                row-check := Checkbox {
+                    y: (parent.height - 20px) / 2;
+                    // Its own height, not the row's: the key ring goes round the box.
+                    height: 20px;
+                    reader-label: root.entry.title;
+                    checked: root.entry.selected;
+                    visible: root.entry.selectable;
+                    changed has-hover => {
+                        root.check-hovered = self.has-hover;
+                    }
+                    toggled => {
+                        root.check-toggled(self.key-focused);
+                    }
+                }
+            }
+
+            ThumbFace {
+                width: 96px;
+                height: 54px;
+                y: (parent.height - self.height) / 2;
+                entry: root.entry;
+                radius: Tokens.radius-sm;
+            }
+
+            // The window name and the comment.
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+                alignment: center;
+
+                TitleLine {
+                    entry: root.entry;
+                }
+
+                HorizontalLayout {
+                    height: 18px;
+                    spacing: 6px;
+
+                    // task1520 follow-up: nothing could be read out of this
+                    // session, so there is no comment to show and no editor.
+                    if root.entry.unreadable: Text {
+                        text: SessionLabels.unreadable-row;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        font-size: Tokens.type-caption-size;
+                        color: Tokens.ink-faint;
+                    }
+
+                    if !root.editing-note && !root.entry.unreadable: HorizontalLayout {
+                        spacing: 4px;
+
+                        // An empty comment keeps its line and shows the
+                        // placeholder only on hover (DS: the row's height does
+                        // not change). The line is itself the way in (DS
+                        // SessionRow 「押すか F2 でその場で書く」, t260928-23aa):
+                        // no pencil. Its hit is the text's own width, so the
+                        // rest of the line still selects; it takes the row's
+                        // hover away from the surface, so it reports back.
+                        Text {
+                            text: root.entry.note == "" ? SessionLabels.note-placeholder : root.entry.note;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            font-size: Tokens.type-caption-size;
+                            color: root.entry.note != "" ? Tokens.ink-muted : Tokens.ink-faint;
+                            opacity: root.entry.note != "" || root.lit ? 1 : 0;
+
+                            TouchArea {
+                                mouse-cursor: MouseCursor.text;
+                                changed has-hover => {
+                                    root.note-hovered = self.has-hover;
+                                }
+                                clicked => {
+                                    root.note-edit-requested();
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    if root.editing-note: InlineEdit {
+                        horizontal-stretch: 1;
+                        text: root.entry.note;
+                        hint: "Enter";
+                        y: (parent.height - self.height) / 2;
+                        init => {
+                            self.begin-edit();
+                        }
+                        edited(value) => {
+                            root.edit-draft-changed(value);
+                        }
+                        committed(value) => {
+                            root.note-committed(value);
+                        }
+                        // Guarded on this row's own edit state (task3430).
+                        cancelled => {
+                            if (root.editing-note) {
+                                root.edit-cancelled();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Created and length: the same mono 12px, both right-aligned so
+            // their figures line up down the list.
+            if root.show-start: Text {
+                width: 88px;
+                text: root.entry.meta-date;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                font-family: Tokens.font-family-mono;
+                font-size: Tokens.type-mono-size;
+                color: Tokens.ink-muted;
+            }
+
+            Text {
+                width: 64px;
+                text: root.entry.recording ? SessionLabels.recording : root.entry.meta-duration;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                font-family: root.entry.recording ? Tokens.font-family : Tokens.font-family-mono;
+                font-size: Tokens.type-mono-size;
+                font-weight: root.entry.recording ? Tokens.type-body-strong-weight : Tokens.type-mono-weight;
+                color: root.entry.recording ? Tokens.live-text : Tokens.ink-muted;
+            }
+
+            Text {
+                width: 72px;
+                text: root.entry.meta-size;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                font-family: Tokens.font-family-mono;
+                font-size: Tokens.type-mono-size;
+                color: Tokens.ink-muted;
+            }
+
+            // 「その他」: the LIVE row's stop, always there (the user's ruling,
+            // 2026-09-27); otherwise the 「…」 on hover.
+            Rectangle {
+                width: 28px;
+
+                if root.entry.recording: Rectangle {
+                    stop-btn := IconBtn {
+                        y: (parent.height - self.height) / 2;
+                        icon: Icons.stop;
+                        label: SessionLabels.stop-recording;
+                        danger: true;
+                        danger-ink: true;
+                        disabled: !root.hover-allowed;
+                        changed has-hover => {
+                            root.stop-hovered = self.has-hover;
+                        }
+                        clicked => {
+                            root.stop-requested();
+                        }
+                    }
+
+                    Tooltip {
+                        x: parent.width - self.width;
+                        y: -self.height - 4px;
+                        armed: stop-btn.has-hover;
+                        label: SessionLabels.stop-recording;
+                    }
+                }
+
+                if !root.entry.recording: row-more := IconBtn {
+                    y: (parent.height - self.height) / 2;
+                    icon: Icons.more;
+                    label: SessionLabels.more-actions;
+                    visible: !root.entry.unreadable;
+                    opacity: root.lit || self.has-hover || self.key-focused ? 1 : 0;
+                    changed has-hover => {
+                        root.more-hovered = self.has-hover;
+                    }
+                    clicked => {
+                        root.more-requested(parent.x + self.x + self.width / 2, parent.y + self.y + self.height, self.key-focused);
+                    }
+                }
+            }
+        }
+    }
+}

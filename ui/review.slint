@@ -1,0 +1,2258 @@
+// The review screen (task127, rebuilt for round5 §4 by task171).
+//
+// Three things share the pane: the stage with the overlay controls anchored to
+// the *video's* bottom edge rather than the pane's, the right detail panel that
+// owns everything which produces output, and -- with nothing loaded -- the two
+// cards that are the screen's real starting point.
+//
+// Everything time-valued stays in Rust: 100ns ticks do not fit slint's 32-bit
+// int, so the model carries percents and ratios only, and callbacks hand back
+// ratios or model row indices. Strings all come from `ui_state::timeline`.
+
+import { MixerRow } from "review_mixer.slint";
+// round16 §2: `Dark` is the un-themed 1c set. Everything drawn on the video
+// stage -- the transport, the rate chip and its menu, the LIVE capsule, the
+// overlay cards and the empty state -- reads it directly and stays dark while
+// the rest of the screen follows the theme.
+import { Dark, Tokens, Motion } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { Btn, BtnVariant, EmptyState, IconBtn, InlineEdit, AppScroll, Tooltip, Switch, VolumeRail, Keycap, KeycapTone, ControlSize, TallyLamp, TallyState, Tabs, SegmentTabs, ProgressBar, TextField, Timecode, Overline, ContextMenu, PressFocus } from "controls.slint";
+import { ReviewStage } from "review_stage.slint";
+import { ReviewTrackWrap } from "review_track.slint";
+import { ReviewVm, TrackSpan, GapSpan, MarkerSpan, MarkerRow } from "review_vm.slint";
+export { ReviewVm, TrackSpan, GapSpan, MarkerSpan, MarkerRow }
+
+// A TransportBar icon button: the shared DS IconButton at md (32, a 20px
+// glyph) with its `dock` crossover (t260928-ac18, review 06 F22 -- this used
+// to be a copy of it), and its tooltip with the shortcut's Keycap.
+component TransportBtn inherits Rectangle {
+    in property <string> icon;
+    in property <float> dock;
+    in property <bool> on;
+    in property <string> tip;
+    in property <[string]> keys;
+    // Hang the tip from the button's right edge: the row's last buttons sit
+    // against the stage's clip.
+    in property <bool> tip-end;
+    callback clicked;
+    out property <bool> key-focused: btn.key-focused;
+
+    width: btn.width;
+    height: btn.height;
+
+    btn := IconBtn {
+        icon: root.icon;
+        label: root.tip;
+        size: ControlSize.md;
+        dock: root.dock;
+        pressed: root.on;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Tooltip {
+        x: root.tip-end ? root.width - self.width : (root.width - self.width) / 2;
+        y: -self.height - 6px;
+        armed: btn.has-hover && root.tip != "";
+        label: root.tip;
+        shortcut: root.keys;
+    }
+}
+
+// ---------- empty state (DS EmptyReviewScreen, t260927-9865) ----------
+// Before the first recording: the DS EmptyState with its primary
+// 「対象を選ぶ」, which opens the same capture flyout as the rail's キャプチャ
+// (`ReviewVm.pick-target`), and under it the drifting scene (DS `TimeDrift`):
+// frames are born at the edge of now and drift left into the past on two
+// belts, a ruler travelling with the front one, the dot at the edge pulsing.
+//
+// Nothing here reads `animation-tick()` (KNOWLEDGE「`animation-tick()` は評価
+// されたときだけ present を要求する」): the three phases are written from a
+// 60/s timer in `shell.rs` that stops while the screen is hidden, the window
+// is minimized or in the tray, or motion is reduced -- and then this is a
+// still picture.
+export component ReviewEmpty inherits Rectangle {
+    // No ground of its own: the panel's `surface` shows through, and the
+    // band's left fade is drawn in that same token.
+    background: transparent;
+    clip: true;
+
+    // A low pane (720x480 at the smallest) tightens the EmptyState's
+    // vertical padding from the DS's 40 to 16 so the block and the band fit.
+    property <length> pad: root.height < 560px ? 16px : 40px;
+
+    // The DS's belts, `[left, width]` (and a tint hue at the front) on one
+    // 1600px lap that repeats. Frames are 16:9, so their height follows.
+    property <[{x: length, w: length}]> back-frames: [
+        { x: 40px, w: 80px }, { x: 270px, w: 100px }, { x: 530px, w: 90px },
+        { x: 780px, w: 80px }, { x: 1020px, w: 100px }, { x: 1280px, w: 90px },
+        { x: 1490px, w: 80px },
+    ];
+    property <[{x: length, w: length, hue: float}]> front-frames: [
+        { x: 0px, w: 156px, hue: 206 }, { x: 290px, w: 136px, hue: 262 },
+        { x: 560px, w: 176px, hue: 32 }, { x: 890px, w: 144px, hue: 150 },
+        { x: 1160px, w: 168px, hue: 190 }, { x: 1430px, w: 136px, hue: 262 },
+    ];
+
+    // The EmptyState, 24 of air, then the 160px band: one block, centred, so
+    // a low pane squeezes neither.
+    VerticalLayout {
+        alignment: center;
+        spacing: 24px;
+
+        VerticalLayout {
+            padding-top: root.pad;
+            padding-bottom: root.pad;
+
+            EmptyState {
+                icon: Icons.capture;
+                label: ReviewVm.empty-title;
+                sub: ReviewVm.empty-body;
+            }
+
+            // The DS's primary lg, 24 below the description (gap 8 + margin
+            // 16, t260928-ac18). Its own Btn rather than `EmptyState`'s
+            // action, which is md.
+            HorizontalLayout {
+                alignment: center;
+                padding-top: 24px;
+
+                Btn {
+                    label: ReviewVm.empty-action;
+                    icon: Icons.capture;
+                    variant: BtnVariant.primary;
+                    size: ControlSize.lg;
+                    clicked => {
+                        ReviewVm.pick-target();
+                    }
+                }
+            }
+        }
+
+        band := Rectangle {
+            height: 160px;
+
+            // Up to the edge of now, 18% in from the right.
+            track := Rectangle {
+                x: 0;
+                width: parent.width * 0.82;
+                clip: true;
+                // Enough laps that the belt never runs out, even on a pane
+                // wider than one lap (a 4K desk).
+                property <int> laps: Math.ceil(self.width / 1600px) + 1;
+
+                // Back: small, faint, slow (80s a lap), bottom 46 up.
+                Rectangle {
+                    x: -ReviewVm.drift-back * 1600px;
+                    width: parent.laps * 1600px;
+                    height: parent.height - 46px;
+                    y: 0;
+                    opacity: 0.55;
+
+                    for lap in track.laps: Rectangle {
+                        x: lap * 1600px;
+                        width: 1600px;
+
+                        for f in root.back-frames: Rectangle {
+                            x: f.x;
+                            width: f.w;
+                            height: f.w * 9 / 16;
+                            y: parent.height - self.height;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Tokens.line;
+                            background: Tokens.fill;
+                        }
+                    }
+                }
+
+                // Front: tinted frames, faster (44s a lap), bottom 28 up,
+                // every other one flagged; the ruler rides along.
+                Rectangle {
+                    x: -ReviewVm.drift-front * 1600px;
+                    width: parent.laps * 1600px;
+
+                    for lap in track.laps: Rectangle {
+                        x: lap * 1600px;
+                        width: 1600px;
+
+                        for f[i] in root.front-frames: Rectangle {
+                            x: f.x;
+                            width: f.w;
+                            height: f.w * 9 / 16;
+                            y: parent.height - 28px - self.height;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Tokens.line;
+                            // No picture: the DS's pictures are stand-ins for
+                            // the preview, and nothing has been recorded yet.
+                            // HSL(hue, 60%, 55%) is HSV(hue, 0.66, 0.82).
+                            background: @linear-gradient(160deg, hsv(f.hue, 0.66, 0.82).mix(Tokens.raised, 0.18) 0%, Tokens.fill 100%);
+                            drop-shadow-offset-y: 6px;
+                            drop-shadow-blur: 16px;
+                            drop-shadow-color: #0000001f;
+
+                            if Math.mod(i, 2) == 0: Rectangle {
+                                x: 0;
+                                y: 0;
+                                width: 0;
+                                height: 0;
+
+                                Rectangle {
+                                    x: 12px;
+                                    y: -14px;
+                                    width: 2px;
+                                    height: 14px;
+                                    border-radius: 1px;
+                                    background: Tokens.marker;
+                                }
+
+                                Path {
+                                    x: 14px;
+                                    y: -14px;
+                                    width: 9px;
+                                    height: 7px;
+                                    viewbox-width: 9;
+                                    viewbox-height: 7;
+                                    commands: "M0 0 L9 3.5 L0 7 Z";
+                                    fill: Tokens.marker;
+                                    stroke-width: 0;
+                                }
+                            }
+                        }
+
+                        // The ruler: one path per lap for each tick length
+                        // (14 every 100px, 7 every 20px), not 96 rectangles.
+                        Path {
+                            y: parent.height - 16px;
+                            width: 1600px;
+                            height: 16px;
+                            viewbox-width: 1600;
+                            viewbox-height: 16;
+                            // The box is the viewbox: the default `contain`
+                            // shrank the lap to 15/16 and left ~100px of it
+                            // bare (t260928-ac18, review 08 F1).
+                            fit: preserve;
+                            commands: "M20.5 9 V16 M40.5 9 V16 M60.5 9 V16 M80.5 9 V16 M120.5 9 V16 M140.5 9 V16 M160.5 9 V16 M180.5 9 V16 M220.5 9 V16 M240.5 9 V16 M260.5 9 V16 M280.5 9 V16 M320.5 9 V16 M340.5 9 V16 M360.5 9 V16 M380.5 9 V16 M420.5 9 V16 M440.5 9 V16 M460.5 9 V16 M480.5 9 V16 M520.5 9 V16 M540.5 9 V16 M560.5 9 V16 M580.5 9 V16 M620.5 9 V16 M640.5 9 V16 M660.5 9 V16 M680.5 9 V16 M720.5 9 V16 M740.5 9 V16 M760.5 9 V16 M780.5 9 V16 M820.5 9 V16 M840.5 9 V16 M860.5 9 V16 M880.5 9 V16 M920.5 9 V16 M940.5 9 V16 M960.5 9 V16 M980.5 9 V16 M1020.5 9 V16 M1040.5 9 V16 M1060.5 9 V16 M1080.5 9 V16 M1120.5 9 V16 M1140.5 9 V16 M1160.5 9 V16 M1180.5 9 V16 M1220.5 9 V16 M1240.5 9 V16 M1260.5 9 V16 M1280.5 9 V16 M1320.5 9 V16 M1340.5 9 V16 M1360.5 9 V16 M1380.5 9 V16 M1420.5 9 V16 M1440.5 9 V16 M1460.5 9 V16 M1480.5 9 V16 M1520.5 9 V16 M1540.5 9 V16 M1560.5 9 V16 M1580.5 9 V16";
+                            stroke: Tokens.line;
+                            stroke-width: 1px;
+                            fill: transparent;
+                        }
+
+                        Path {
+                            y: parent.height - 16px;
+                            width: 1600px;
+                            height: 16px;
+                            viewbox-width: 1600;
+                            viewbox-height: 16;
+                            fit: preserve;
+                            commands: "M0.5 2 V16 M100.5 2 V16 M200.5 2 V16 M300.5 2 V16 M400.5 2 V16 M500.5 2 V16 M600.5 2 V16 M700.5 2 V16 M800.5 2 V16 M900.5 2 V16 M1000.5 2 V16 M1100.5 2 V16 M1200.5 2 V16 M1300.5 2 V16 M1400.5 2 V16 M1500.5 2 V16";
+                            stroke: Tokens.line-strong;
+                            stroke-width: 1px;
+                            fill: transparent;
+                        }
+                    }
+                }
+
+                // The ruler's foot, still.
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Tokens.line;
+                }
+
+                // The past dissolves: slint has no mask, so the ground is laid
+                // over the left 40%, opaque at the far left.
+                Rectangle {
+                    x: 0;
+                    width: parent.width * 0.4;
+                    background: @linear-gradient(90deg, Tokens.surface 0%, Tokens.surface.transparentize(1) 100%);
+                }
+            }
+
+            // The edge of now. `accent`, never `live`: nothing is recording.
+            property <length> edge-x: self.width * 0.82;
+
+            // The glow at its foot (the DS's 200x170 closest-side ellipse; a
+            // circle here, fading out at the square's inscribed radius).
+            Rectangle {
+                x: parent.edge-x - 85px;
+                y: parent.height + 80px - 170px;
+                width: 170px;
+                height: 170px;
+                background: @radial-gradient(circle, Tokens.accent-soft 0%, Tokens.accent-soft.transparentize(1) 70.7%);
+            }
+
+            Rectangle {
+                x: parent.edge-x - 1px;
+                y: 4px;
+                width: 2px;
+                height: parent.height - 4px;
+                border-radius: 1px;
+                background: @linear-gradient(180deg, Tokens.accent.transparentize(1) 0%, Tokens.accent 50%);
+            }
+
+            // The dot, and its ring swelling from 4px `accent-soft` out to 9px
+            // and gone, and back (2.4s each way).
+            property <length> ring: 10px + 2 * (4px + 5px * ReviewVm.drift-pulse);
+            Rectangle {
+                x: parent.edge-x - self.width / 2;
+                y: parent.height - 1px - self.height / 2;
+                width: parent.ring;
+                height: parent.ring;
+                border-radius: self.width / 2;
+                background: Tokens.accent-soft.transparentize(ReviewVm.drift-pulse);
+            }
+
+            Rectangle {
+                x: parent.edge-x - 5px;
+                y: parent.height + 4px - 10px;
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: Tokens.accent;
+            }
+        }
+    }
+}
+
+// ---------- right detail panel (round5 §4-D) ----------
+
+// One row of the marker tab (DS MarkerList, t260927-7d08): the flag in
+// `marker`, the time in `marker-text`, the name in `ink` or 「名前を付ける」
+// in `ink-faint`. The row at or just before the playhead is `marker-soft`.
+// Hover brings up three buttons: 前後 30 秒を範囲に (task3050), rename, delete
+// (a 1-second hold, t260928-bae5 F4). The current row stays `marker-soft`
+// under the pointer (DS `.is-current` after `:hover`, t260928-bae5 F13).
+// A click jumps, a double click renames (unchanged).
+component MarkerListRow inherits Rectangle {
+    in property <MarkerRow> entry;
+    in property <bool> editing;
+    in property <bool> current;
+    callback clicked;
+    callback rename-requested();
+    callback renamed(string);
+    callback rename-cancelled();
+    callback removed();
+    callback ranged();
+    // A hover button's tip: (words, on, the row's bottom edge in window
+    // coordinates). Reported rather than exposed: the buttons live inside
+    // `if`s, and the rows inside a `for` (task3420).
+    callback hint-hovered(string, bool, length);
+
+    height: 36px;
+    border-radius: Tokens.radius-sm;
+    background: root.editing
+        ? Tokens.accent-soft
+        : root.current ? Tokens.marker-soft : touch.has-hover ? Tokens.fill-hover : transparent;
+
+    // Before the row's content, so the buttons inside it win the overlap.
+    // Disabled while editing -- the field inside owns the pointer then.
+    touch := TouchArea {
+        enabled: !root.editing;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+        double-clicked => {
+            root.rename-requested();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 4px;
+        spacing: 10px;
+
+        AppIcon {
+            y: (parent.height - self.height) / 2;
+            commands: Icons.marker-fill;
+            stroke-color: Tokens.marker;
+            size: 16px;
+        }
+
+        // The DS Timecode sm in `marker-text`, the `.t` tail at 60%
+        // (t260928-bae5, review 07 F11).
+        VerticalLayout {
+            min-width: 52px;
+            horizontal-stretch: 0;
+            alignment: center;
+
+            Timecode {
+                size: ControlSize.sm;
+                marker: true;
+                whole: root.entry.time;
+                frac: root.entry.frac;
+            }
+        }
+
+        if !root.editing: Text {
+            text: root.entry.label == "" ? ReviewVm.marker-placeholder : root.entry.label;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            font-size: Tokens.type-label-size;
+            font-weight: root.entry.label == "" ? Tokens.type-body-weight : Tokens.type-label-weight;
+            color: root.entry.label == "" ? Tokens.ink-faint : Tokens.ink;
+        }
+
+        if root.editing: InlineEdit {
+            horizontal-stretch: 1;
+            y: (parent.height - self.height) / 2;
+            text: root.entry.label;
+            hint: "Enter";
+            init => {
+                self.begin-edit();
+            }
+            committed(value) => {
+                root.renamed(value);
+            }
+            // Guarded on the row's own edit state (task3430): the teardown's
+            // blur can deliver a stale `cancelled` after another row opened.
+            cancelled => {
+                if (root.editing) {
+                    root.rename-cancelled();
+                }
+            }
+        }
+    }
+
+    // The hover buttons, laid over the row's right end rather than in its
+    // layout, so the name has the whole row while nothing is hovered (DS
+    // `.lb-marker-row__actions`: `display: none` until hover). Hover drives
+    // the opacity, never the element's existence (task184): pressing takes
+    // the grab off `touch`, and an `if touch.has-hover` would delete the
+    // button between press and release.
+    if !root.editing: Rectangle {
+        property <bool> lit: touch.has-hover || ranged.has-hover || rename.has-hover || remove.has-hover;
+        x: root.width - self.width;
+        width: actions.preferred-width;
+        height: root.height;
+        opacity: self.lit ? 1 : 0;
+
+        // Opaque, so the name's tail goes under it: the panel ground, then
+        // the row's own hover fill.
+        Rectangle {
+            border-radius: Tokens.radius-sm;
+            background: Tokens.surface;
+        }
+
+        Rectangle {
+            border-radius: Tokens.radius-sm;
+            background: root.current ? Tokens.marker-soft : Tokens.fill-hover;
+        }
+
+        actions := HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            spacing: 2px;
+
+            ranged := IconBtn {
+                y: (parent.height - self.height) / 2;
+                icon: Icons.scissors;
+                label: ReviewVm.marker-range-hint;
+                changed has-hover => {
+                    root.hint-hovered(ReviewVm.marker-range-hint, self.has-hover,
+                        root.absolute-position.y + root.height);
+                }
+                clicked => {
+                    root.ranged();
+                }
+            }
+
+            rename := IconBtn {
+                y: (parent.height - self.height) / 2;
+                icon: Icons.pencil;
+                label: ReviewVm.marker-rename-hint;
+                changed has-hover => {
+                    root.hint-hovered(ReviewVm.marker-rename-hint, self.has-hover,
+                        root.absolute-position.y + root.height);
+                }
+                clicked => {
+                    root.rename-requested();
+                }
+            }
+
+            remove := IconBtn {
+                y: (parent.height - self.height) / 2;
+                icon: Icons.discard;
+                label: ReviewVm.marker-delete-hint;
+                hold: true;
+                danger: true;
+                hold-hint: ReviewVm.marker-hold-hint;
+                changed has-hover => {
+                    root.hint-hovered(ReviewVm.marker-delete-hint, self.has-hover,
+                        root.absolute-position.y + root.height);
+                }
+                hold-complete => {
+                    root.removed();
+                }
+            }
+        }
+    }
+}
+
+export component ReviewPane inherits Rectangle {
+    // ---------- where the band sits (t260927-77b8, user ruling 2026-09-27) ----------
+    // 1 = docked under the stage (the panel is out), 0 = floating on the
+    // picture's bottom edge (the panel is in, and full screen, which folds the
+    // panel from Rust). The one animated number: the panel's width, the band's
+    // rect, the stage's height and every colour that crosses over read it, so
+    // they cannot drift apart. The panel's own `duration-reveal` (0 under
+    // reduced motion, t260928-ac18), on `easing-standard`.
+    property <float> dock: ReviewVm.panel-open ? 1 : 0;
+    animate dock {
+        duration: Tokens.duration-reveal;
+        easing: Motion.easing-standard;
+    }
+    // At rest at either end. The GPU stage's target is only recomputed here
+    // (決めたこと 2): the slide itself changes the picture's size every frame.
+    property <bool> dock-settled: root.dock == 0 || root.dock == 1;
+    // The size the slide ended on. `changed video-*` may not fire on the very
+    // frame `dock` lands -- the curve is flat there -- so the landing itself
+    // reports it. A repeat of a size already sent is dropped in Rust
+    // (`restage` compares the target).
+    changed dock-settled => {
+        if (self.dock-settled) {
+            ReviewVm.stage-size-changed(stage-area.video-width, stage-area.video-height);
+        }
+    }
+    // DS: 8 + ruler 18 + lane 36 + 2 + transport 48 + 8. A constant rather
+    // than the layout's preferred height: the stage's height is computed from
+    // it, and the layout's width is computed from the stage.
+    property <length> band-h: 120px;
+    // DS size-panel 320; 280 once the page is under 1000px (DS NarrowWindow).
+    property <length> panel-w: root.width < 1000px ? 280px : 320px;
+    // Which tab the panel shows: 0 書き出し, 1 マーカー (DS ReviewScreen).
+    property <int> panel-tab: 0;
+    // The floor's height, for the body above it.
+    property <length> floor-h: floor.height;
+
+    // 「クリップに保存」, Enter in the comment field, and Enter on the pane
+    // all end here (t260927-7d08). The export tab comes forward so the
+    // progress bar lands where the button was; the keyboard goes back to the
+    // pane so the shortcuts are alive after the save (task4190's lesson).
+    // With the panel closed -- full screen included -- that place is off the
+    // pane and the progress bar and 「中止」 with it, so the save opens the
+    // panel first, leaving full screen to do so (t260928-1217, DS ReviewScreen
+    // §パネル). Opened the way its button opens it, so it is remembered too.
+    function save-clip() {
+        if (ReviewVm.export-enabled && !ReviewVm.export-busy) {
+            if (ReviewVm.fullscreen) {
+                ReviewVm.fullscreen-toggled();
+            }
+            if (!ReviewVm.panel-open) {
+                ReviewVm.panel-toggled(true);
+            }
+            root.panel-tab = 0;
+            ReviewVm.clip-committed(ReviewVm.clip-comment);
+        }
+        fs.focus();
+    }
+
+    // Docked colour, floating colour (DS: the bar variant follows the theme,
+    // the stage variant is on-stage over the black gradient). Each argument
+    // is used once, so slint inlining the function costs nothing.
+    pure function tone(docked: color, floating: color) -> color {
+        return docked.mix(floating, root.dock);
+    }
+
+    // The transport's tooltip words, in `ui_state::playback::transport_tips`
+    // order.
+    pure function tip(index: int) -> string {
+        return ReviewVm.transport-tips[index];
+    }
+    // The content face in app.slint is this pane's ground; a second
+    // 85 % layer here would make it opaque (t260916-ebdb).
+    background: transparent;
+
+    // True while one of the shell's dialogs is up (task142). Its FocusScope
+    // owns the keyboard then; this pane takes it back when the dialog closes.
+    in property <bool> overlay-open;
+
+    // The rate chip's menu (task148). Hover opens it (task238): `has-hover` on
+    // the chip or the menu keeps it open, and the 4px between them is bridged
+    // by `rate-menu-grace`. The menu is the shared `ContextMenu`
+    // (t260928-ac18), whose `hovered` counts its backdrop *and* its rows: slint
+    // gives hover to the topmost TouchArea only, so the backdrop alone is
+    // false over every row -- reading it alone is what made the menu close
+    // the instant the pointer arrived (task238's symptom, task340).
+    property <bool> rate-menu-hovered: rate-chip.has-hover || rate-menu.hovered;
+    // A press on the chip holds the menu open until a rate is chosen, the
+    // chip is pressed again or a press lands anywhere else on the stage
+    // (DS TransportBar 「押すと Menu」, t260928-ac18).
+    property <bool> rate-menu-pinned;
+    // Pinned from the keyboard (t260928-d9b4): the menu holds the focus
+    // while it is up, and the pane takes it back when it goes.
+    property <bool> rate-menu-keyboard;
+    // The seams the two halves still cannot cover: the 4px gap between the
+    // chip and the menu (`space-1`, t260928-88a2), and the 4px of padding and
+    // inter-row gaps inside it.
+    // A pointer crossing one of those is between TouchAreas for a frame or two,
+    // and without this the menu would flicker shut under a moving cursor.
+    // 200ms is a pointer's flight across a 4px seam with room to spare, and
+    // short enough that a menu the user walked away from is gone before they
+    // notice it. This is a debouncer, not the fix -- the fix is the menu's `hovered`.
+    property <bool> rate-menu-open: root.rate-menu-hovered || rate-menu-grace.running || root.rate-menu-pinned;
+
+    rate-menu-grace := Timer {
+        interval: 200ms;
+        running: false;
+        triggered => {
+            self.running = false;
+        }
+    }
+
+    // Arm on the falling edge, disarm the moment hover comes back -- otherwise
+    // a re-entry would leave the timer running and the menu would linger 200ms
+    // past the *second* exit for no reason.
+    changed rate-menu-hovered => {
+        rate-menu-grace.running = !root.rate-menu-hovered;
+    }
+    // Which marker row is being renamed, or -1. UI-local: nothing in Rust
+    // changes until the edit commits.
+    property <int> editing-marker: -1;
+    // task3640. The shell's full-window overlay needs to know that this rename
+    // is open, and a conditional element cannot be read from outside its own
+    // subtree, so the pane pushes the answer onto `ReviewVm` instead. Same
+    // shape as `fs.renaming` below, which has been doing this since task3050.
+    property <bool> marker-renaming: root.editing-marker >= 0;
+    changed marker-renaming => {
+        ReviewVm.marker-editing = self.marker-renaming;
+    }
+    // The other direction: the overlay took a press outside the field and is
+    // asking this pane to end its edit. A counter rather than a bool because
+    // the overlay's only news is "a press happened" -- there is no state to
+    // mirror back, and a counter cannot get stuck in the wrong position.
+    //
+    // Clearing `editing-marker` is the whole of the cancel: the teardown's blur
+    // is what reports it, exactly as the panel's own ground area has done since
+    // task3430 (`review.slint`'s `if editing-marker >= 0:
+    // TouchArea`, screen-verified in 3430's phase 3 sweep).
+    in property <int> dismiss-token;
+    changed dismiss-token => {
+        root.editing-marker = -1;
+    }
+    // A pin on the track was pressed (t260928-88a2): open the panel (and
+    // remember it, as its own button does), show マーカー, and bring the row
+    // into view. Its highlight is `marker-current`, which the pin's seek
+    // lands on. Not in full screen: the panel is folded away there.
+    property <int> marker-focus-token: ReviewVm.marker-focus-token;
+    changed marker-focus-token => {
+        if (ReviewVm.fullscreen) {
+            return;
+        }
+        if (!ReviewVm.panel-open) {
+            ReviewVm.panel-toggled(true);
+        }
+        root.panel-tab = 1;
+        // Rows are 36 tall, 2 apart, under the add button's row.
+        panel-scroll.viewport-y = -Math.max(0px, Math.min(
+            marker-add-row.y + marker-add-row.height + 2px
+                + ReviewVm.marker-focus-row * 38px + 18px
+                - panel-scroll.visible-height / 2,
+            marker-body.height - panel-scroll.visible-height));
+    }
+    // The marker row's hover buttons' tip (task3050): assigned rather than
+    // bound, since a `for` body's children cannot be read from out here.
+    property <string> marker-hint;
+    // Window-absolute y of the bottom edge of the row that raised
+    // `marker-hint`, reported by that row along with the hover (task3420).
+    // Written only on the hover-in edge: two rows' `changed has-hover` fire in
+    // an order nobody controls when the pointer crosses a boundary, and a
+    // hover-out arriving after the next hover-in would otherwise overwrite the
+    // live anchor with the row the pointer already left. Stale after the tip
+    // goes away, which costs nothing -- `armed` is false by then.
+    property <length> marker-hint-anchor-y;
+    // ---------- auto-hide (task151) ----------
+    // `shown` is what the timer owns; `pinned` is every reason the bar must
+    // stay regardless. Anything the user is *in the middle of* pins it, so a
+    // drag, an open menu and a running export all count.
+    property <bool> controls-shown: true;
+    property <bool> controls-pinned: !ReviewVm.playing
+        || overlay-hover.has-hover
+        || ReviewVm.dragging
+        || ReviewVm.range-dragging
+        || root.rate-menu-open
+        || ReviewVm.export-busy
+        // t260927-77b8: docked, the band is part of the screen, not a layer
+        // on the picture -- it never idles out. The target state rather than
+        // `dock`, so closing the panel starts the countdown at once.
+        || ReviewVm.panel-open
+        || root.band-key-focus;
+    property <bool> controls-visible: root.controls-shown || root.controls-pinned;
+    // The bar has to outlive its own opacity to fade *out*: dropping `visible`
+    // in the same frame cuts the animation off at frame one, which is why this
+    // used to fade in only (task1020). `fade-out` folds it once the animation
+    // has actually run.
+    property <bool> controls-rendered: true;
+
+    // The key focus on any of the band's controls pins it too (t260929-7937,
+    // the clip band's t260929-fcc6 form): a key the control accepts (Enter on
+    // a TransportBtn, an arrow on the volume rail) never reaches `fs`, so
+    // nothing pokes, and without this the band idled out under the user's
+    // hands and `band-up` pulled the focus home.
+    // A control inside an `if` cannot be read from here, so it writes its
+    // focus back to a root bool; each of those terms is ANDed with its own
+    // `if` condition, because a control that vanishes while focused never
+    // fires `changed` and its bool would stay true -- a band pinned for good
+    // with the focus on nothing and Space dead. With the AND the term drops
+    // with the control and the band falls back to hiding, where `band-up`
+    // takes the focus home. The live button also drops while disabled.
+    property <bool> repeat-kf;
+    property <bool> live-kf;
+    property <bool> stop-kf;
+    property <bool> vol-kf;
+    property <bool> panel-kf;
+    property <bool> band-key-focus: step-back-btn.key-focused
+        || play-keys.has-focus
+        || step-fwd-btn.key-focused
+        || clock-keys.has-focus
+        || rate-keys.has-focus
+        || marker-btn.key-focused
+        || mute-btn.key-focused
+        || full-btn.key-focused
+        || (root.repeat-kf && !ReviewVm.live-edge-visible)
+        || (root.live-kf && ReviewVm.live-edge-visible && !ReviewVm.live-stopping
+            && !ReviewVm.live-following)
+        || (root.stop-kf && ReviewVm.live-edge-visible && ReviewVm.live-chip-visible
+            && !ReviewVm.live-stopping)
+        || (root.vol-kf && !transport.short)
+        || (root.panel-kf && !ReviewVm.fullscreen);
+    // Letting go counts as activity. Not for the reason fcc6 had (there the
+    // Rust clock was stale): while pinned `idle` is stopped and `shown`
+    // normally stays true, so a fresh 3 s starts by itself -- except in the
+    // fade window, where the band is still rendered with `shown` false and a
+    // Tab into it is held up by the pin alone; the focus leaving would then
+    // drop it at once.
+    changed band-key-focus => {
+        if (!self.band-key-focus) {
+            root.poke();
+        }
+    }
+
+    changed controls-visible => {
+        if (root.controls-visible) {
+            root.controls-rendered = true;
+        }
+    }
+
+    function poke() {
+        root.controls-shown = true;
+        idle.restart();
+    }
+
+    // Space / m / s / rate / frame / arrows / Escape all land here.
+    // Explicit size: a FocusScope wrapping a layout otherwise re-sizes to the
+    // layout's preferred height when a conditional child appears, which parked
+    // the whole pane-foot mid-screen the moment the status line showed.
+    fs := FocusScope {
+        width: 100%;
+        height: 100%;
+        // Not a Tab stop (t260928-d9b4): it draws no ring, and Esc brings the
+        // focus home from any control.
+        focus-on-tab-navigation: false;
+
+        // Nothing else hands a fresh FocusScope key focus, and the pane is
+        // re-instantiated every time the 確認 rail opens, so without this the
+        // shortcuts stay dead until the user happens to click the stage.
+        init => {
+            self.focus();
+        }
+
+        // The shell's overlay dialogs take focus while open (task142).
+        property <bool> shell-overlay: root.overlay-open;
+        changed shell-overlay => {
+            if (!self.shell-overlay) {
+                self.focus();
+            }
+        }
+
+        // A rename field takes focus and takes it to the grave; claim it back.
+        property <bool> renaming: root.editing-marker >= 0;
+        changed renaming => {
+            if (!self.renaming) {
+                self.focus();
+            }
+        }
+
+        // The band fades out while playing, and a hidden control's focus is
+        // dropped for good on the next key (slint resets it to nobody), which
+        // would leave Space dead. Every control the band hides is the band's
+        // own -- the panel pins it up while open -- so take the focus home
+        // first (t260928-d9b4).
+        property <bool> band-up: root.controls-visible;
+        changed band-up => {
+            if (!self.band-up && !self.has-focus) {
+                self.focus();
+            }
+        }
+        property <bool> rate-pinned: root.rate-menu-pinned;
+        changed rate-pinned => {
+            if (!self.rate-pinned && root.rate-menu-keyboard) {
+                root.rate-menu-keyboard = false;
+                self.focus();
+            }
+        }
+
+        key-pressed(event) => {
+            root.poke();
+            // A rate menu pinned open closes on Esc before anything else.
+            if (event.text == Key.Escape && root.rate-menu-pinned) {
+                root.rate-menu-pinned = false;
+                return accept;
+            }
+            // Enter saves the clip (t260927-7d08): the primary's Keycap
+            // (DS ReviewScreen 「クリップに保存」 primary、Enter).
+            if (event.text == Key.Return) {
+                root.save-clip();
+                return accept;
+            }
+            if (ReviewVm.key-pressed-cb(event.text, event.modifiers.shift, event.repeat)) {
+                return accept;
+            }
+            // Esc with a control holding the focus and nothing left to close
+            // (Rust answered false): the focus comes back to the pane, so
+            // Space plays again (t260928-d9b4).
+            if (event.text == Key.Escape && !self.has-focus) {
+                self.focus();
+                return accept;
+            }
+            return reject;
+        }
+
+        key-released(event) => {
+            ReviewVm.key-released-cb(event.text);
+            return accept;
+        }
+
+        HorizontalLayout {
+            // ---------- stage + its band ----------
+            stage-area := Rectangle {
+                horizontal-stretch: 1;
+                clip: true;
+
+                // The height the picture gets: the whole column while the band
+                // floats over it, the column less the band once it docks
+                // underneath (t260927-77b8, user ruling 2026-09-27). `dock`
+                // slides between the two with the panel, so the picture shrinks
+                // as the band slides out from under it.
+                property <length> stage-h: stage-area.height - root.band-h * root.dock;
+                // Where the picture actually is inside the stage (round5
+                // §4-A-2). The floating band hangs off *this* box, not the
+                // pane's edge: in a letterboxed session a bar pinned to the
+                // pane floats in the black, detached from the video it drives.
+                property <length> video-width:
+                    min(stage-area.width, stage-area.stage-h * ReviewVm.stage-aspect);
+                property <length> video-height:
+                    min(stage-area.stage-h, stage-area.width / ReviewVm.stage-aspect);
+                property <length> video-y: (stage-area.stage-h - stage-area.video-height) / 2;
+
+                // The picture's drawn size, reported so the engine can resample
+                // frames to it (task990). `init` as well as `changed`: an
+                // engine starts with an empty target and its first frames
+                // would go out full-size waiting for a resize that may never
+                // come.
+                //
+                // Only while the band is at rest (t260927-77b8 決めたこと 2):
+                // the panel's slide changes the size every frame, and each change
+                // would rebuild the GPU stage's target for a size that is gone
+                // a frame later. The pane's `changed dock-settled` sends the
+                // size the slide ended on; a window resize with the band at
+                // rest still comes through here.
+                init => {
+                    ReviewVm.stage-size-changed(stage-area.video-width, stage-area.video-height);
+                }
+                changed video-width => {
+                    if (root.dock-settled) {
+                        ReviewVm.stage-size-changed(stage-area.video-width, stage-area.video-height);
+                    }
+                }
+                changed video-height => {
+                    if (root.dock-settled) {
+                        ReviewVm.stage-size-changed(stage-area.video-width, stage-area.video-height);
+                    }
+                }
+
+                stage := ReviewStage {
+                    width: 100%;
+                    height: stage-area.stage-h;
+                    video-width: stage-area.video-width;
+                    video-height: stage-area.video-height;
+                    // Only a floating band covers the picture.
+                    bottom-inset: root.controls-visible
+                        ? (overlay.height + stage-area.video-y) * (1 - root.dock)
+                        : 0px;
+                    request-focus => {
+                        fs.focus();
+                    }
+                    activity => {
+                        root.poke();
+                    }
+                }
+
+                // ---------- minimized message (round7 §2-7, DS Stage) ----------
+                // Centred in the picture less a floating band: the text sits in
+                // the middle of what is actually free. A `stage-veil` card.
+                if ReviewVm.minimized-visible: Rectangle {
+                    x: (stage-area.width - stage-area.video-width) / 2;
+                    y: stage-area.video-y;
+                    width: stage-area.video-width;
+                    height: stage-area.video-height - root.band-h * (1 - root.dock);
+
+                    Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: min(parent.width - 32px, minimized-layout.preferred-width);
+                        height: minimized-layout.preferred-height;
+                        border-radius: Tokens.radius-md;
+                        background: Tokens.stage-veil;
+
+                        minimized-layout := VerticalLayout {
+                            padding-left: 20px;
+                            padding-right: 20px;
+                            padding-top: 14px;
+                            padding-bottom: 14px;
+                            spacing: 4px;
+
+                            Text {
+                                text: ReviewVm.minimized-title;
+                                horizontal-alignment: center;
+                                font-size: 13px;
+                                font-weight: 600;
+                                color: Tokens.on-stage;
+                            }
+
+                            Text {
+                                text: ReviewVm.minimized-body;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                                font-size: 12px;
+                                color: Tokens.on-stage-muted;
+                            }
+                        }
+                    }
+                }
+
+                // ---------- full screen exit pill (round7 §2-8) ----------
+                // The only chrome left in full screen: the title bar and the
+                // rail are hidden by `app.slint`, so without this there is
+                // nothing on screen that says how to get back. A `stage-veil`
+                // plate with the stage Keycap (DS).
+                if ReviewVm.fullscreen: Rectangle {
+                    x: parent.width - self.width - 12px;
+                    y: 12px;
+                    width: fsexit-row.preferred-width;
+                    height: 28px;
+                    border-radius: Tokens.radius-full;
+                    background: Tokens.stage-veil;
+
+                    fsexit-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            ReviewVm.fullscreen-toggled();
+                        }
+                    }
+
+                    // A Tab stop (t260928-d9b4).
+                    PressFocus {
+                        ring-radius: 14px;
+                        pressed => {
+                            ReviewVm.fullscreen-toggled();
+                        }
+                    }
+
+                    fsexit-row := HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 6px;
+                        spacing: 8px;
+                        alignment: center;
+
+                        Text {
+                            text: ReviewVm.fullscreen-exit-label;
+                            vertical-alignment: center;
+                            font-size: 12px;
+                            color: fsexit-touch.has-hover ? Tokens.on-stage : Tokens.on-stage-muted;
+                        }
+
+                        Keycap {
+                            y: (parent.height - self.height) / 2;
+                            keys: ["Esc"];
+                            size: ControlSize.sm;
+                            tone: KeycapTone.stage;
+                        }
+                    }
+                }
+
+                // The stage's LIVE tally and its stop moved into the transport's
+                // live frame (t260928-88a2, user ruling 2026-09-28).
+
+                // ---------- the band: Timeline + TransportBar (task151) ----------
+                // Docked under the picture while the panel is out, floating on
+                // its bottom edge while the panel is in (t260927-77b8, user
+                // ruling 2026-09-27). `dock` interpolates the rect between the
+                // two; the ground and the part colours cross over with it.
+                //
+                // Every control is a *descendant* of `overlay-hover`, not a
+                // sibling stacked on top of it. TouchArea sets `has-hover` in
+                // `input_event_filter_before_children`, so an ancestor keeps
+                // its hover while events travel down to a child -- but a
+                // merely-overlapping sibling gets an Exit and loses it.
+                // Nesting is what keeps the bar pinned while the pointer rests
+                // on a button.
+                overlay := Rectangle {
+                    property <length> float-x: (stage-area.width - stage-area.video-width) / 2;
+                    // Where the floating band comes to rest: the picture's
+                    // bottom edge with the panel all the way in. Taken at that
+                    // end rather than from the picture of the moment, which
+                    // grows taller mid-slide while the panel narrows it -- that
+                    // dipped the band ~8px past its rest and back (measured on
+                    // three frames across the slide, t260927-77b8).
+                    property <length> float-y:
+                        (stage-area.height
+                            + min(stage-area.height,
+                                (stage-area.width + root.panel-w * root.dock) / ReviewVm.stage-aspect)) / 2
+                        - self.height;
+                    property <length> dock-y: stage-area.height - self.height;
+                    x: self.float-x * (1 - root.dock);
+                    width: stage-area.video-width + (stage-area.width - stage-area.video-width) * root.dock;
+                    height: root.band-h;
+                    y: self.float-y + (self.dock-y - self.float-y) * root.dock;
+                    visible: root.controls-rendered;
+                    opacity: root.controls-visible ? 1.0 : 0.0;
+                    // DS motion tokens (t260928-ac18): 0 under reduced motion.
+                    animate opacity {
+                        duration: Tokens.duration-base;
+                        easing: Motion.easing-exit;
+                    }
+
+                    // Floating: black from below, so the parts read on any
+                    // picture. Docked: the panel's `surface`, no edge -- the
+                    // stage's black and the surface part them (DS, t260928-ac18).
+                    Rectangle {
+                        background: @linear-gradient(180deg, #00000000 0%, #000000c4 55%, #000000e0 100%);
+                        opacity: 1 - root.dock;
+                    }
+
+                    Rectangle {
+                        background: Tokens.surface;
+                        opacity: root.dock;
+                    }
+
+                    overlay-hover := TouchArea {
+                        width: 100%;
+                        height: 100%;
+
+                        // DS `.lb-review__controls`: 8 / 20, a 2px gap.
+                        overlay-layout := VerticalLayout {
+                            width: 100%;
+                            padding-top: 8px;
+                            padding-left: 20px;
+                            padding-right: 20px;
+                            padding-bottom: 8px;
+                            spacing: 2px;
+
+                            // ---------- the track ----------
+                            // The hover preview draws at negative y, so the
+                            // band must not clip.
+                            track-wrap := ReviewTrackWrap {
+                                dock: root.dock;
+
+                                request-focus => {
+                                    fs.focus();
+                                }
+                            }
+
+                            // ---------- the TransportBar (DS, t260927-77b8) ----------
+                            // 48px, 12 between groups, 4 inside one. Left to
+                            // right: frame back / play / frame forward / repeat
+                            // · position / total · the lag ─ stretch ─ range
+                            // start / end, add marker, rate, volume, LiveButton
+                            // · full screen / panel. The range jumps stay until
+                            // the panel's start / end values take them over
+                            // (t260927-7d08); they sit with the tools on the
+                            // right so the DS's own order reads unbroken.
+                            //
+                            // Named so the rate menu, which lives up on the
+                            // stage, can add this row's offset to the rate
+                            // button's (task340).
+                            transport := HorizontalLayout {
+                                height: 48px;
+                                spacing: 12px;
+                                // Below 900px of stage the lag and the volume
+                                // slider fold (DS NarrowWindow / TransportBar):
+                                // the lag moves into LiveButton's tip.
+                                property <bool> short: stage-area.width < 900px;
+
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    horizontal-stretch: 0;
+
+                                    step-back-btn := TransportBtn {
+                                        y: (parent.height - self.height) / 2;
+                                        dock: root.dock;
+                                        icon: Icons.step-back;
+                                        tip: root.tip(0);
+                                        keys: [","];
+                                        clicked => {
+                                            // A pointer press hands the pane its keys back; a key
+                                            // press leaves the focus on the button (t260928-d9b4).
+                                            if (!self.key-focused) {
+                                                fs.focus();
+                                            }
+                                            ReviewVm.key-pressed-cb(",", false, false);
+                                        }
+                                    }
+
+                                    // The one filled control: an `ink` disc
+                                    // (white on the stage). No press shrink
+                                    // (task3300); hover moves the ground only.
+                                    play := Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: 36px;
+                                        height: 36px;
+                                        border-radius: 18px;
+                                        background: root.tone(Tokens.ink, Dark.on-stage)
+                                            .with-alpha(play-touch.has-hover ? 0.86 : 1.0);
+                                        animate background {
+                                            duration: Tokens.duration-fast;
+                                            easing: Motion.easing-standard;
+                                        }
+
+                                        play-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                ReviewVm.play-toggled();
+                                            }
+                                        }
+
+                                        // A Tab stop (t260928-d9b4).
+                                        play-keys := PressFocus {
+                                            ring-radius: 18px;
+                                            pressed => {
+                                                ReviewVm.play-toggled();
+                                            }
+                                        }
+
+                                        AppIcon {
+                                            commands: ReviewVm.playing ? Icons.pause : Icons.play;
+                                            active: play-touch.has-hover || play-keys.has-focus;
+                                            stroke-color: ReviewVm.playing
+                                                ? root.tone(Tokens.canvas, #000000)
+                                                : transparent;
+                                            fill-color: ReviewVm.playing
+                                                ? transparent
+                                                : root.tone(Tokens.canvas, #000000);
+                                            size: 20px;
+                                        }
+
+                                        Tooltip {
+                                            x: (parent.width - self.width) / 2;
+                                            y: -self.height - 6px;
+                                            armed: play-touch.has-hover;
+                                            label: root.tip(ReviewVm.playing ? 2 : 1);
+                                            shortcut: ["Space"];
+                                        }
+                                    }
+
+                                    step-fwd-btn := TransportBtn {
+                                        y: (parent.height - self.height) / 2;
+                                        dock: root.dock;
+                                        icon: Icons.step-forward;
+                                        tip: root.tip(3);
+                                        keys: ["."];
+                                        clicked => {
+                                            // A pointer press hands the pane its keys back; a key
+                                            // press leaves the focus on the button (t260928-d9b4).
+                                            if (!self.key-focused) {
+                                                fs.focus();
+                                            }
+                                            ReviewVm.key-pressed-cb(".", false, false);
+                                        }
+                                    }
+
+                                    // Not while recording (t260926-cc7e): the
+                                    // selection follows the live edge there.
+                                    if !ReviewVm.live-edge-visible: TransportBtn {
+                                        changed key-focused => {
+                                            root.repeat-kf = self.key-focused;
+                                        }
+                                        y: (parent.height - self.height) / 2;
+                                        dock: root.dock;
+                                        icon: Icons.repeat;
+                                        on: ReviewVm.repeat-enabled;
+                                        tip: root.tip(4);
+                                        clicked => {
+                                            ReviewVm.repeat-toggled();
+                                        }
+                                    }
+                                }
+
+                                // ---------- where you are (DS Timecode md) ----------
+                                // One box, one target: it toggles elapsed /
+                                // remaining from anywhere in it (task149).
+                                // Mono, so a digit never changes the width; the
+                                // position is still pinned to the widest string
+                                // it can hold (the total, with the remaining
+                                // time's minus) so the toggle moves nothing
+                                // either (task660).
+                                clock := Rectangle {
+                                    width: clock-row.preferred-width;
+
+                                    clock-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            ReviewVm.time-display-toggled();
+                                        }
+                                    }
+
+                                    // A Tab stop (t260928-d9b4).
+                                    clock-keys := PressFocus {
+                                        ring-radius: Tokens.radius-xs;
+                                        pressed => {
+                                            ReviewVm.time-display-toggled();
+                                        }
+                                    }
+
+                                    position-measure := Text {
+                                        opacity: 0;
+                                        text: "−" + (ReviewVm.total-text == "" ? "0:00" : ReviewVm.total-text);
+                                        font-family: Tokens.font-family-mono;
+                                        font-size: Tokens.type-tc-size;
+                                        font-weight: Tokens.type-tc-weight;
+                                    }
+
+                                    clock-row := HorizontalLayout {
+                                    Text {
+                                        width: position-measure.preferred-width;
+                                        text: ReviewVm.position-text;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                        font-family: Tokens.font-family-mono;
+                                        font-size: Tokens.type-tc-size;
+                                        font-weight: Tokens.type-tc-weight;
+                                        color: root.tone(Tokens.ink, Dark.on-stage);
+                                    }
+
+                                    Text {
+                                        text: ReviewVm.position-frac;
+                                        vertical-alignment: center;
+                                        font-family: Tokens.font-family-mono;
+                                        font-size: Tokens.type-tc-size;
+                                        font-weight: Tokens.type-tc-weight;
+                                        color: root.tone(Tokens.ink-faint, Dark.on-stage-muted);
+                                    }
+
+                                    Text {
+                                        text: " / ";
+                                        vertical-alignment: center;
+                                        font-family: Tokens.font-family-mono;
+                                        font-size: Tokens.type-tc-size;
+                                        font-weight: Tokens.type-tc-weight;
+                                        color: root.tone(Tokens.ink-faint, Dark.on-stage-muted);
+                                    }
+
+                                    Text {
+                                        text: ReviewVm.total-text;
+                                        vertical-alignment: center;
+                                        font-family: Tokens.font-family-mono;
+                                        font-size: Tokens.type-tc-size;
+                                        font-weight: Tokens.type-tc-weight;
+                                        color: clock-touch.has-hover
+                                            ? root.tone(Tokens.ink, Dark.on-stage)
+                                            : root.tone(Tokens.ink-muted, Dark.on-stage-muted);
+                                    }
+
+                                    Text {
+                                        text: ReviewVm.total-frac;
+                                        vertical-alignment: center;
+                                        font-family: Tokens.font-family-mono;
+                                        font-size: Tokens.type-tc-size;
+                                        font-weight: Tokens.type-tc-weight;
+                                        color: root.tone(Tokens.ink-faint, Dark.on-stage-muted);
+                                    }
+                                    }
+                                }
+
+                                // ---------- the live frame (t260928-88a2) ----------
+                                // LiveButton, the lag and the stage's tally +
+                                // stop, merged into one frame right of the
+                                // clock (user ruling 2026-09-28). Following:
+                                // a lit, inert LIVE. Behind: the lag, and a
+                                // press goes back to the edge (End). The stop
+                                // sits beside it in both, so it never needs
+                                // a trip back to the edge first. Stopping:
+                                // 停止中… and nothing to press. Shown when
+                                // narrow too: the frame IS the lag now.
+                                if ReviewVm.live-edge-visible || ReviewVm.live-stopping: HorizontalLayout {
+                                    spacing: 4px;
+                                    horizontal-stretch: 0;
+
+                                    if ReviewVm.live-stopping: Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: stopping-text.preferred-width + 22px;
+                                        height: 28px;
+                                        border-radius: Tokens.radius-full;
+                                        background: root.tone(Tokens.fill, #ffffff1a);
+
+                                        stopping-text := Text {
+                                            text: ReviewVm.live-chip-text;
+                                            vertical-alignment: center;
+                                            font-size: Tokens.type-overline-size;
+                                            font-weight: Tokens.type-overline-weight;
+                                            color: root.tone(Tokens.ink-muted, Dark.on-stage-muted);
+                                        }
+                                    }
+
+                                    if !ReviewVm.live-stopping: live-button := Rectangle {
+                                        property <bool> following: ReviewVm.live-following;
+                                        // Its PressFocus sits among siblings; read it here and write it
+                                        // back to root (t260929-7937).
+                                        property <bool> kf: live-keys.has-focus;
+                                        changed kf => {
+                                            root.live-kf = self.kf;
+                                        }
+                                        y: (parent.height - self.height) / 2;
+                                        width: live-row.preferred-width;
+                                        height: 28px;
+                                        border-radius: Tokens.radius-full;
+                                        background: self.following
+                                            ? root.tone(Tokens.live-soft, Dark.live-soft)
+                                            : live-touch.has-hover
+                                                ? root.tone(Tokens.fill-hover, #ffffff24)
+                                                : root.tone(Tokens.fill, #ffffff1a);
+                                        animate background {
+                                            duration: Tokens.duration-fast;
+                                            easing: Motion.easing-standard;
+                                        }
+
+                                        live-touch := TouchArea {
+                                            enabled: !live-button.following;
+                                            mouse-cursor: live-button.following ? default : pointer;
+                                            clicked => {
+                                                ReviewVm.follow-live-clicked();
+                                            }
+                                        }
+
+                                        // A Tab stop (t260928-d9b4).
+                                        live-keys := PressFocus {
+                                            enabled: !live-button.following;
+                                            ring-radius: 14px;
+                                            pressed => {
+                                                ReviewVm.follow-live-clicked();
+                                            }
+                                        }
+
+                                        live-row := HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 11px;
+                                            spacing: 7px;
+                                            alignment: center;
+
+                                            TallyLamp {
+                                                y: (parent.height - self.height) / 2;
+                                                // Behind: the `off` dot. The ring
+                                                // means standby in the DS, and the
+                                                // recording is still running
+                                                // (t260928-ac18, review 06 F19).
+                                                state: live-button.following ? TallyState.live : TallyState.off;
+                                            }
+
+                                            if live-button.following: Text {
+                                                text: "LIVE";
+                                                vertical-alignment: center;
+                                                font-family: Tokens.font-family-mono;
+                                                font-size: Tokens.type-overline-size;
+                                                font-weight: Tokens.type-overline-weight;
+                                                letter-spacing: Tokens.type-overline-letter-spacing;
+                                                color: root.tone(Tokens.live-text, Dark.live-text);
+                                            }
+
+                                            // The lag, `−m:ss` and its `.t`,
+                                            // after the history glyph (DS
+                                            // `history` = `Icons.sessions`,
+                                            // t260928-ac18, review 06 F18).
+                                            if !live-button.following: HorizontalLayout {
+                                                spacing: 4px;
+
+                                                AppIcon {
+                                                    y: (parent.height - self.height) / 2;
+                                                    commands: Icons.sessions;
+                                                    stroke-color: live-touch.has-hover
+                                                        ? root.tone(Tokens.ink, Dark.on-stage)
+                                                        : root.tone(Tokens.ink-muted, Dark.on-stage-muted);
+                                                    size: Tokens.size-icon-sm;
+                                                }
+
+                                                Text {
+                                                    text: ReviewVm.live-behind-text;
+                                                    vertical-alignment: center;
+                                                    font-family: Tokens.font-family-mono;
+                                                    font-size: Tokens.type-mono-size;
+                                                    font-weight: Tokens.type-label-weight;
+                                                    color: live-touch.has-hover
+                                                        ? root.tone(Tokens.ink, Dark.on-stage)
+                                                        : root.tone(Tokens.ink-muted, Dark.on-stage-muted);
+                                                }
+
+                                                Text {
+                                                    text: ReviewVm.live-behind-frac;
+                                                    vertical-alignment: center;
+                                                    font-family: Tokens.font-family-mono;
+                                                    font-size: Tokens.type-mono-size;
+                                                    font-weight: Tokens.type-label-weight;
+                                                    color: root.tone(Tokens.ink-faint, Dark.on-stage-muted);
+                                                }
+                                            }
+                                        }
+
+                                        Tooltip {
+                                            x: 0;
+                                            y: -self.height - 6px;
+                                            armed: live-touch.has-hover && !live-button.following;
+                                            label: root.tip(11) + " · " + root.tip(16);
+                                            shortcut: ["End"];
+                                        }
+                                    }
+
+                                    if ReviewVm.live-chip-visible && !ReviewVm.live-stopping: TransportBtn {
+                                        changed key-focused => {
+                                            root.stop-kf = self.key-focused;
+                                        }
+                                        y: (parent.height - self.height) / 2;
+                                        dock: root.dock;
+                                        icon: Icons.stop;
+                                        tip: ReviewVm.stop-button-label;
+                                        clicked => {
+                                            ReviewVm.stop-requested();
+                                        }
+                                    }
+                                }
+
+                                Rectangle { horizontal-stretch: 1; }
+
+                                tail := HorizontalLayout {
+                                    spacing: 4px;
+                                    horizontal-stretch: 0;
+
+                                    // The rate: the multiplier in mono, and a
+                                    // Menu on hover (task238, kept) or press
+                                    // (t260928-ac18: a press holds it open).
+                                    // Its menu lives up on the stage -- see
+                                    // `rate-menu` for why the slot could not
+                                    // hold it (task340). Left of the marker
+                                    // button, and a button's 32 tall so its
+                                    // hover ground's top lines up with theirs
+                                    // (t260928-88a2: at 28 it read as a dent).
+                                    rate-slot := Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        // Fixed (task620): a slot that follows
+                                        // its label moved everything to its
+                                        // right on every rate change.
+                                        width: 52px;
+                                        height: 32px;
+                                        border-radius: Tokens.radius-sm;
+                                        background: root.rate-menu-open || rate-chip.has-hover
+                                            ? root.tone(Tokens.fill-hover, #ffffff24)
+                                            : transparent;
+
+                                        rate-chip := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.rate-menu-pinned = !root.rate-menu-pinned;
+                                            }
+                                        }
+
+                                        // A Tab stop (t260928-d9b4).
+                                        rate-keys := PressFocus {
+                                            ring-radius: Tokens.radius-sm;
+                                            pressed => {
+                                                root.rate-menu-pinned = !root.rate-menu-pinned;
+                                                root.rate-menu-keyboard = root.rate-menu-pinned;
+                                            }
+                                        }
+
+                                        Text {
+                                            text: ReviewVm.rate-text;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            font-family: Tokens.font-family-mono;
+                                            font-size: Tokens.type-mono-size;
+                                            font-weight: Tokens.type-label-weight;
+                                            color: root.rate-menu-open || rate-chip.has-hover
+                                                ? root.tone(Tokens.ink, Dark.on-stage)
+                                                : root.tone(Tokens.ink-muted, Dark.on-stage);
+                                        }
+                                    }
+
+                                    marker-btn := TransportBtn {
+                                        y: (parent.height - self.height) / 2;
+                                        dock: root.dock;
+                                        icon: Icons.marker;
+                                        tip: root.tip(7);
+                                        keys: ReviewVm.marker-hotkey;
+                                        clicked => {
+                                            ReviewVm.add-marker();
+                                        }
+                                    }
+
+                                    mute-btn := TransportBtn {
+                                        y: (parent.height - self.height) / 2;
+                                        dock: root.dock;
+                                        icon: ReviewVm.muted ? Icons.volume-muted : Icons.volume;
+                                        tip: root.tip(ReviewVm.muted ? 10 : 9);
+                                        keys: ["M"];
+                                        clicked => {
+                                            ReviewVm.mute-toggled();
+                                        }
+                                    }
+
+                                    if !transport.short: VolumeRail {
+                                        changed key-focused => {
+                                            root.vol-kf = self.key-focused;
+                                        }
+                                        y: (parent.height - self.height) / 2;
+                                        width: 72px;
+                                        height: 28px;
+                                        ratio: ReviewVm.volume-ratio;
+                                        muted: ReviewVm.muted;
+                                        dock: root.dock;
+                                        ratio-changed(value) => {
+                                            ReviewVm.volume-changed(value);
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        width: 9px;
+                                        Rectangle {
+                                            x: 4px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 1px;
+                                            height: 20px;
+                                            background: root.tone(Tokens.line-strong, #ffffff3d);
+                                        }
+                                    }
+
+                                    full-btn := TransportBtn {
+                                        y: (parent.height - self.height) / 2;
+                                        dock: root.dock;
+                                        icon: ReviewVm.fullscreen ? Icons.fullscreen-exit : Icons.fullscreen;
+                                        tip: root.tip(ReviewVm.fullscreen ? 13 : 12);
+                                        keys: ReviewVm.fullscreen ? ["Esc"] : ["F"];
+                                        tip-end: true;
+                                        clicked => {
+                                            ReviewVm.fullscreen-toggled();
+                                        }
+                                    }
+
+                                    // There is no panel to toggle in full
+                                    // screen -- it folds away on the way in and
+                                    // comes back on the way out (task1030) --
+                                    // so no button either (DS TransportBar,
+                                    // t260928-ac18).
+                                    if !ReviewVm.fullscreen: TransportBtn {
+                                        changed key-focused => {
+                                            root.panel-kf = self.key-focused;
+                                        }
+                                        y: (parent.height - self.height) / 2;
+                                        dock: root.dock;
+                                        icon: Icons.panel;
+                                        on: ReviewVm.panel-open;
+                                        tip: root.tip(ReviewVm.panel-open ? 15 : 14);
+                                        tip-end: true;
+                                        clicked => {
+                                            ReviewVm.panel-toggled(!ReviewVm.panel-open);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Slint hit-tests a transparent element as readily as an
+                    // opaque one, so for the fade the bar spends going out it
+                    // is still catching clicks the user can barely see -- a
+                    // half-gone stop button is not something to press by
+                    // accident. Last child, so it is over all of them; a click
+                    // brings the bar back instead of reaching one (task1020).
+                    if !root.controls-visible: TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => {
+                            root.poke();
+                        }
+                    }
+                }
+
+                // ---------- the rate menu (task148, rehomed by task340) ----------
+                // A sibling of `overlay`, not a child of the rate button's
+                // slot: the menu opens upward, outside the slot, the transport
+                // row *and* the band -- and slint's hit test does not descend
+                // past an ancestor whose rect does not contain the point
+                // (task238's menu that drew and could never be hovered).
+                //
+                // Positioned by summing named elements down the chain, reading
+                // `overlay.y`. `stage-area` clips, so both
+                // axes are parked inside it. The DS Menu's face: `overlay`,
+                // 8px corners, a `line-strong` edge, 28px rows.
+                // Pinned open by a press: a press anywhere else on the stage
+                // closes it, and goes no further.
+                if root.rate-menu-pinned: TouchArea {
+                    clicked => {
+                        root.rate-menu-pinned = false;
+                    }
+                }
+
+                // The shared DS Menu (t260928-ac18, review 06 F22), the current
+                // rate checked. Always there and shown by `visible`, not an
+                // `if`: `rate-menu-hovered` reads it from outside.
+                rate-menu := ContextMenu {
+                    x: Math.min(
+                        stage-area.width - self.width,
+                        overlay.x + transport.x + tail.x + rate-slot.x
+                            + (rate-slot.width - self.width) / 2);
+                    // `space-1` (4px) above the button (t260928-88a2). The gap
+                    // belongs to no TouchArea; `rate-menu-grace` holds the
+                    // menu open while the pointer crosses it.
+                    y: Math.max(0px,
+                        overlay.y + transport.y + tail.y + rate-slot.y - self.height - Tokens.space-1);
+                    visible: root.rate-menu-open;
+                    entries: ReviewVm.rate-labels;
+                    checked-index: ReviewVm.rate-index;
+                    keyboard: root.rate-menu-keyboard;
+                    // ×2 … ×0.25 in a 248 box was mostly empty (t260929-40a4).
+                    fit-content: true;
+                    chosen(i) => {
+                        root.rate-menu-pinned = false;
+                        ReviewVm.rate-selected(i);
+                    }
+                }
+            }
+
+            // ---------- right panel (DS ReviewScreen, t260927-7d08) ----------
+            // Tabs (書き出し / マーカー) over a body that scrolls, and the
+            // 自動録画 plate as a floor under both that does not. Always
+            // instantiated and animated to zero width rather than created
+            // conditionally: a conditional child re-solves the layout around it
+            // and drops whatever state lived inside (task127).
+            panel := Rectangle {
+                // `dock`, not its own animation (t260927-77b8): the band and
+                // the stage slide on the same number, so they land together.
+                width: root.panel-w * root.dock;
+                clip: true;
+                background: Tokens.surface;
+
+                // DS `box-shadow: inset 1px 0 0 line`.
+                Rectangle {
+                    x: 0;
+                    width: 1px;
+                    height: 100%;
+                    background: Tokens.line;
+                }
+
+                // Laid out at the panel's full width whatever the slide has
+                // reached, so nothing reflows while it runs; `clip` crops it.
+                Rectangle {
+                    x: 1px;
+                    width: root.panel-w - 1px;
+                    height: 100%;
+
+                    // ---------- tabs: 20 either side, a `line` under ----------
+                    Rectangle {
+                        y: 0;
+                        height: 40px;
+
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Tokens.line;
+                        }
+
+                        Tabs {
+                            x: Tokens.space-5;
+                            width: parent.width - 2 * Tokens.space-5;
+                            tabs: ReviewVm.panel-tabs;
+                            counts: ["", ReviewVm.marker-count-text];
+                            selected: root.panel-tab;
+                            selected-changed(index) => {
+                                root.panel-tab = index;
+                            }
+                        }
+                    }
+
+                    // ---------- the body: 16 / 20, scrolls ----------
+                    panel-scroll := AppScroll {
+                        y: 40px;
+                        width: 100%;
+                        height: parent.height - 40px - root.floor-h;
+                        // The panel is flush to the client's right edge, so
+                        // its lane sits in the resize band too (task4320).
+                        right-inset: Tokens.resize-band-inset;
+                        viewport-width: panel-scroll.visible-width;
+                        viewport-height: Math.max(panel-scroll.visible-height,
+                            root.panel-tab == 0 ? export-body.height : marker-body.height);
+
+                        // task3430's ground: a press between the rows ends an
+                        // open marker rename. Declared first so every control
+                        // above it keeps its own presses.
+                        if root.editing-marker >= 0: TouchArea {
+                            x: 0;
+                            y: 0;
+                            width: panel-scroll.visible-width;
+                            height: panel-scroll.viewport-height;
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    root.editing-marker = -1;
+                                }
+                            }
+                        }
+
+                        // ---------- 書き出し ----------
+                        // `visible` rather than `if`: the button slot's rect
+                        // is read from pane level (the progress bar), and an id
+                        // inside an `if` cannot be.
+                        export-body := Rectangle {
+                            visible: root.panel-tab == 0;
+                            y: 0;
+                            width: panel-scroll.visible-width;
+                            height: export-layout.preferred-height;
+
+                            export-layout := VerticalLayout {
+                                // The right 20 less `AppScroll`'s 12px lane,
+                                // which it always reserves.
+                                padding-top: Tokens.space-4;
+                                padding-bottom: Tokens.space-4;
+                                padding-left: Tokens.space-5;
+                                padding-right: Tokens.space-5 - 12px;
+                                spacing: Tokens.space-5;
+                                alignment: start;
+
+                                property <length> fill:
+                                    self.width - self.padding-left - self.padding-right;
+
+                                // 範囲: overline and hint, the presets, the box.
+                                VerticalLayout {
+                                    spacing: Tokens.space-3;
+
+                                    HorizontalLayout {
+                                        Overline {
+                                            text: ReviewVm.range-overline;
+                                        }
+
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                        }
+
+                                        Text {
+                                            text: ReviewVm.range-hint;
+                                            vertical-alignment: center;
+                                            font-size: Tokens.type-caption-size;
+                                            color: Tokens.ink-faint;
+                                        }
+                                    }
+
+                                    // Lit only while the range is exactly that
+                                    // preset and ends on the playhead (Rust,
+                                    // `tl::selected_preset`).
+                                    SegmentTabs {
+                                        width: export-layout.fill;
+                                        stretch: true;
+                                        segments: ReviewVm.range-presets;
+                                        selected: ReviewVm.range-preset-index;
+                                        selected-changed(index) => {
+                                            ReviewVm.range-preset-clicked(index);
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        border-radius: Tokens.radius-md;
+                                        border-width: 1px;
+                                        border-color: Tokens.line;
+                                        background: Tokens.sunken;
+
+                                        // The cells carry 8px of their own,
+                                        // so 4 + 8 keeps the box's 12. 長さ
+                                        // has a row of its own: past an hour
+                                        // the three did not fit 280 (t260928-88a2).
+                                        VerticalLayout {
+                                            padding: Tokens.space-1;
+                                            spacing: 0;
+
+                                            HorizontalLayout {
+                                                spacing: Tokens.space-1;
+
+                                                Timecode {
+                                                    horizontal-stretch: 0;
+                                                    size: ControlSize.sm;
+                                                    label: ReviewVm.range-start-label;
+                                                    whole: ReviewVm.range-start-text;
+                                                    frac: ReviewVm.range-start-frac;
+                                                    seekable: ReviewVm.has-range;
+                                                    sync-tip: ReviewVm.has-range ? ReviewVm.range-start-playhead-hint : "";
+                                                    pressed => {
+                                                        ReviewVm.jump-range(true);
+                                                    }
+                                                    synced => {
+                                                        ReviewVm.range-set-to-playhead(true);
+                                                    }
+                                                }
+
+                                                // DS `.lb-export__arrow`: chevron-right 16 in
+                                                // `ink-faint` (t260928-bae5 F10).
+                                                VerticalLayout {
+                                                    alignment: end;
+                                                    padding-bottom: Tokens.space-1;
+
+                                                    AppIcon {
+                                                        commands: Icons.caret;
+                                                        size: 16px;
+                                                        stroke-color: Tokens.ink-faint;
+                                                    }
+                                                }
+
+                                                Timecode {
+                                                    horizontal-stretch: 0;
+                                                    size: ControlSize.sm;
+                                                    label: ReviewVm.range-end-label;
+                                                    whole: ReviewVm.range-end-text;
+                                                    frac: ReviewVm.range-end-frac;
+                                                    seekable: ReviewVm.has-range;
+                                                    sync-tip: ReviewVm.has-range ? ReviewVm.range-end-playhead-hint : "";
+                                                    pressed => {
+                                                        ReviewVm.jump-range(false);
+                                                    }
+                                                    synced => {
+                                                        ReviewVm.range-set-to-playhead(false);
+                                                    }
+                                                }
+
+                                                Rectangle {
+                                                    horizontal-stretch: 1;
+                                                }
+                                            }
+
+                                            Timecode {
+                                                label: ReviewVm.range-length-label;
+                                                whole: ReviewVm.range-length-text;
+                                                frac: ReviewVm.range-length-frac;
+                                                size: ControlSize.lg;
+                                                accent: true;
+                                                right: true;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // The comment and the buttons.
+                                VerticalLayout {
+                                    spacing: Tokens.space-3;
+
+                                    TextField {
+                                        label: ReviewVm.clip-comment-label;
+                                        placeholder: ReviewVm.clip-comment-placeholder;
+                                        hint: ReviewVm.clip-comment-hint;
+                                        text <=> ReviewVm.clip-comment;
+                                        accepted => {
+                                            root.save-clip();
+                                        }
+                                        escaped => {
+                                            fs.focus();
+                                        }
+                                        // A press anywhere else hands the keyboard
+                                        // back to the pane, and the press still does
+                                        // what it does -- one click saves the clip
+                                        // (t260929-40a4). The draft stays in `text`.
+                                        property <int> window-press: ReviewVm.window-press-tick;
+                                        changed window-press => {
+                                            if (self.field-focused
+                                                && !self.contains(ReviewVm.window-press-x, ReviewVm.window-press-y)) {
+                                                fs.focus();
+                                            }
+                                        }
+                                    }
+
+                                    // The primary over the pair. While a job
+                                    // runs the slot keeps its height and the
+                                    // progress bar is drawn over it from pane
+                                    // level, on top of the block-out.
+                                    export-slot := VerticalLayout {
+                                        spacing: Tokens.space-3;
+
+                                        Rectangle {
+                                            visible: !ReviewVm.export-busy;
+                                            height: Tokens.size-control-lg;
+
+                                            Btn {
+                                                width: parent.width;
+                                                height: parent.height;
+                                                label: ReviewVm.clip-label;
+                                                icon: Icons.scissors;
+                                                primary: true;
+                                                size: ControlSize.lg;
+                                                // Right after the label (DS `.lb-keys`, t260928-bae5 F8).
+                                                keys: ["Enter"];
+                                                disabled: !ReviewVm.export-enabled;
+                                                clicked => {
+                                                    root.save-clip();
+                                                }
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            visible: !ReviewVm.export-busy;
+                                            height: Tokens.size-control-md;
+
+                                        HorizontalLayout {
+                                            spacing: Tokens.space-2;
+
+                                            Btn {
+                                                width: (export-layout.fill - Tokens.space-2) / 2;
+                                                label: ReviewVm.export-label;
+                                                icon: Icons.export;
+                                                disabled: !ReviewVm.export-enabled;
+                                                clicked => {
+                                                    ReviewVm.export-start();
+                                                }
+                                            }
+
+                                            // No frame on the stage, nothing to save:
+                                            // disabled, with the reason under the pair
+                                            // (t260928-e309 F17, DS 知らせ方「いまできない理由」).
+                                            Btn {
+                                                width: (export-layout.fill - Tokens.space-2) / 2;
+                                                label: ReviewVm.screenshot-label;
+                                                icon: Icons.screenshot;
+                                                disabled: !ReviewVm.stage-has-frame;
+                                                clicked => {
+                                                    ReviewVm.screenshot-save();
+                                                }
+                                            }
+                                        }
+                                        }
+
+                                        if !ReviewVm.export-busy && !ReviewVm.stage-has-frame: Text {
+                                            text: ReviewVm.screenshot-unavailable;
+                                            font-size: 12px;
+                                            color: Tokens.ink-muted;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+
+                                // 音声: only with two tracks or more -- one
+                                // track would be a copy of the master slider.
+                                if ReviewVm.audio-tracks.length > 1: VerticalLayout {
+                                    spacing: Tokens.space-3;
+
+                                    Overline {
+                                        text: ReviewVm.mixer-section-label;
+                                    }
+
+                                    for track[index] in ReviewVm.audio-tracks: MixerRow {
+                                        name: track.name;
+                                        volume-ratio: track.volume-ratio;
+                                        muted: track.muted;
+                                        volume-changed(ratio) => {
+                                            ReviewVm.track-volume-changed(index, ratio);
+                                        }
+                                        mute-toggled => {
+                                            ReviewVm.track-mute-toggled(index);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ---------- マーカー (DS MarkerList) ----------
+                        marker-body := Rectangle {
+                            visible: root.panel-tab == 1;
+                            y: 0;
+                            width: panel-scroll.visible-width;
+                            height: marker-layout.preferred-height;
+
+                            marker-layout := VerticalLayout {
+                                padding-top: Tokens.space-4;
+                                padding-bottom: Tokens.space-4;
+                                padding-left: Tokens.space-5;
+                                padding-right: Tokens.space-5 - 12px;
+                                spacing: 2px;
+                                alignment: start;
+
+                                // 「＋ マーカーを追加」 (t260928-88a2): the
+                                // transport's button, here too, empty or not.
+                                marker-add-row := HorizontalLayout {
+                                    alignment: start;
+                                    padding-bottom: Tokens.space-2;
+
+                                    Btn {
+                                        label: root.tip(7);
+                                        icon: Icons.plus;
+                                        size: ControlSize.sm;
+                                        clicked => {
+                                            ReviewVm.add-marker();
+                                        }
+                                    }
+                                }
+
+                                // Empty: the hotkey as the settings hold it,
+                                // and that it works from inside the game.
+                                if ReviewVm.marker-rows.length == 0: Rectangle {
+                                    border-radius: Tokens.radius-md;
+                                    background: Tokens.fill;
+
+                                    VerticalLayout {
+                                        padding: Tokens.space-3;
+                                        spacing: Tokens.space-2;
+
+                                        Text {
+                                            text: ReviewVm.markers-empty-text;
+                                            font-size: Tokens.type-label-size;
+                                            font-weight: Tokens.type-label-weight;
+                                            color: Tokens.ink;
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 6px;
+
+                                            if ReviewVm.marker-hotkey.length > 0: VerticalLayout {
+                                                alignment: center;
+
+                                                Keycap {
+                                                    keys: ReviewVm.marker-hotkey;
+                                                }
+                                            }
+
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: ReviewVm.markers-empty-note;
+                                                wrap: word-wrap;
+                                                vertical-alignment: center;
+                                                font-size: Tokens.type-caption-size;
+                                                color: Tokens.ink-muted;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                for row[index] in ReviewVm.marker-rows: MarkerListRow {
+                                    entry: row;
+                                    editing: root.editing-marker == index;
+                                    current: ReviewVm.marker-current == index;
+                                    clicked => {
+                                        ReviewVm.marker-clicked(index);
+                                    }
+                                    rename-requested => {
+                                        // The buttons go with the row's edit
+                                        // state, so the tip they raised goes too.
+                                        root.marker-hint = "";
+                                        root.editing-marker = index;
+                                    }
+                                    renamed(value) => {
+                                        root.editing-marker = -1;
+                                        ReviewVm.marker-renamed(index, value);
+                                    }
+                                    rename-cancelled => {
+                                        root.editing-marker = -1;
+                                    }
+                                    removed => {
+                                        root.marker-hint = "";
+                                        root.editing-marker = -1;
+                                        ReviewVm.marker-removed(index);
+                                    }
+                                    ranged => {
+                                        ReviewVm.marker-ranged(index);
+                                    }
+                                    hint-hovered(words, on, row-bottom) => {
+                                        if on {
+                                            root.marker-hint-anchor-y = row-bottom;
+                                        }
+                                        root.marker-hint = on ? words : "";
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---------- the floor: 起動したら自動で録画 ----------
+                    // Under either tab and outside the scroll, so it stays
+                    // put however long the body is (DS ReviewScreen). Not
+                    // an `if`, so the body can read its height; a session
+                    // with no recorded executable folds it to nothing.
+                    floor := Rectangle {
+                        visible: ReviewVm.autorec-visible;
+                        y: parent.height - self.height;
+                        height: ReviewVm.autorec-visible ? floor-layout.preferred-height : 0px;
+
+                        floor-layout := VerticalLayout {
+                            padding-top: Tokens.space-3;
+                            padding-left: Tokens.space-5;
+                            padding-right: Tokens.space-5;
+                            padding-bottom: Tokens.space-4;
+
+                            // DS `.lb-autorec`: a `sunken` plate, `line` that
+                            // lifts to `line-strong` on hover, and the whole
+                            // plate is the switch.
+                            Rectangle {
+                                border-radius: Tokens.radius-md;
+                                border-width: 1px;
+                                border-color: autorec-touch.has-hover ? Tokens.line-strong : Tokens.line;
+                                // DS `duration-fast` (t260928-bae5 F15).
+                                animate border-color {
+                                    duration: Tokens.duration-fast;
+                                    easing: Motion.easing-standard;
+                                }
+                                background: Tokens.sunken;
+
+                                // t260926-e49b: where the toast has to stay
+                                // above.
+                                property <length> abs-top: self.absolute-position.y;
+                                init => {
+                                    ReviewVm.autorec-top = self.abs-top;
+                                }
+                                changed abs-top => {
+                                    ReviewVm.autorec-top = self.abs-top;
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    padding-top: 10px;
+                                    padding-bottom: 10px;
+                                    spacing: Tokens.space-3;
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+
+                                        Text {
+                                            text: ReviewVm.autorec-label;
+                                            overflow: elide;
+                                            font-size: Tokens.type-label-size;
+                                            font-weight: Tokens.type-body-strong-weight;
+                                            color: Tokens.ink;
+                                        }
+
+                                        Text {
+                                            text: ReviewVm.autorec-body;
+                                            wrap: word-wrap;
+                                            font-size: Tokens.type-caption-size;
+                                            color: Tokens.ink-muted;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+
+                                        Switch {
+                                            label: ReviewVm.autorec-label;
+                                            checked: ReviewVm.autorec-on;
+                                            toggled => {
+                                                ReviewVm.autorec-toggled();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Last, so it covers the switch too and the
+                                // whole plate answers one click.
+                                autorec-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        ReviewVm.autorec-toggled();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // The marker rows' tip, under the row that raised it and
+                    // clamped inside the panel (task3420).
+                    Tooltip {
+                        x: Math.max(Tokens.space-5, parent.width - Tokens.space-5 - self.width);
+                        y: Math.clamp(
+                            root.marker-hint-anchor-y - parent.absolute-position.y + 6px,
+                            14px, parent.height - self.height - 14px);
+                        armed: root.marker-hint != "";
+                        label: root.marker-hint;
+                    }
+                }
+            }
+        }
+
+        // 3 seconds of nothing hides the bar; anything at all brings it back.
+        // Stopped whenever the bar is pinned, so an un-hover starts a fresh
+        // countdown rather than resuming a half-spent one.
+        idle := Timer {
+            interval: 3s;
+            running: root.controls-shown && !root.controls-pinned;
+            triggered => {
+                root.controls-shown = false;
+            }
+        }
+
+        // Runs only for the length of the fade-out, and stops itself by
+        // clearing the very condition that keeps it running.
+        // The band's own fade, `duration-base`; 1ms rather than 0 under
+        // reduced motion so the timer still fires once.
+        fade-out := Timer {
+            interval: Tokens.reduce-motion ? 1ms : Tokens.duration-base;
+            running: !root.controls-visible && root.controls-rendered;
+            triggered => {
+                root.controls-rendered = false;
+            }
+        }
+    }
+
+    // ---------- export block-out (task2130, round9 §2) ----------
+    // A running export owns the screen: the mock (`.exportov`) covers the whole
+    // window in rgba(5,7,10,.55) and leaves the progress row alone on top.
+    // Declared after `fs`, so it paints over everything the pane holds -- stage,
+    // transport, rate menu, panel -- and its TouchArea takes every hit that
+    // would otherwise reach them. The title bar and the rail carry their own
+    // copies (`app.slint`): slint has no z-index, so a single window-wide cover
+    // would bury the row with everything else, and the only way to keep the row
+    // reachable is to lay the cover in pieces that tile the window and draw the
+    // row after them.
+    // DS `scrim` for both themes (t260928-bae5 F14); was rgba(5,7,10,.55).
+    if ReviewVm.export-busy: Rectangle {
+        background: Tokens.scrim;
+
+        // Swallows anything aimed at the pane behind it, the way the
+        // confirmation dialog's scrim does (`controls.slint`).
+        TouchArea { }
+    }
+
+    // The progress bar, over the cover (the mock's `.prog` is z-31 against
+    // the cover's z-30) -- cancel is the only way to stop a job, so it is the
+    // one control the block-out must not take. Drawn at pane level on a
+    // `surface` plate, where the buttons were (`export-slot` holds their
+    // place in the panel and hands over the rect: DS ReviewScreen 「書き出し中
+    // は、ボタンの位置に ProgressBar」). Clamped to the panel's own band, so
+    // cancel stays reachable wherever the panel is scrolled to (task3110).
+    if ReviewVm.export-busy: Rectangle {
+        x: export-slot.absolute-position.x - root.absolute-position.x - 8px;
+        y: Math.clamp(
+            export-slot.absolute-position.y - root.absolute-position.y - 8px,
+            panel.absolute-position.y - root.absolute-position.y,
+            panel.absolute-position.y - root.absolute-position.y
+                + panel.height - self.height);
+        width: export-slot.width + 16px;
+        height: export-progress.preferred-height + 16px;
+        border-radius: Tokens.radius-md;
+        background: Tokens.surface;
+
+        export-progress := ProgressBar {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            value: ReviewVm.export-percent / 100;
+            label: ReviewVm.export-running-text;
+            cancellable: true;
+            cancel-label: ReviewVm.export-cancel-label;
+            cancel => {
+                ReviewVm.export-cancel();
+            }
+        }
+    }
+}

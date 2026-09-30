@@ -1,0 +1,426 @@
+// The review pane's view-model global and track-model structs, split from
+// review.slint so the stage/track components can reference them without a
+// circular import. Everything time-valued stays in Rust: 100ns ticks do not
+// fit slint's 32-bit int, so the model carries percents and ratios only, and
+// callbacks hand back ratios or model row indices.
+
+import { MenuEntry } from "controls.slint";
+
+// A span on the track, in percent of its width.
+export struct TrackSpan {
+    left: float,
+    width: float,
+}
+
+// A gap, plus what to draw for it. `single` is decided in Rust from the track's
+// pixel width (`ui_state::timeline::gap_mark`): under 4px there is no room for
+// a rule at each edge and the pair collapses into one.
+export struct GapSpan {
+    left: float,
+    width: float,
+    single: bool,
+}
+
+export struct MarkerSpan {
+    left: float,
+    // Which row of `marker-rows` this bar is. The bar only draws the markers
+    // the viewport can reach, so its own loop index is not the list index the
+    // click callbacks speak in.
+    row: int,
+    // The bar's hover label (t260927-77b8, DS Timeline): the marker's name
+    // and its time, the same strings the panel's row carries.
+    label: string,
+    time: string,
+}
+
+// One tick of the track's ruler (t260927-77b8), from
+// `ui_state::timeline::ruler_ticks`. `label` is empty on a minor tick and on a
+// major one too close to the right edge to hold its words.
+export struct RulerTick {
+    percent: float,
+    major: bool,
+    label: string,
+}
+
+// One row of the right panel's marker list. One colour since t260927-7d08
+// (DS MarkerList: `marker` only), so the row carries no palette slot.
+export struct MarkerRow {
+    // The timecode split at its `.t` (t260928-bae5): `0:06` and `.2`.
+    time: string,
+    frac: string,
+    label: string,
+}
+
+/// One row of the track mixer (task1300).
+export struct MixerTrack {
+    name: string,
+    volume-ratio: float,
+    muted: bool,
+}
+
+export global ReviewVm {
+    // ---------- track model (computed in Rust per render) ----------
+    in-out property <[TrackSpan]> segments;
+    in-out property <[GapSpan]> gaps;
+    in-out property <float> played-percent;
+    in-out property <float> buffered-percent;
+    // The ring is full and its old end is being overwritten (t260928-2f77,
+    // DS Timeline `overwriting`): the left 5% of the groove dissolves.
+    in-out property <bool> overwriting;
+    in-out property <bool> has-range;
+    in-out property <float> range-start-percent;
+    in-out property <float> range-end-percent;
+    in-out property <bool> range-start-handle-visible;
+    in-out property <bool> range-end-handle-visible;
+    in-out property <[MarkerSpan]> markers;
+    in-out property <bool> live-visible;
+    // Pinned to the right edge only when the live edge really is the right
+    // edge; under zoom it sits where its time falls.
+    in-out property <bool> live-pinned;
+    in-out property <float> live-percent;
+    in-out property <bool> playhead-visible;
+    in-out property <float> playhead-percent;
+    in-out property <bool> dragging;
+    // The track's own width in px, reported back so Rust can decide how each
+    // gap is drawn. A pure function cannot know a layout's pixels otherwise,
+    // and the alternative -- comparing widths in `.slint` -- would put the rule
+    // somewhere no test can reach it.
+    callback track-resized(float);
+
+    // ---------- hover preview ----------
+    in-out property <bool> hover-visible;
+    in-out property <float> hover-anchor;
+    in-out property <string> hover-time;
+    in-out property <image> hover-thumbnail;
+    in-out property <bool> hover-has-thumbnail;
+
+    // ---------- video stage (task128) ----------
+    in-out property <image> stage-frame;
+    in-out property <bool> stage-has-frame;
+    // A loaded session whose first frame has not arrived (task239). Decided by
+    // `ui_state::playback::stage_loading`, not derived here, so the rule about
+    // standing down for the other stage marks has a test.
+    in-out property <bool> stage-loading;
+    // Width / height of the recording, so the stage can hold the shape it was
+    // recorded in (round5 §4-A-2). 16:9 until a frame says otherwise.
+    in-out property <float> stage-aspect: 1.7777778;
+    // How big the picture is actually being drawn, in logical pixels (task990).
+    // Rust turns it into physical pixels and the playback engine resamples each
+    // frame to it, so what reaches skia is already the size it is drawn at
+    // instead of a 1440p frame minified bilinearly with no mipmaps.
+    callback stage-size-changed(length, length);
+    // Rung by Rust when the window moves to a monitor at another scale: the
+    // logical size can stay put, so `stage-size-changed` never fires and the
+    // target would keep the old factor (t260918-b743).
+    callback stage-rescaled();
+    // 0 none, 1 tap, 2 hold, 3 clamped, 4 gap, 5 buffering.
+    in-out property <int> stage-feedback-kind;
+    // The mark's opacity gate (task1020). Rust drops this first and clears the
+    // kind above only once the fade has run, so the circle goes out with its
+    // glyph still in it -- and the keyboard's ±seek fades the same way a tap
+    // does instead of staying up until something replaces it.
+    in-out property <bool> stage-feedback-shown;
+    in-out property <bool> stage-feedback-backward;
+    in-out property <string> stage-feedback-seconds;
+    in-out property <int> stage-feedback-dots;
+    in-out property <string> stage-feedback-line;
+    in-out property <bool> stage-hint-visible;
+    in-out property <string> stage-hint-text;
+    in-out property <string> stage-zone-seconds;
+    // t260926-cc7e Sync Mode, drawn since t260927-77b8 as the DS
+    // TransportBar's LiveButton and lag: `live-edge-visible` for as long as
+    // the stage session records, `live-following` lights the button and hides
+    // the lag. Rust decides all of it.
+    in-out property <bool> live-edge-visible;
+    in-out property <bool> live-following;
+    // `−m:ss` and its `.t`, how far the playhead is behind the live edge.
+    // Empty while following.
+    in-out property <string> live-behind-text;
+    in-out property <string> live-behind-frac;
+    // The stage's LIVE capsule (task237, round8 §1). Rust alone decides
+    // whether it exists, from `ui_state::lifecycle::live_chip` (recording /
+    // stopping of the staged session); nothing on the slint side -- hover
+    // included -- writes it back (t260913-a18d).
+    in-out property <bool> live-chip-visible;
+    // The word it wears: LIVE, or 停止中… once a stop is in flight. Nothing
+    // hovers it (round7 §2-3) -- the verb sits beside it in the same capsule.
+    in-out property <string> live-chip-text;
+    // A stop is in flight: the stop button gives way to 「停止中…」
+    // (`live-chip-text`) and the tally keeps saying LIVE (t260927-77b8).
+    in-out property <bool> live-stopping;
+    // The stage capsule's 「■ 停止」 half (round8 §1). Was the title bar's
+    // button until round8 moved the verb onto the stage.
+    in-out property <string> stop-button-label;
+    // round7 §2-7 / §2-8: the message shown while the captured window is
+    // minimized, and the full screen exit pill's wording.
+    in-out property <bool> minimized-visible;
+    in-out property <string> minimized-title;
+    in-out property <string> minimized-body;
+    in-out property <string> fullscreen-exit-label;
+    // The four `stop-confirm-*` properties that stood here are gone with the
+    // dialog itself (task2030 判断4): every stop is immediate now.
+    // Where the press landed relative to the *picture's* top-left corner, and
+    // how big the picture is: Rust drops the ones that missed it and splits
+    // the rest into zones by the picture's width (task1010). The whole stage
+    // is still the hit area so the letterbox keeps waking the overlay, but
+    // only the picture answers a gesture.
+    callback stage-pressed(length, length, length, length);
+    callback stage-released();
+    callback stage-cancelled();
+    // The engine thread rings this through the event loop; the bin-side
+    // handler pulls the frame mailbox and updates the scalars.
+    callback frame-ready();
+
+    // ---------- transport ----------
+    in-out property <bool> playing;
+    // Timecodes (t260927-77b8, DS Timecode): the whole part, and the `.t`
+    // tail the DS draws faint -- slint cannot split a string.
+    in-out property <string> position-text;
+    in-out property <string> position-frac;
+    in-out property <string> total-text;
+    in-out property <string> total-frac;
+    // The track's ruler (t260927-77b8).
+    in-out property <[RulerTick]> ruler-ticks;
+    // The transport's tooltip words, in `ui_state::playback::transport_tips`
+    // order (t260927-77b8).
+    in-out property <[string]> transport-tips;
+    // The marker hotkey, one Keycap per key (t260928-ac18: the DS Keycap
+    // never draws the `+`), for the add-marker tip and the panel's empty
+    // markers note.
+    in-out property <[string]> marker-hotkey;
+    in-out property <string> rate-text;
+    // The rate chip's menu: every selectable rate as the shared Menu's rows,
+    // and which row is current (its check).
+    in-out property <[MenuEntry]> rate-labels;
+    in-out property <int> rate-index;
+    in-out property <float> volume-ratio;
+    in-out property <bool> muted;
+    // ---------- track mixer (task1300) ----------
+    // One row per recorded audio track, in track order. Empty for a recording
+    // with a single track, which is every recording made before task1260 --
+    // the panel section is absent entirely for those.
+    in-out property <[MixerTrack]> audio-tracks;
+    in property <string> mixer-section-label;
+    // Borderless full screen (task151 draws the button, task152 wires it).
+    in-out property <bool> fullscreen;
+    in-out property <bool> repeat-enabled;
+
+    // ---------- right detail panel (round5 §4-D) ----------
+    in-out property <bool> panel-open: true;
+    in-out property <string> panel-toggle-label;
+    // The panel's tabs (t260927-7d08, DS ReviewScreen): 書き出し / マーカー,
+    // and the marker count the second one wears ("" for none).
+    in-out property <[string]> panel-tabs;
+    in-out property <string> marker-count-text;
+    // The export tab's overline and its hint.
+    in-out property <string> range-overline;
+    in-out property <string> range-hint;
+    in-out property <string> range-start-label;
+    in-out property <string> range-end-label;
+    in-out property <string> range-length-label;
+    // 開始 / 終了's 「再生位置へ合わせる」 buttons' tips (t260928-88a2).
+    in-out property <string> range-start-playhead-hint;
+    in-out property <string> range-end-playhead-hint;
+    // DS Timecode: the whole part and the faint `.t` tail travel apart.
+    in-out property <string> range-start-text;
+    in-out property <string> range-start-frac;
+    in-out property <string> range-end-text;
+    in-out property <string> range-end-frac;
+    in-out property <string> range-length-text;
+    in-out property <string> range-length-frac;
+    // 全体 then the 15 / 30 / 60 秒 presets (`ui_state::timeline::
+    // range_preset_labels`) and which one reads as selected, -1 for none
+    // (`ui_state::timeline::range_preset_index`, t260929-40a4).
+    in-out property <[string]> range-presets;
+    in-out property <int> range-preset-index: -1;
+    // The marker row's three hover buttons' tips.
+    in-out property <string> marker-range-hint;
+    in-out property <string> marker-rename-hint;
+    in-out property <string> marker-delete-hint;
+    in-out property <string> marker-hold-hint;
+    // The row of the marker at or just before the playhead, -1 for none
+    // (DS MarkerList: `marker-soft`).
+    in-out property <int> marker-current: -1;
+    // A pin on the track was pressed (t260928-88a2): the pane opens the
+    // panel on マーカー and scrolls `marker-focus-row` into view. A counter,
+    // so pressing the same pin twice still reaches the pane.
+    in-out property <int> marker-focus-row: -1;
+    in-out property <int> marker-focus-token;
+    // task1060's range-edit mode, and task3860's 確定ステップ after it, are
+    // gone (t260927-7d08, user ruling 2026-09-27): the handles are live
+    // whenever there is a range.
+    //
+    // A band drag is in flight (task3160). Pins the control bar, exactly as
+    // `dragging` does for a track scrub -- the bar fading out from under a
+    // gesture the user is in the middle of is the same bug either way.
+    in-out property <bool> range-dragging;
+    in-out property <string> markers-empty-text;
+    in-out property <string> markers-empty-note;
+    in-out property <[MarkerRow]> marker-rows;
+    callback panel-toggled(bool);
+    // (row, new name). The row indexes `marker-rows`, which is the same order
+    // and the same list `markers` is drawn from.
+    callback marker-renamed(int, string);
+    callback marker-removed(int);
+    // task3050: 前後 30 秒を範囲に, from the same row index.
+    callback marker-ranged(int);
+
+    // ---------- 起動時に自動録画 (round13 §1) ----------
+    // The panel's bottom row: the one door into `autoCaptureExecutables`, now
+    // that the picker tile's badge only reports. Everything here is derived in
+    // `ui_state::auto_capture::review_toggle` -- the row draws, it does not
+    // decide. Hidden when the session names no executable (monitor recordings
+    // and everything made before task2350).
+    in-out property <bool> autorec-visible;
+    // t260926-e49b: the card's top edge in window coordinates, pushed from
+    // `review.slint` on `changed` (a global cannot bind to geometry). The
+    // toast in `app.slint` sits above it while the card is on screen.
+    in-out property <length> autorec-top;
+    in-out property <bool> autorec-on;
+    /// The recorded target's filename, stashed so the settings screen's × can
+    /// re-derive `autorec-on` without reaching into the review state. Nothing
+    /// draws it -- `autorec-body` is the text.
+    in-out property <string> autorec-executable;
+    /// That executable's full image path, resolved from a running process of
+    /// it (task3670), and empty when nothing by that name is running. Stashed
+    /// beside the name and for the same reason: the settings screen's folder
+    /// handlers have to answer "is this session covered by a folder rule"
+    /// without a borrow of the review, and resolving it is a process-list walk
+    /// that must not happen per render. Nothing draws it either.
+    in-out property <string> autorec-image-path;
+    in-out property <string> autorec-label;
+    in-out property <string> autorec-body;
+    callback autorec-toggled();
+
+    // ---------- labels (set once from ui_state::timeline) ----------
+    in-out property <string> marker-placeholder;
+    // A pin on the track with no name (「名前なし」, t260928-ac18).
+    in-out property <string> marker-unnamed;
+    in-out property <string> export-label;
+
+    // ---------- empty state (round5 §4-A) ----------
+    // round7 §2-6: one caption, two lines. The two cards (and W-3 / W-4 with
+    // them) are gone.
+    in-out property <string> empty-title;
+    in-out property <string> empty-body;
+    in-out property <string> empty-action;
+    // t260927-9865: the drifting scene's phases, 0..1 each, written by the
+    // drift timer in `shell.rs` -- at most 60 times a second, and not at all
+    // while the screen is hidden or motion is reduced. Never `animation-tick()`:
+    // that presents at the monitor's refresh rate for as long as it is read.
+    in-out property <float> drift-back;
+    in-out property <float> drift-front;
+    in-out property <float> drift-pulse;
+    // 「対象を選ぶ」: opens the capture flyout (never closes it).
+    callback pick-target();
+
+    // ---------- export / screenshot (task129) ----------
+    in-out property <bool> export-busy;
+    in-out property <bool> export-enabled;
+    in-out property <string> export-running-text;
+    // 0..100, for the progress bar the mock draws beside the text.
+    in-out property <float> export-percent;
+    in-out property <string> export-cancel-label;
+    in-out property <string> screenshot-label;
+    // Why 静止画 is disabled: no frame on the stage (t260928-e309 F17).
+    in-out property <string> screenshot-unavailable;
+    /// Written files of the last completed job. Nothing draws them since
+    /// task169 -- they are what the toast's reveal button opens.
+    in-out property <[string]> export-paths;
+
+    // ---------- クリップに保存 (task2970, t260927-7d08) ----------
+    // The comment field is always on the export tab now (DS ReviewScreen):
+    // its text lives here so Rust can empty it once a save starts, and so a
+    // tab switch does not lose the draft.
+    in-out property <string> clip-comment;
+    in-out property <string> clip-label;
+    in-out property <string> clip-comment-label;
+    in-out property <string> clip-comment-placeholder;
+    in-out property <string> clip-comment-hint;
+    // A preset was pressed: its index into `range-presets`. 0 is 全体, the
+    // whole range as a load opens it (t260929-40a4); the others set end = the
+    // playhead, start = N seconds before it. Nothing is saved.
+    callback range-preset-clicked(int);
+    // A left press anywhere in the window, rung by Rust's winit filter once
+    // slint has handled it: the tick counts presses, x / y are where it landed
+    // in window coordinates. The comment field above reads it to hand the
+    // keyboard back when a press lands outside it (t260929-40a4) -- no slint
+    // `TouchArea` takes the focus, so without this only Esc and the stage did.
+    in-out property <int> window-press-tick;
+    in-out property <length> window-press-x;
+    in-out property <length> window-press-y;
+
+    // ---------- the marker rename, seen from the shell (task3640) ----------
+    // Read-only as far as everything outside `ReviewPane` is concerned: the
+    // rename's real state is `ReviewPane`'s own `editing-marker`, and this is a
+    // mirror of `editing-marker >= 0` that the pane publishes so `app.slint`
+    // can fold it into the "is any inline edit open" flag its overlay hangs on.
+    //
+    // A mirror rather than a move. `editing-marker` is local on purpose --
+    // leaving 確認 destroys the pane and the rename goes with it, for free.
+    // Nothing resets a global, so this one can be left true by a pane that is
+    // gone; `app.slint` reads it only while 確認 is the showing pane, which is
+    // what makes the stale value unreachable rather than merely unlikely.
+    in-out property <bool> marker-editing;
+
+    // ---------- callbacks ----------
+    // (ratio, shift). Shift starts a sweep: the press is one end of a new
+    // range and the drag the other (t260928-88a2).
+    callback track-pressed(float, bool);
+    callback track-moved(float, bool);
+    callback track-released(float);
+    callback track-exited();
+    // Pointer-cancel mid-drag: abandon the gesture without seeking.
+    callback track-cancelled();
+    // (cursor ratio, delta-y, ctrl, shift) -> handled
+    callback track-wheel(float, float, bool, bool) -> bool;
+    callback track-double-clicked();
+    // (0 = start handle, 1 = end handle, absolute track ratio, shift).
+    // Shift carries the playhead along with the handle (t260928-88a2).
+    callback handle-moved(int, float, bool);
+    // The band's drag started / ended (task3160). The int is `sel.mode`:
+    // 0 = 開始端, 1 = 終了端, 2 = 移動. On release it is **-1 when the
+    // gesture never moved** -- a plain press the band passes through as a
+    // seek, or a cancelled pointer -- which tells Rust to put the transport
+    // back without carrying the playhead anywhere.
+    callback range-drag-changed(bool, int);
+    // Seeks to that marker. It used to open a popover on the bar; the panel's
+    // list replaced that, so a click on the bar is now only a jump.
+    callback marker-clicked(int);
+    callback play-toggled();
+    // The capsule's stop was pressed. It stops the session on the stage and
+    // only that one (task2030 判断5), with no confirmation (判断4).
+    callback stop-requested();
+    // Clicking the clock swaps elapsed for remaining, like YouTube's.
+    callback time-display-toggled();
+    // Moves the playhead to the selection's start / end without changing it:
+    // the panel's 開始 / 終了 values, pressed (t260927-7d08).
+    callback jump-range(bool);
+    // 開始 (true) / 終了 (false) to the playhead: `i` / `o` as buttons.
+    callback range-set-to-playhead(bool);
+    callback add-marker();
+    callback rate-selected(int);
+    callback volume-changed(float);
+    callback mute-toggled();
+    /// (track index, 0.0-1.0). The master volume above is unchanged by these.
+    callback track-volume-changed(int, float);
+    callback track-mute-toggled(int);
+    callback fullscreen-toggled();
+    callback repeat-toggled();
+    // The Sync Mode chip's 「>> 最新へ」 (t260926-cc7e).
+    callback follow-live-clicked();
+    // Rung from the export pipeline's thread through the event loop.
+    callback export-changed();
+    callback export-start();
+    // 「クリップに保存」, Enter in the comment field, or Enter on the pane
+    // (t260927-7d08). Rust refuses it without a range or while a job runs.
+    callback clip-committed(string);
+    callback export-cancel();
+    callback export-reveal(string);
+    callback screenshot-save();
+    // (key text, shift, repeat) -> handled
+    callback key-pressed-cb(string, bool, bool) -> bool;
+    // (key text). Release of a transport key arms the precise settle
+    // seek (task2540).
+    callback key-released-cb(string);
+}

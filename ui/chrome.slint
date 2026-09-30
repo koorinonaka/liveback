@@ -1,0 +1,200 @@
+// The window chrome split out of app.slint: the caption buttons and the rail.
+//
+// The status bar and the diagnostics drawer that lived here are gone (task169,
+// round5 §3-C): a permanent 26px strip cost the review pane height forever, and
+// the eight measured values it carried never answered a question the user was
+// actually asking. What is left of "tell me something happened" is the `Toast`
+// in the bottom-right corner.
+
+import { Tokens, Motion } from "tokens.slint";
+import { Icons, AppIcon, CaptionIcon } from "icons.slint";
+import { TallyLamp, PressFocus } from "controls.slint";
+
+export component CaptionButton inherits Rectangle {
+    in property <string> commands;
+    in property <bool> danger;
+    callback clicked;
+    // The key focus is on it: the title bar drops for it as for the pointer
+    // (DS TitleBar README, t260928-d9b4).
+    out property <bool> key-focused: keys.has-focus;
+
+    // The DS `.lb-winbtn` (t260927-4c04 決めたこと 6): 46 wide, the bar's full
+    // height. Full height matters: chrome-overrides.css records that a
+    // half-pixel vertical offset let the top device-pixel row hit-test past
+    // the button, which is exactly where users aim on a maximized window.
+    width: 46px;
+    height: 100%;
+    // Hover takes `fill-hover`; close takes `window-close` and a white glyph,
+    // as Windows does. The DS names no pressed look, so the press keeps the
+    // hover colour.
+    background: touch.has-hover || touch.pressed
+        ? (root.danger ? Tokens.window-close : Tokens.fill-hover)
+        : transparent;
+    // t260925-c93b: hover eases between the rungs instead of snapping.
+    animate background {
+        duration: Tokens.duration-fast;
+        easing: Motion.easing-standard;
+    }
+
+    touch := TouchArea {
+        // The arrow, not the hand: the one exception to this shell's
+        // 「押せる所はすべて手」 rule (637da3f4). The DS `.lb-winbtn` is
+        // `cursor: default`, as native Windows caption buttons are
+        // (t260928-b780, DS review 04 F6).
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // A Tab stop (t260928-d9b4). The ring is inset: the button is the bar's
+    // full height, so 2px outside it would fall off the bar's top.
+    keys := PressFocus {
+        // ponytail: 2px taller than the button. The retracted bar sits at
+        // y = -(height + 1px), wholly above the window, and slint's Tab walk
+        // skips an item it judges off screen -- this lets its bottom edge
+        // reach row 0, so Tab still finds the buttons and the bar comes
+        // down for them. The ring's bottom inset is 2px rather than 4.
+        y: 0;
+        height: root.height + 2px;
+        ring-gap: -4px;
+        ring-radius: Tokens.radius-sm;
+        pressed => {
+            root.clicked();
+        }
+    }
+
+    CaptionIcon {
+        commands: root.commands;
+        // `.lb-winbtn` is `ink` at rest; the close red turns it `on-danger`.
+        stroke-color: root.danger && (touch.has-hover || touch.pressed) ? Tokens.on-danger : Tokens.ink;
+        animate stroke-color {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+}
+
+
+// A rail item, the DS `.lb-nav__item` (t260927-4c04): 64 x 58 -- 8 in,
+// a 44 x 24 icon box, 4, an 11 / 14 label, 8 in. It paints no "current" ground
+// of its own: the rail's one cursor slides under it. `open` is キャプチャ's
+// look while its flyout is out (the box takes `accent-soft`); `live` puts the
+// recording lamp on the box's shoulder.
+export component RailButton inherits Rectangle {
+    in property <string> commands;
+    in property <string> label;
+    in property <bool> current;
+    in property <bool> open;
+    in property <bool> live;
+    // What the lamp means, for its tooltip (the caller's) and the screen
+    // reader: 「録画中」 / 「3 本を録画中」 (DS Tally `dot`, t260928-b780 F8).
+    in property <string> live-label;
+    out property <bool> has-hover: touch.has-hover;
+    callback clicked;
+
+    width: 64px;
+    height: 58px;
+    border-radius: Tokens.radius-md;
+
+    accessible-role: button;
+    accessible-label: root.live && root.live-label != "" ? root.label + " " + root.live-label : root.label;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    // Hover takes `fill` on any item but the current one (the cursor is
+    // already its ground), the press `fill-pressed` (DS README 押下,
+    // t260928-b780 F14; still no press motion -- Version 14 took that away).
+    // On its own child so it can ease without the switch to `current` easing
+    // too (t260925-c93b).
+    Rectangle {
+        border-radius: root.border-radius;
+        background: root.current
+            ? transparent
+            : touch.pressed ? Tokens.fill-pressed : touch.has-hover ? Tokens.fill : transparent;
+        animate background {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+
+    property <bool> lit: touch.has-hover || keys.has-focus || root.current || root.open;
+    property <color> label-ink: root.lit ? Tokens.ink : Tokens.ink-muted;
+    property <color> icon-ink: root.current || root.open ? Tokens.accent-text : root.label-ink;
+    // The glyph's colour eases with the label's (DS `.lb-nav__item` `color`,
+    // the icon being currentColor; t260928-b780 F7). `AppIcon` does not
+    // interpolate its own stroke, so the easing lives here.
+    property <color> icon-tint: root.icon-ink;
+    animate icon-tint {
+        duration: Tokens.duration-fast;
+        easing: Motion.easing-standard;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // A Tab stop (t260928-d9b4).
+    keys := PressFocus {
+        ring-radius: root.border-radius;
+        pressed => {
+            root.clicked();
+        }
+    }
+
+    box := Rectangle {
+        x: (root.width - self.width) / 2;
+        y: 8px;
+        width: 44px;
+        height: 24px;
+        border-radius: Tokens.radius-sm;
+        background: root.open ? Tokens.accent-soft : transparent;
+        animate background {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+
+        AppIcon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            commands: root.commands;
+            active: touch.has-hover || keys.has-focus;
+            stroke-color: root.icon-tint;
+            size: 20px;
+        }
+
+        // `.lb-nav__lamp`: 7 x 7, 1 down and 8 in from the box's top right.
+        // The one thing on screen that blinks (Tally README).
+        if root.live: TallyLamp {
+            x: parent.width - 8px - self.width;
+            y: 1px;
+            width: 7px;
+            height: 7px;
+            border-radius: 3.5px;
+            blink: true;
+        }
+    }
+
+    Text {
+        y: box.y + box.height + 4px;
+        width: root.width;
+        height: 14px;
+        text: root.label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        // 11px is the overline step's size; the DS nav label's weights are
+        // label 500 at rest and 600 for the current item.
+        font-size: Tokens.type-overline-size;
+        font-weight: root.current ? Tokens.type-body-strong-weight : Tokens.type-label-weight;
+        // 0.02em.
+        letter-spacing: 0.22px;
+        color: root.label-ink;
+        animate color {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+}

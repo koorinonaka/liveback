@@ -1,0 +1,1768 @@
+// Bundled so the app renders the same on every machine (round7 section 3,
+// t260927-01d1): the design system's IBM Plex Sans JP and IBM Plex Mono,
+// 400 / 500 / 600 each, full character set (window names and comments are
+// arbitrary text, so a subset would fall back mid-line). OFL-1.1 --
+// assets/fonts/OFL.txt. No 700: the design system keeps it for the app name,
+// which the app does not show.
+import "../assets/fonts/IBMPlexSansJP-Regular.ttf";
+import "../assets/fonts/IBMPlexSansJP-Medium.ttf";
+import "../assets/fonts/IBMPlexSansJP-SemiBold.ttf";
+import "../assets/fonts/IBMPlexMono-Regular.ttf";
+import "../assets/fonts/IBMPlexMono-Medium.ttf";
+import "../assets/fonts/IBMPlexMono-SemiBold.ttf";
+import { Tokens, Motion } from "tokens.slint";
+import { Icons, AppIcon, CaptionIcon } from "icons.slint";
+import { TargetTile, TileMedia } from "targets.slint";
+import { PickerModal } from "picker_modal.slint";
+import { SessionsPane, SessionRow, SessionLabels, SessionsVm } from "sessions.slint";
+import { ClipsPane, ClipRow, ClipLabels } from "clips.slint";
+import { SettingsPane, SettingsLabels, SettingsVm } from "settings.slint";
+import { AutoCaptureEntry } from "settings_vm.slint";
+import { ReviewPane, ReviewEmpty, ReviewVm, TrackSpan, GapSpan, MarkerSpan, MarkerRow } from "review.slint";
+import { ClipVm } from "clip_vm.slint";
+import { Btn, ConfirmDialog, Toast, ToastVariant, MenuEntry, InlineEditVm, Tally, TallyApp, TallyState, TallyVariant, AppMonogram, Tooltip } from "controls.slint";
+import { TrayIcon } from "tray.slint";
+import { DropOverlay, DropVm } from "drop_overlay.slint";
+import { CaptionButton, RailButton } from "chrome.slint";
+
+// `Icons` is re-exported so the context menu's model, which is built in Rust,
+// can read the same glyph data the .slint side draws with (task184).
+export { TargetTile, TileMedia, SessionRow, SessionLabels, SessionsVm, ClipRow, ClipLabels, MenuEntry, SettingsLabels, SettingsVm, AutoCaptureEntry, ReviewVm, ClipVm, TrackSpan, GapSpan, MarkerSpan, MarkerRow, TrayIcon, Icons, DropVm, Tokens, InlineEditVm, TallyApp }
+
+// The window shell: title bar, rail, panes, and the toast in the corner
+// (task169, round5 §3). Screens 124-129 fill the pane; everything else here is
+// the frame they sit in.
+//
+// The rail is back and the pane headers are gone: the rail says where you are,
+// so a title repeated at the top of every pane said it twice. There is no
+// status bar -- see `chrome.slint` for why, and the `Toast` below for what
+// replaced it.
+
+// The entrance of the pane the rail just switched to (t260925-f297): a
+// medium fade with its contents coming up 8px. Each pane is mounted afresh on
+// every switch, so `init` is the trigger; the outgoing pane still goes at once
+// -- no cross-fade, because the review pane owns the GPU stage and two of it
+// must never be up together. The offset is on the inner box, not on the
+// pane's own `y` (`transform-*` is dropped on a root, and the box the panes sit
+// in already carries `panel-drop`), so only the contents move, never the
+// panel's frame. The review stage is drawn as a slint `Image`, so it is
+// expected to fade with the rest -- not yet measured on the real machine; if it
+// comes up opaque ahead of the pane, take `ReviewPane` out of this wrapper.
+component PaneEntry inherits Rectangle {
+    property <length> rise: 8px;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    init => {
+        self.opacity = 1;
+        self.rise = 0;
+    }
+    animate opacity, rise {
+        duration: Tokens.duration-base;
+        easing: Motion.easing-enter;
+    }
+
+    Rectangle {
+        y: root.rise;
+        width: 100%;
+        height: 100%;
+        @children
+    }
+}
+
+// One card of the corner's stack (t260927-73fd). `id` is the Rust stack's,
+// handed back by the close and action buttons; `variant` is
+// `ui_state::toast::ToastVariant` as an int: 0 info / 1 success / 2 error /
+// 3 warning.
+export struct ToastItem {
+    id: int,
+    title: string,
+    detail: string,
+    // The detail is a path: one mono line, its tail kept (t260928-5f3b).
+    mono: bool,
+    action: string,
+    variant: int,
+    // How long the card stays, for the draining line along its foot; 0 for a
+    // card that waits to be closed (`ui_state::toast::Entry::fade_ms`).
+    hold-ms: int,
+}
+
+export component AppWindow inherits Window {
+    title: "Liveback";
+    // The OS window icon (taskbar thumbnail preview, Alt+Tab switcher). Winit
+    // sets no HICON unless `Window.icon` is given, and the exe resource build.rs
+    // embeds is not picked up for this frameless window (task2480).
+    icon: @image-url("../assets/app-icon/liveback-32.png");
+    // Matches the Tauri version's `decorations: false` + hand-built title bar.
+    no-frame: true;
+    // Zero while maximized. The corners are just the two bands crossing (slint
+    // 1.17.1 `i-slint-backend-winit/drag_resize_window.rs::get_resize_direction`
+    // -- there is no separate, larger corner zone), and at the top-right that
+    // square lands on the close button: a click at the very screen corner
+    // resizes instead of closing. chrome-overrides.css records the same corner
+    // being eaten in the WebView build (task094); that build squared off its
+    // rounded shell for it, this one gives up the resize handles, since a
+    // maximized window has nothing to drag. Full screen has no edge to drag
+    // either, and a resize border there would eat clicks on the video (task152).
+    resize-border-width: (root.maximized || root.any-fullscreen) ? 0px : root.resize-band-width;
+    // **Logical** pixels, as a `length` should be (task4120, re-unitised for
+    // slint 1.18). 1.17.1's winit backend compared this number against
+    // `PhysicalPosition`/`PhysicalSize` without converting it, so task4120 had
+    // Rust pre-scale it by the dpi; 1.18 does that multiply itself
+    // (`drag_resize_window.rs`: `border_width.get() * window.scale_factor()`),
+    // and the pre-scaling left over from 1.17.1 squared the factor -- 18
+    // physical px at 150% where 12 was meant. Rust still sets it, now with
+    // `ui_state::shell::resize_band_slint_px`, so the one place that knows the
+    // band's width stays in Rust and the `resize band set` log line can name
+    // both units. The default is the same 8, so the band is right even if that
+    // setter never runs.
+    in property <length> resize-band-width: 8px;
+    default-font-family: Tokens.font-family;
+    default-font-size: Tokens.type-body-size;
+    // Transparent: the full-window rectangle below carries the window ground
+    // (`Tokens.chrome-rail`, `canvas` at 80 % / light 85 %) and the opaque
+    // pane panel sits over it (round25 §1, t260919-ee8c, t260927-01d1). A
+    // layer here would push the ground toward opaque (t260916-ebdb).
+    background: transparent;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 720px;
+    min-height: 480px;
+
+    // The shell's "something is playing full screen" flag (task3510). The three
+    // places below that fold the chrome away used to name `ReviewVm.fullscreen`
+    // directly; the clip player is a second thing that can take the display, and
+    // the window chrome does not care which one did. One property so a third
+    // never has to find all three sites again.
+    property <bool> any-fullscreen: ReviewVm.fullscreen || ClipVm.fullscreen;
+
+    // The page, the DS AppFrame's `.lb-app__main` (t260928-b780, user ruling
+    // 「DS の AppFrame に合わせる」): right of the rail it reaches the
+    // window's top, right and bottom edges -- no margins of window glass --
+    // with only its top-left corner rounded (`radius-md`) and a 1px `line`
+    // along its top and left edges only. round25's (t260919-ee8c) floating
+    // panel with 8px margins, a full frame and four 7px corners is gone; the
+    // glass shows only under the rail now (and the title bar's band while it
+    // is out, `panel-drop`). Full screen drops the corner and the lines
+    // (`.win.fs .pane`). The margins stay named so `panel-drop`,
+    // `band-inset` and the agent ring read one set of numbers.
+    property <length> panel-top: 0px;
+    property <length> panel-right: 0px;
+    property <length> panel-bottom: 0px;
+    property <length> panel-border: root.any-fullscreen ? 0px : 1px;
+    property <length> panel-radius: root.any-fullscreen ? 0px : Tokens.radius-md;
+
+    // Whether the title bar is out (round22 / task4370's latch, see `tblane`).
+    // Lives here rather than in `tblane` because the panel reads it too, and
+    // an id inside an `if` is invisible to siblings outside it. The sensors
+    // that set it and the 0.3s grace `Timer` that clears it stay in `tblane`:
+    // they read `tbhot` / `tbhover`, which are inside the `if` (t260919-fd3d).
+    property <bool> titlebar-out: false;
+    // Reset on *entering* full screen, not on leaving it. `tblane` (and its
+    // `init`) is torn down while full screen and rebuilt on the way out --
+    // resetting there used to mean: any-fullscreen flips false, panel-drop
+    // reads a still-true titlebar-out and drops the panel for a frame, then
+    // the freshly (re)created `tblane.init` clears it and the panel snaps
+    // back up. Clearing it here instead, the moment full screen starts,
+    // means it is already false by the time full screen ends, so panel-drop
+    // never has a stale true to read (follow-up of t260919-fd3d).
+    changed any-fullscreen => {
+        if (self.any-fullscreen) {
+            self.titlebar-out = false;
+        }
+    }
+    // round25 §4-1 (t260919-fd3d): while the bar is out the panel's top edge
+    // -- frame, top corners, ground -- steps down by the bar's height, so the
+    // bar (no fill and, since 2026-09-19, no bottom hairline) sits on window
+    // ground and the panel's frame starts right under it: 8 -> 32, the bar's
+    // band as tall as the 32px count-line band at the bottom (the user,
+    // 2026-09-19: 「タイトルバーの高さ＝フッターの高さくらい」, which dropped the
+    // 8px gap round25 had under the bar). The pane inside does not move; the panel only clips
+    // its top off (the counter-shift is on the pane's box below). Same
+    // duration, curve and trigger as `tb`'s `y`, so the two move as one.
+    // Since the AppFrame (t260928-b780) the page starts at 0, so it is 0 -> 32
+    // (DS TitleBar README 「アプリでは」: the pane's top steps down by the bar).
+    property <length> panel-drop:
+        (root.titlebar-out && !root.any-fullscreen) ? Tokens.titlebar-height - root.panel-top : 0px;
+    animate panel-drop {
+        duration: Tokens.duration-reveal;
+        easing: Motion.easing-reveal;
+    }
+
+    // task4320. The scrollbar lane of every `AppScroll` that reaches the client's
+    // right edge has to step in by the width of the band, or the resize band eats
+    // the press before the thumb sees it (task4120 measured 3 of the thumb's 4
+    // columns inside the band at dpi=96). Same condition as `resize-border-width`
+    // above, on purpose: where that one is 0 there is no band, and a lane that
+    // stepped in anyway would just be floating for no reason.
+    //
+    // Pushed into the global on `changed`/`init` rather than bound from there:
+    // the panes that need it cannot see this window's properties, and a global
+    // property takes no binding from outside itself. Same shape as
+    // `InlineEditVm.field-x` in `controls.slint`.
+    //
+    // round25 (t260919-ee8c) put the panes on a panel 9px in from the
+    // client's right edge, which made this 0. The AppFrame (t260928-b780)
+    // takes the page to the right edge with no line there, so the whole band
+    // is back in the lane's way and the lane steps in by all of it again
+    // (8 at the default band). Written against `panel-right` so a margin, if
+    // one ever comes back, is still subtracted.
+    property <length> band-inset:
+        (root.maximized || root.any-fullscreen)
+            ? 0px
+            : Math.max(0px, Tokens.resize-band-logical - root.panel-right);
+    changed band-inset => {
+        Tokens.resize-band-inset = self.band-inset;
+    }
+    init => {
+        Tokens.resize-band-inset = self.band-inset;
+    }
+
+    // `ui_state::shell::Pane` as an int: 0 確認 / 1 履歴 / 2 設定 / 3 クリップ.
+    // 対象 is not one of these -- it is a modal that opens over whichever pane
+    // is showing. Note that this is *not* the rail order (task2980): クリップ
+    // sits under 履歴 in the rail but took the free pane index, because the 2
+    // below is written out by hand twice and moving 設定 would break both
+    // without failing.
+    in property <int> active-pane: 0;
+    in property <bool> picker-open: false;
+    // `picker-open`, plus the close animation's tail (t260926-f9be, see the
+    // picker's `if` below).
+    property <bool> picker-mounted: false;
+    changed picker-open => {
+        if (root.picker-open) {
+            root.picker-mounted = true;
+        }
+    }
+    // Which rail item draws as `current`, from `shell::rail_current`: the
+    // pane, open picker or not (t260927-4c04). Kept next to the rule that
+    // decides what a rail press does rather than derived here.
+    in property <int> rail-current: 0;
+    // Leaving the settings pane while a hotkey field is armed has to disarm it
+    // explicitly (task160): the pane is a conditional element, so switching away
+    // destroys the FocusScope without ever reporting the lost focus, and the
+    // global hotkeys would stay unregistered. Verified on the machine -- the
+    // chord stopped firing until this ran.
+    changed active-pane => {
+        if (self.active-pane != 2 && SettingsVm.armed != 0) {
+            SettingsVm.hk-blurred(SettingsVm.armed);
+        }
+    }
+    // 確認 is the default pane; this only decides whether it has something to
+    // show or falls back to its empty state.
+    in property <bool> session-loaded: false;
+    in property <string> recording-label;
+    // Read back by Rust so it can lay the session grid out the same way the pane
+    // does and resolve a pointer position to a row (task125). The history pane
+    // fills the content column now, which is the window minus the rail.
+    out property <length> pane-width: root.width - Tokens.size-rail;
+    // The target picker's panel width: DS CaptureScreen `min(720px, page -
+    // 120px)`, the page being the window less the rail (t260927-711d). Owned
+    // here and passed into `PickerModal` rather than computed inside it,
+    // because `tbhot` (the title bar's hot zone) has to step around the panel
+    // and cannot name an id inside the picker's `if` block (t260917-099c).
+    property <length> picker-dialog-width: Math.min(720px, root.width - Tokens.size-rail - 120px);
+    // The rail's キャプチャ centre, which the flyout's arrow points at: the
+    // rail's 8px top padding and half of the 58px item (t260927-4c04 measured
+    // 37 on the machine).
+    property <length> picker-anchor-y: Tokens.space-2 + 58px / 2;
+
+    // ---------- toast (task169, round5 §3-C) ----------
+    // The stack, oldest first. Timing, the three-card cap and which card goes
+    // live in `ui_state::toast`; this side only paints (t260927-73fd).
+    in property <[ToastItem]> toasts;
+    callback toast-dismissed(int);
+    callback toast-action-clicked(int);
+
+    in property <string> rail-review-label;
+    in property <string> rail-capture-label;
+    in property <string> rail-sessions-label;
+    in property <string> rail-clips-label;
+    in property <string> rail-settings-label;
+    // True while `LIVEBACK_BUFFER_ROOT` is set -- an agent or test run, whose
+    // recordings and clips go to the override rather than to the user's own
+    // folders (task3910). The rail is repainted and takes a badge, because the
+    // window is otherwise identical to the everyday one and gets used as it:
+    // on 2026-09-12 a sweep-launched instance recorded 23GB of the user's own
+    // gameplay into `%TEMP%` before anyone noticed. Rust writes it once at
+    // start-up; nothing can change it while the process lives.
+    in property <bool> agent-run;
+
+    // ---------- target picker (task124) ----------
+    in property <[TargetTile]> targets;
+    // The grid's stand-in (t260927-711d): 0 the grid, 1 no match, 2 nothing
+    // to record, 3 no list. The title carries the no-match sentence too.
+    in property <int> targets-empty-kind;
+    in property <string> targets-empty-text;
+    in property <string> targets-empty-sub;
+    // The flyout's foot line, and whether it is the three-or-more warning
+    // (t260927-711d: that warning left the window-wide bar for this line).
+    in property <string> targets-foot-text;
+    in property <bool> targets-foot-warning;
+    // Not the picker's alone: the settings screen's buffer-root guards read
+    // this too (`settings_page.rs`), which is why it outlived the title bar's
+    // stop button (round8 §1).
+    in property <bool> capturing;
+    in property <string> search-placeholder;
+    in property <string> clear-label;
+    in property <string> stop-label;
+    // round5 §5 / §11: the modal's own strings. W-6 heading, W-7 / W-8 tabs,
+    // W-11 primary badge, W-13 hover button. W-12 is `recording-label` above.
+    in property <[string]> picker-tab-labels;
+    in property <[string]> picker-tab-counts;
+    in property <int> picker-tab;
+    in property <string> picker-rec-label;
+    in property <string> picker-capture-label;
+    in property <string> picker-stop-label;
+
+    callback targets-search-changed(string);
+    callback target-clicked(string);
+    callback picker-opened();
+    callback picker-tab-changed(int);
+    // `stop-capture()` used to sit here: the picker's "stop everything" door.
+    // Task2030 判断5 leaves exactly one of those, in the tray -- the LIVE tile
+    // stops its own capture through `target-clicked` now.
+
+    // ---------- session history (task125 / round5 §6) ----------
+    in property <[SessionRow]> sessions;
+    in property <bool> sessions-thumbnail-view;
+    in property <string> sessions-empty-text;
+    // The empty state's second line, and which of the two nothings it is
+    // (task3800): only "no sessions at all" hides the toolbar.
+    in property <string> sessions-empty-sub-text;
+    in property <bool> sessions-no-sessions;
+    in property <int> sessions-editing-row: -1;
+    in property <bool> sessions-editing-note;
+    in property <[MenuEntry]> sessions-menu-entries;
+    in property <bool> sessions-menu-open;
+    // ---------- clips (task2980) ----------
+    in property <[ClipRow]> clips;
+    in property <string> clips-empty-text;
+    // "There are clips, the search matched none of them" (task3820), which is
+    // a different screen from `clips-empty-text`'s "the folder is empty": one
+    // keeps the toolbar, the other does not.
+    in property <string> clips-filter-empty-text;
+    // The selection bar's two strings (t260927-bb89).
+    in property <string> clips-selection-text;
+    in property <string> clips-delete-label;
+    in property <[MenuEntry]> clips-menu-entries;
+    in property <bool> clips-menu-open;
+    // Which clip row the context menu belongs to, or -1 (task3350). Separate
+    // from `clips-menu-open` because the tile needs to know *which* one, so it
+    // can say on the picture that this is the tile the menu is acting on.
+    in property <int> clips-menu-row: -1;
+    // Which clip row has its comment editor open, or -1 (task2990).
+    in property <int> clips-editing-row: -1;
+    // task3020: which calendar span the grid's date headings cover. Week
+    // unless the user says month; not a stored setting.
+    in property <bool> clips-month-grouping;
+    // Which clip tile is drawn large, or -1 (task3880, round20 §2-1 B案).
+    // Raised by a single click on a tile and closed by another click or Esc
+    // (task3890); -1 when nothing is expanded.
+    in property <int> clips-expanded-row: -1;
+    // How many grid lines the clip placement uses, footprint included
+    // (`ui_state::clips::line_count`). The pane counts its `content-height`
+    // from this rather than from the last tile's own line, which is wrong the
+    // moment a footprint pushes tiles into the holes beside it.
+    in property <int> clips-grid-lines: 0;
+    // The clip screen's selection (t260916-5568).
+    in property <bool> clips-marquee-active;
+    in property <int> clips-selection-count;
+
+    in property <string> loaded-title;
+    // The loaded recording's app icon for the title bar (2026-09-20); empty
+    // when there is none to show.
+    in property <image> loaded-icon;
+    // When there is no icon, the history's other two rungs (t260928-b780,
+    // `sessions_tile.slint` `AppMark`): the monogram of the app's name, or the
+    // `monitor` glyph for a whole-screen recording. From `history/render.rs`,
+    // beside `loaded-title`.
+    in property <string> loaded-app-letter;
+    in property <int> loaded-app-hue;
+    in property <bool> loaded-whole-screen;
+
+    // The title bar's recording chip and the rail's lamp (t260927-4c04), from
+    // `picker::render_titlebar_tally`. `count` is the running captures -- not
+    // `capturing`, which also counts a start still pending and would put up
+    // a chip with no target for a tick. `target` names the one capture;
+    // `apps` are up to three running captures' marks (icon / monogram /
+    // monitor, t260928-b780), the first being the one `target` names.
+    in property <int> titlebar-tally-count: 0;
+    in property <string> titlebar-tally-label;
+    in property <string> titlebar-tally-target;
+    in property <[TallyApp]> titlebar-tally-apps;
+    in property <string> titlebar-tally-detail;
+    // The first capture runs with no retention limit, so `detail` is its
+    // elapsed time and goes stale; the Timer in the title bar asks Rust to
+    // re-read it (`titlebar-tally-tick`, t260928-b780 F13).
+    in property <bool> titlebar-tally-elapsed;
+    callback titlebar-tally-tick();
+    // The capture rail item's hover, lifted out for the lamp's tooltip: the
+    // item sits inside an `if`, so its id cannot be read from the tooltip.
+    property <bool> capture-hover;
+
+    // ---------- the inline-edit overlay (task3640) ----------
+    // Is any of the five inline editors open? One expression, in one place, and
+    // every site folds into it -- the hole task3640 closes came from counting
+    // the places a press could land, so the fix must not be a second list to
+    // keep in step. The overlay below hangs on this.
+    //
+    // The two review states are read only while 確認 is the pane that is
+    // showing: `ReviewVm` is a global, nothing resets a global when the pane
+    // that filled it is destroyed, and leaving 確認 mid-rename would otherwise
+    // leave the overlay standing over a pane with no editor in it.
+    property <bool> inline-edit-open: root.sessions-editing-row >= 0
+        || root.clips-editing-row >= 0
+        || ((root.active-pane == 0 && root.session-loaded)
+            && ReviewVm.marker-editing);
+
+    // task3860's one exception to it -- a widened hole for the 確認 screen's
+    // 確定ステップ -- is gone with the step itself (t260927-7d08, user ruling
+    // 2026-09-27): the comment field is an ordinary always-there field now,
+    // not an inline editor, so the overlay never stands over it.
+
+    // Bumped on every press the overlay takes, and handed to `ReviewPane` as
+    // its `dismiss-token`. The marker rename is the one editor whose state is
+    // neither an `AppWindow` property nor a `ReviewVm` one that Rust owns, and
+    // an element inside an `if` cannot be reached from out here -- so the ask
+    // travels down as a binding instead.
+    property <int> review-dismiss-token;
+
+    // What a press on the overlay does: end whichever edit is open, through the
+    // path that edit already had. Nothing here invents a new way to close an
+    // editor -- `sessions-edit-cancelled` and `clips-edit-cancelled` are the
+    // same `close_editor()` calls the panes' own ground areas raise.
+    //
+    // Each branch is guarded by its own flag so a press cannot fire four
+    // no-op callbacks into Rust for the one editor that is actually open.
+    function close-inline-edit() {
+        if (root.sessions-editing-row >= 0) {
+            root.sessions-edit-cancelled();
+        }
+        if (root.clips-editing-row >= 0) {
+            root.clips-edit-cancelled();
+        }
+        if (ReviewVm.marker-editing) {
+            root.review-dismiss-token += 1;
+        }
+    }
+
+    callback sessions-pressed(length, length, length, length, int, bool, bool);
+    callback sessions-marquee(length, length, length, length, length, length, int);
+    callback sessions-marquee-ended();
+    callback sessions-row-activated(length, length, length, length, int);
+    callback sessions-row-menu-requested(length, length, length, length, int);
+    callback sessions-menu-selected(int);
+    callback sessions-menu-dismissed();
+    callback sessions-search-changed(string);
+    callback sessions-note-edit-selected();
+    callback sessions-select-all();
+    callback sessions-note-edit-requested(int);
+    callback sessions-note-committed(int, string);
+    callback sessions-edit-cancelled();
+    /// The open inline editor's text, on every keystroke (task1340).
+    callback sessions-edit-draft-changed(string);
+    // task2030 判断5: stop the recording this LIVE row is, and only it.
+    callback sessions-stop-requested(int);
+    callback sessions-set-view(bool);
+    callback sessions-visible-range-changed(int, int);
+
+    callback titlebar-pressed();
+    callback minimize-clicked();
+    callback maximize-clicked();
+    callback close-clicked();
+    callback clips-row-menu-requested(int);
+    callback clips-row-edit-requested(int);
+    callback clips-grouping-changed(bool);
+    // task3880, raised since task3890 by the tile's click, the expanded tile's
+    // own click, and Esc. The handler behind it was already wired in Rust,
+    // which is what kept 3890 to a `.slint` change.
+    callback clips-row-expand-toggled(int);
+    callback clips-search-changed(string);
+    callback clips-menu-selected(int);
+    callback clips-menu-dismissed();
+    callback clips-visible-range-changed(int, int);
+    callback clips-comment-committed(string);
+    callback clips-edit-cancelled();
+    callback clips-tile-pressed(int, length, length, length, length, bool, bool);
+    callback clips-ground-pressed(length, length, length, length, bool, bool);
+    callback clips-pointer-moved(length, length);
+    callback clips-pointer-released();
+    callback clips-delete-selected();
+    callback clips-select-all();
+    callback clips-selection-cleared();
+    callback clips-open-folder();
+
+    // A rail item was pressed (the int is its index, 0..4, and not its place on
+    // screen since キャプチャ (1) moved to the top, task t260913-b43e -- `rail_action`
+    // decides whether that is a pane or the picker); and the two ways out of
+    // the picker: Escape and a click outside the flyout (round21 §2-1 dropped
+    // the close button).
+    callback rail-clicked(int);
+    callback picker-closed();
+
+    // ---------- body: the rail, whichever pane it selected, and the bar ------
+    // The picker floats above all of them (it is a modal over *any* pane), and
+    // the toast floats above that, in the corner.
+    //
+    // This used to be the second half of a root `VerticalLayout` whose first
+    // half was the title bar. round22 (task4370) made the bar an overlay inside
+    // here instead, which left that layout with a single child, so it is gone
+    // and this fills the window directly -- and the rail, which only ever lived
+    // in the `HorizontalLayout` below, reaches the window's top edge as a
+    // result. Written out rather than left to the default so the removal of the
+    // layout is not load-bearing.
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        // The window ground (round25 §4-1, t260919-ee8c): one `chrome-rail`
+        // layer under the whole client, so the rail and the air around the
+        // pane panel read as one continuous glass. The rail is transparent
+        // over it and the panel is the opaque `surface` on top
+        // (`Tokens.chrome-rail`'s comment).
+        background: Tokens.chrome-rail;
+
+        // The glass (round25 §4-5, mock `.win`): a 135deg sheen, white 7 % at
+        // the top-left fading to 2 % at 38 % and gone by 60 %, and a 1px inner
+        // rim -- top 9 %, left 4 %, right 3 %, none at the bottom (the mock's
+        // `inset` box-shadows; its outer shadows are DWM's to draw). Declared
+        // before the layout so the rail's glyphs and the panel draw over them.
+        // Shown maximized too -- part of the ground -- but not in full screen,
+        // where the stage is the whole display.
+        //
+        // The rim sits one pixel in, not on the client's edge: the DWM frame
+        // (`desktop.rs` `set_window_border_color`, #3a4048) is drawn *over* the
+        // client's outermost pixel on this no-frame window, not outside it --
+        // measured 2026-09-19 on the RTX 4070 / 1080p desk at dpi 96, client row 0 /
+        // column 0 / the
+        // last column read exactly #3a4048 with the rim underneath them
+        // (t260919-ee8c evidence `measurements.txt`). The mock's `inset` rim is
+        // likewise inside `.win`'s 1px border. `rim` is that pixel, as a length.
+        property <length> rim: 1phx;
+        if !root.any-fullscreen: Rectangle {
+            background: @linear-gradient(135deg, #ffffff12 0%, #ffffff05 38%, #ffffff00 60%);
+        }
+        if !root.any-fullscreen: Rectangle {
+            x: parent.rim;
+            y: parent.rim;
+            width: parent.width - 2 * parent.rim;
+            height: 1px;
+            background: #ffffff17;
+        }
+        if !root.any-fullscreen: Rectangle {
+            x: parent.rim;
+            y: parent.rim;
+            width: 1px;
+            height: parent.height - 2 * parent.rim;
+            background: #ffffff0a;
+        }
+        if !root.any-fullscreen: Rectangle {
+            x: parent.width - parent.rim - 1px;
+            y: parent.rim;
+            width: 1px;
+            height: parent.height - 2 * parent.rim;
+            background: #ffffff08;
+        }
+
+        // The agent-run mark (2026-09-13, the user): a plainly different
+        // colour -- a yellow, not the warning orange it first borrowed -- so a
+        // window started with `LIVEBACK_BUFFER_ROOT` never passes for the
+        // everyday one. It began as the rail alone; the user asked on
+        // 2026-09-24 for the whole frame instead, i.e. all of the ground the
+        // rail is continuous with: the rail, the margins round the panel, the
+        // title bar's band (the bar has no fill of its own) and the count-line
+        // band. Painted as a ring whose hole is the panel's own outline, not as
+        // the ground: the panel was see-through when this was written (it is
+        // opaque `surface` since t260927-01d1), and a yellow ground would have
+        // tinted the pane too. The border is far wider than
+        // any margin so its outer edge -- and outer corners -- fall off the
+        // window; its inner radius is `panel-radius`, and it follows
+        // `panel-drop` so the band under the bar stays yellow. Declared before
+        // the layout so the rail's glyphs and pill draw over it.
+        // Tones in `chrome-rail-agent` (t260913-c4db): pale in light, olive in
+        // dark. Every label on this ground is >= 4.5:1; the capture label,
+        // unselected `RailButton` and the count line are on-surface-variant,
+        // whose tightest is dark 4.85 (light 6.46) (t260915-99d3).
+        // Since the AppFrame (t260928-b780) the hole reaches the window's
+        // right and bottom edges, so only its top-left corner is rounded:
+        // the other three inner corners stay square, or they would show as
+        // yellow slivers in the window's own corners.
+        if root.agent-run && !root.any-fullscreen: Rectangle {
+            property <length> spill: 400px;
+            x: Tokens.size-rail - self.spill;
+            y: root.panel-top + root.panel-drop - self.spill;
+            width: parent.width - Tokens.size-rail - root.panel-right + 2 * self.spill;
+            height: parent.height - root.panel-top - root.panel-bottom - root.panel-drop
+                + 2 * self.spill;
+            border-width: self.spill;
+            border-top-left-radius: root.panel-radius + self.spill;
+            border-top-right-radius: self.spill;
+            border-bottom-right-radius: self.spill;
+            border-bottom-left-radius: self.spill;
+            border-color: Tokens.chrome-rail-agent;
+        }
+
+        HorizontalLayout {
+            // Full screen takes the rail with it, the same way it takes the
+            // title bar: the review pane gets the whole display (task152).
+            if !root.any-fullscreen: Rectangle {
+                width: Tokens.size-rail;
+                // No ground of its own: the window ground under it is already
+                // `chrome-rail`, and a second copy here would stack (round25
+                // §4-1, t260919-ee8c). The agent-run yellow is the frame ring
+                // above the layout.
+
+                // The DS NavRail cursor (t260927-4c04): one rounded rect the
+                // rail shares, `fill-hover` (no `highlight-top` line: that token
+                // is for `overlay` / `raised`, and in light its 60 % white read
+                // as a white rule on the cursor -- the user, 2026-09-28),
+                // sliding to whichever pane `rail-current` names -- declared
+                // before the layout so it paints under the items. It stays on
+                // the pane while the capture flyout is out (決めたこと 1,
+                // superseding the 2026-09-14 ruling that raised it to
+                // キャプチャ): キャプチャ is never a place, and its own `open`
+                // look says the flyout is up. No `absolute-position` (task148):
+                // y is counted from the layout's own constants below, so they
+                // have to move together.
+                cursor := Rectangle {
+                    // `rail-current` is the pane's index, not its place on
+                    // screen: 確認 (0), 履歴 (2), クリップ (3) sit under
+                    // キャプチャ in that order; 設定 (4) is at the foot.
+                    property <int> slot: root.rail-current == 0 ? 1 : root.rail-current;
+                    x: 4px;
+                    // Top padding 8, one 58px item and a 4px gap per row above,
+                    // plus the rule's 9px row (`.lb-nav__rule`: its 1px line
+                    // with 4 either side) and its own gap under キャプチャ.
+                    // 設定 is counted from the bottom (padding 12), so the
+                    // stretch and the AGENT mark above it do not enter.
+                    property <length> top-y: Tokens.space-2
+                        + self.slot * (self.height + Tokens.space-1)
+                        + 9px + Tokens.space-1;
+                    y: self.top-y;
+                    width: 64px;
+                    height: 58px;
+                    border-radius: Tokens.radius-md;
+                    background: Tokens.fill-hover;
+
+                    // One state per place, each sliding in, rather than a plain
+                    // `animate y` (task t260913-0fbd): a transition's clock
+                    // starts at the *state* change, so a resize long after the
+                    // cursor arrived lands at once while a change of place
+                    // still slides. Every place needs its own state: two places
+                    // sharing one would be no state change, and the move
+                    // between them would jump. `duration-reveal` /
+                    // `easing-standard` (決めたこと 2).
+                    states [
+                        at-review when root.rail-current == 0: {
+                            y: self.top-y;
+                            in {
+                                animate y {
+                                    duration: Tokens.duration-reveal;
+                                    easing: Motion.easing-standard;
+                                }
+                            }
+                        }
+                        at-sessions when root.rail-current == 2: {
+                            y: self.top-y;
+                            in {
+                                animate y {
+                                    duration: Tokens.duration-reveal;
+                                    easing: Motion.easing-standard;
+                                }
+                            }
+                        }
+                        at-clips when root.rail-current == 3: {
+                            y: self.top-y;
+                            in {
+                                animate y {
+                                    duration: Tokens.duration-reveal;
+                                    easing: Motion.easing-standard;
+                                }
+                            }
+                        }
+                        at-settings when root.rail-current == 4: {
+                            y: parent.height - Tokens.space-3 - self.height;
+                            in {
+                                animate y {
+                                    duration: Tokens.duration-reveal;
+                                    easing: Motion.easing-standard;
+                                }
+                            }
+                        }
+                    ]
+                }
+
+                // The accent bar, `.lb-nav__cursor::before`: x 0..3 of the
+                // rail, 20 tall, centred on the cursor, right corners 2. Its
+                // own element rather than the cursor's child because the
+                // cursor clips to its rect at x 4 and the bar sits left of it.
+                Rectangle {
+                    x: 0px;
+                    y: cursor.y + (cursor.height - self.height) / 2;
+                    width: 3px;
+                    height: 20px;
+                    border-top-right-radius: 2px;
+                    border-bottom-right-radius: 2px;
+                    background: Tokens.accent;
+                }
+
+                VerticalLayout {
+                    padding-top: Tokens.space-2;
+                    padding-bottom: Tokens.space-3;
+                    spacing: Tokens.space-1;
+
+                    // round21 §1-1: キャプチャ heads the rail, ruled off from
+                    // the panes under it. It still fires index 1 -- the order
+                    // on screen is not the index, and `shell::rail_action`
+                    // keeps 1 = the picker (task t260913-b43e). `open` while
+                    // the flyout is out, `live` while anything records (the
+                    // lamp, 決めたこと 3).
+                    HorizontalLayout {
+                        alignment: center;
+                        RailButton {
+                            commands: Icons.capture;
+                            label: root.rail-capture-label;
+                            open: root.picker-open;
+                            live: root.titlebar-tally-count > 0;
+                            live-label: root.titlebar-tally-label;
+                            changed has-hover => {
+                                root.capture-hover = self.has-hover;
+                            }
+                            clicked => {
+                                root.rail-clicked(1);
+                            }
+                        }
+                    }
+
+                    // `.lb-nav__rule`: 44 x 1 `line`, 4 above and below.
+                    HorizontalLayout {
+                        alignment: center;
+                        height: 9px;
+                        Rectangle {
+                            width: 44px;
+                            Rectangle {
+                                y: 4px;
+                                height: 1px;
+                                background: Tokens.line;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        RailButton {
+                            commands: Icons.review;
+                            label: root.rail-review-label;
+                            current: root.rail-current == 0;
+                            clicked => {
+                                root.rail-clicked(0);
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        RailButton {
+                            commands: Icons.sessions;
+                            label: root.rail-sessions-label;
+                            current: root.rail-current == 2;
+                            clicked => {
+                                root.rail-clicked(2);
+                            }
+                        }
+                    }
+
+                    // クリップ under 履歴 (task2980): the buffer, then what
+                    // was cut out of it and kept.
+                    HorizontalLayout {
+                        alignment: center;
+                        RailButton {
+                            commands: Icons.clips;
+                            label: root.rail-clips-label;
+                            current: root.rail-current == 3;
+                            clicked => {
+                                root.rail-clicked(3);
+                            }
+                        }
+                    }
+
+                    // Settings sits at the foot, away from the four that
+                    // are about the recording itself.
+                    Rectangle { vertical-stretch: 1; }
+
+                    // Deliberately not translated and deliberately not the
+                    // folder: it is a mark for whoever is looking at the
+                    // window, and the path it points at is one click away in
+                    // 設定 (the buffer row resolves the override since 2026-09-13).
+                    if root.agent-run: Text {
+                        text: "AGENT";
+                        horizontal-alignment: center;
+                        font-size: 9px;
+                        font-weight: 600;
+                        letter-spacing: 0.5px;
+                        // The badge wears the other theme's rail tone, so it
+                        // reads at 11.73:1 on the ground either way.
+                        color: Tokens.on-chrome-rail-agent;
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        RailButton {
+                            commands: Icons.settings;
+                            label: root.rail-settings-label;
+                            current: root.rail-current == 4;
+                            clicked => {
+                                root.rail-clicked(4);
+                            }
+                        }
+                    }
+                }
+
+                // No divider on the right edge any more: round25 §4-5 dropped
+                // it -- the panel's own frame is the edge now.
+
+                // The rail's piece of the export block-out (task2130), the
+                // DS `scrim` in either theme (t260928-b780 F5).
+                if ReviewVm.export-busy: Rectangle {
+                    background: Tokens.scrim;
+
+                    TouchArea { }
+                }
+            }
+
+            // The panel's margin box: no ground of its own, the window
+            // ground shows through the margins.
+            Rectangle {
+                horizontal-stretch: 1;
+
+                // The old in-pane footer used to close an open context menu
+                // when a click landed on it (it never cleared selection --
+                // t260919-ee8c's "no TouchArea" note below misread that as
+                // the whole behavior). Restored here as its own area, sized
+                // to the whole margin box: `panel`'s own subtree (the pane's
+                // full-cover dismiss area, KNOWLEDGE "clip" note) claims
+                // every point inside it first, so this is only ever reached
+                // in the margins and the band outside `panel` (follow-up of
+                // t260919-ee8c). `pointer-event`, not `clicked`, to close on
+                // press like the pane's own dismiss areas do.
+                if root.sessions-menu-open || root.clips-menu-open: TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down) {
+                            if (root.sessions-menu-open) {
+                                root.sessions-menu-dismissed();
+                            }
+                            if (root.clips-menu-open) {
+                                root.clips-menu-dismissed();
+                            }
+                        }
+                    }
+                }
+
+                panel := Rectangle {
+                    x: 0;
+                    y: root.panel-top + root.panel-drop;
+                    width: parent.width - root.panel-right;
+                    height: parent.height - root.panel-top - root.panel-bottom - root.panel-drop;
+                    border-top-left-radius: root.panel-radius;
+                    // Opaque (t260927-01d1): the design system keeps
+                    // everything from `surface` forward opaque; only the
+                    // window ground under it stays glass.
+                    background: Tokens.surface;
+
+                    // The top and left `line` (`.lb-app__main`'s
+                    // `border-top` / `border-left`). slint has no per-side
+                    // border, so the line is a full layer over the page's
+                    // `surface` -- the CSS border also sits over the
+                    // element's own background -- and the clipped pane box
+                    // below covers all of it but the top row and left column.
+                    Rectangle {
+                        border-top-left-radius: root.panel-radius;
+                        background: Tokens.line;
+                    }
+
+                    // The pane sits inside those two lines, clipped by a
+                    // rectangle of its own rather than by `panel`: `clip` on an
+                    // element that also has a border cuts its children in by
+                    // the border's width (KNOWLEDGE.md, t260916-a2a3). Its
+                    // radius is the line's inner one, at the top-left only.
+                    Rectangle {
+                        x: root.panel-border;
+                        y: root.panel-border;
+                        width: parent.width - root.panel-border;
+                        height: parent.height - root.panel-border;
+                        border-top-left-radius: Math.max(0px, root.panel-radius - root.panel-border);
+                        background: Tokens.surface;
+                        clip: true;
+
+                        // The pane itself does not move when the bar is out: this box
+                        // steps back up by exactly what the panel stepped down, so its
+                        // top stays at y 1 and the panel only cuts `panel-drop` off it
+                        // (round25 §4-1: clip, never re-lay-out, t260919-fd3d).
+                        Rectangle {
+                            y: -root.panel-drop;
+                            height: parent.height + root.panel-drop;
+
+                            if root.active-pane == 0 && root.session-loaded: PaneEntry { ReviewPane {
+                                // Hands the review pane's FocusScope its key focus back
+                                // when the picker closes: while it is open the modal's
+                                // own FocusScope holds it, and slint drops focus rather
+                                // than returning it on its own.
+                                overlay-open: root.picker-open;
+                                // task3640. Every bump is the overlay saying a press
+                                // landed outside the marker rename field; the pane
+                                // clears its own `editing-marker` on it.
+                                dismiss-token: root.review-dismiss-token;
+                            } }
+
+                            // The DS EmptyReviewScreen (t260927-9865): its
+                            // 「対象を選ぶ」 opens the same flyout as the rail.
+                            if root.active-pane == 0 && !root.session-loaded: PaneEntry { ReviewEmpty { } }
+
+                            if root.active-pane == 1: PaneEntry { SessionsPane {
+                                rows: root.sessions;
+                                thumbnail-view: root.sessions-thumbnail-view;
+                                empty-text: root.sessions-empty-text;
+                                empty-sub-text: root.sessions-empty-sub-text;
+                                no-sessions: root.sessions-no-sessions;
+                                editing-row: root.sessions-editing-row;
+                                editing-note: root.sessions-editing-note;
+                                menu-entries: root.sessions-menu-entries;
+                                menu-open: root.sessions-menu-open;
+                                pressed(x, y, top, cell, cols, shift, ctrl) => {
+                                    root.sessions-pressed(x, y, top, cell, cols, shift, ctrl);
+                                }
+                                marquee(x1, y1, x2, y2, top, cell, cols) => {
+                                    root.sessions-marquee(x1, y1, x2, y2, top, cell, cols);
+                                }
+                                marquee-ended => {
+                                    root.sessions-marquee-ended();
+                                }
+                                row-activated(x, y, top, cell, cols) => {
+                                    root.sessions-row-activated(x, y, top, cell, cols);
+                                }
+                                row-menu-requested(x, y, top, cell, cols) => {
+                                    root.sessions-row-menu-requested(x, y, top, cell, cols);
+                                }
+                                menu-selected(index) => {
+                                    root.sessions-menu-selected(index);
+                                }
+                                menu-dismissed => {
+                                    root.sessions-menu-dismissed();
+                                }
+                                search-changed(query) => {
+                                    root.sessions-search-changed(query);
+                                }
+                                select-all => {
+                                    root.sessions-select-all();
+                                }
+                                note-edit-selected => {
+                                    root.sessions-note-edit-selected();
+                                }
+                                note-edit-requested(row) => {
+                                    root.sessions-note-edit-requested(row);
+                                }
+                                note-committed(row, note) => {
+                                    root.sessions-note-committed(row, note);
+                                }
+                                edit-draft-changed(value) => {
+                                    root.sessions-edit-draft-changed(value);
+                                }
+                                edit-cancelled => {
+                                    root.sessions-edit-cancelled();
+                                }
+                                stop-requested(row) => {
+                                    root.sessions-stop-requested(row);
+                                }
+                                set-view(thumbnail) => {
+                                    root.sessions-set-view(thumbnail);
+                                }
+                                visible-range-changed(first, count) => {
+                                    root.sessions-visible-range-changed(first, count);
+                                }
+                            } }
+
+                            if root.active-pane == 2: PaneEntry { SettingsPane { } }
+
+                            if root.active-pane == 3: PaneEntry { ClipsPane {
+                                rows: root.clips;
+                                empty-text: root.clips-empty-text;
+                                filter-empty-text: root.clips-filter-empty-text;
+                                menu-entries: root.clips-menu-entries;
+                                menu-open: root.clips-menu-open;
+                                menu-row: root.clips-menu-row;
+                                editing-row: root.clips-editing-row;
+                                month-grouping: root.clips-month-grouping;
+                                expanded-row: root.clips-expanded-row;
+                                grid-lines: root.clips-grid-lines;
+                                marquee-active: root.clips-marquee-active;
+                                selection-count: root.clips-selection-count;
+                                selection-text: root.clips-selection-text;
+                                delete-label: root.clips-delete-label;
+                                tile-pressed(index, x, y, cell-w, cell-h, shift, ctrl) => {
+                                    root.clips-tile-pressed(index, x, y, cell-w, cell-h, shift, ctrl);
+                                }
+                                ground-pressed(x, y, cell-w, cell-h, shift, ctrl) => {
+                                    root.clips-ground-pressed(x, y, cell-w, cell-h, shift, ctrl);
+                                }
+                                pointer-moved(x, y) => {
+                                    root.clips-pointer-moved(x, y);
+                                }
+                                pointer-released => {
+                                    root.clips-pointer-released();
+                                }
+                                delete-selected => {
+                                    root.clips-delete-selected();
+                                }
+                                select-all => {
+                                    root.clips-select-all();
+                                }
+                                selection-cleared => {
+                                    root.clips-selection-cleared();
+                                }
+                                open-folder => {
+                                    root.clips-open-folder();
+                                }
+                                grouping-changed(month) => {
+                                    root.clips-grouping-changed(month);
+                                }
+                                row-expand-toggled(index) => {
+                                    root.clips-row-expand-toggled(index);
+                                }
+                                search-changed(query) => {
+                                    root.clips-search-changed(query);
+                                }
+                                row-edit-requested(index) => {
+                                    root.clips-row-edit-requested(index);
+                                }
+                                comment-committed(value) => {
+                                    root.clips-comment-committed(value);
+                                }
+                                edit-cancelled => {
+                                    root.clips-edit-cancelled();
+                                }
+                                row-menu-requested(index) => {
+                                    root.clips-row-menu-requested(index);
+                                }
+                                menu-selected(index) => {
+                                    root.clips-menu-selected(index);
+                                }
+                                menu-dismissed => {
+                                    root.clips-menu-dismissed();
+                                }
+                                visible-range-changed(first, count) => {
+                                    root.clips-visible-range-changed(first, count);
+                                }
+                            } }
+                        }
+                    }
+                }
+
+            }
+        }
+
+        // ---------- target picker modal (task169 / task170) ----------
+        // Absolutely-positioned sibling of the pane layout, so opening it
+        // never re-solves the layout underneath. Its click-catcher stops at
+        // the rail's right edge, so the rail stays live while it is open: a
+        // rail item still switches the pane -- `show_pane` closes the picker on
+        // the way. The title bar stays live only right of the panel: over the
+        // panel's band its hot zone steps aside while the picker is open
+        // (t260916-3e57 collapsed it whole; t260917-099c narrowed that to the
+        // panel, see `tbhot` below), because the panel sits at y 9 and its top
+        // 11px fell inside the 20px zone -- pointing at the flyout's own top
+        // edge slid the bar out over it. Right of the panel the zone is back,
+        // so the bar still slides out there and ─ □ ✕ stay reachable with the
+        // picker open. The panel's width is `picker-dialog-width` at the root,
+        // passed in so the zone and the panel read one formula.
+        // The flyout itself is `picker_modal.slint` -- anchored beside the キャプチャ
+        // (round21 §2-1), with a transparent click-catcher behind it rather
+        // than a scrim, and not the generic overlay shell.
+        //
+        // t260926-f9be: the flyout animates out as well as in, so it stays
+        // mounted for the close's length after `picker-open` drops.
+        // `picker-open` itself still flips at the request (`set_picker_open`),
+        // so the rail mark and the thumbnail round-robin move at once; only the
+        // unmount waits. `picker-open ||` keeps the mount immediate on open
+        // (a `changed` handler runs later than the binding). Reopening inside
+        // the close stops the Timer, so the same instance opens back up from
+        // wherever its fade had got to.
+        Timer {
+            // The close's duration in picker_modal.slint (`duration-fast`),
+            // plus a frame: the animation starts on the next frame, and the
+            // ease-in close is still visible near its end, so unmounting early
+            // would pop.
+            interval: Tokens.duration-fast + 16ms;
+            running: !root.picker-open && root.picker-mounted;
+            triggered => {
+                root.picker-mounted = false;
+            }
+        }
+
+        if root.picker-open || root.picker-mounted: PickerModal {
+            open: root.picker-open;
+            width: 100%;
+            height: 100%;
+            dialog-width: root.picker-dialog-width;
+            anchor-y: root.picker-anchor-y;
+            tiles: root.targets;
+            tab-labels: root.picker-tab-labels;
+            tab-counts: root.picker-tab-counts;
+            tab: root.picker-tab;
+            empty-kind: root.targets-empty-kind;
+            empty-title: root.targets-empty-text;
+            empty-sub: root.targets-empty-sub;
+            search-placeholder: root.search-placeholder;
+            clear-label: root.clear-label;
+            rec-label: root.picker-rec-label;
+            capture-label: root.picker-capture-label;
+            stop-label: root.picker-stop-label;
+            foot-text: root.targets-foot-text;
+            foot-warning: root.targets-foot-warning;
+            opened => {
+                root.picker-opened();
+            }
+            closed => {
+                root.picker-closed();
+            }
+            tab-changed(index) => {
+                root.picker-tab-changed(index);
+            }
+            search-changed(query) => {
+                root.targets-search-changed(query);
+            }
+            tile-clicked(id) => {
+                root.target-clicked(id);
+            }
+        }
+
+        // ---------- title bar: collapsed unless hovered (round22, task4370) --
+        // Hidden in full screen (task152), along with the pane header and the
+        // status bar: the review pane takes the whole display.
+        //
+        // round22 (`.agents/docs/design/round22-titlebar-collapse.md`, mock
+        // `.tb` / `.tbhot`) took the bar out of the window's vertical stack and
+        // made it an overlay that slides down from the top edge only while the
+        // pointer is up there. Two consequences fall out of the move rather
+        // than out of any new code: the rail is now full height (it is the only
+        // thing left in the body's `HorizontalLayout`), and the pane below does
+        // not reflow when the bar comes and goes.
+        //
+        // Declared after the picker, not before it (the mock's `.tb` 7 <
+        // `.scrim` 20 no longer holds), so the bar draws over the picker while
+        // it is out. The round22-era ask for the bar to slide out during target
+        // selection too (this line landed 2026-09-14) holds again, but only
+        // right of the panel: once the flyout moved up to y 9 and started
+        // overlapping the hot zone, the user ruled on 2026-09-16 (t260916-3e57)
+        // to keep the bar down over it, and on 2026-09-17 narrowed that to the
+        // panel's rect alone (t260917-099c) -- while `picker-open`, `tbhot`
+        // starts at the panel's right edge instead of the rail's. So a press
+        // in the top 20px over the panel (and the 12px gap left of it, which
+        // one TouchArea cannot keep) reaches the picker's catcher or the panel
+        // itself; a press there right of the panel is eaten by `tbhot` again,
+        // as it was before 3e57, with only the 20..32px band getting through
+        // to the catcher. The toast and the drop overlay still draw over the
+        // bar.
+        //
+        // `x` is `size-rail`, not `size-rail + 1px`. The mock's `.tb` says
+        // `left:77px` and the task read that as 76 + a border, but the mock is
+        // `box-sizing:border-box`, so its `.rail` is 76px *including* its
+        // `border-right`. The rail has had no divider of its own since round25
+        // §4-5 (t260919-ee8c: the panel's frame is the edge), so the lane
+        // simply starts where the rail ends, at the panel's own x.
+        if !root.any-fullscreen: tblane := Rectangle {
+            // The lane the bar and its hot zone share: everything right of the
+            // rail. No background and no touch area of its own -- it exists so
+            // that `tbhot` and `tb` can be named from one another (an id inside
+            // an `if` is invisible to siblings outside it -- which is also why
+            // `hovered` and the grace `Timer` below live here and not on the
+            // window).
+            //
+            // Whether a sensor currently has the pointer.
+            // Or the key focus is on a caption button (t260928-d9b4, DS TitleBar
+            // README: the bar comes down for it too).
+            property <bool> hovered: tbhot.has-hover || tbhover.has-hover
+                || minimize-btn.key-focused || maximize-btn.key-focused || close-btn.key-focused;
+
+            // `root.titlebar-out`: whether the bar is out. Read by the bar's
+            // `y`, the hot zone's height and, since t260919-fd3d, the panel's
+            // top edge (`panel-drop`). **Latched**, not `hovered` itself: the mock's
+            // 0.3s exit delay used to live on the `out` transition, where it
+            // parks the bar at whatever height it had reached when the pointer
+            // left -- a flick across the top edge froze it half out for 0.3s
+            // before it retracted (ユーザー報告 2026-09-13
+            // 「一瞬ホバーして一瞬で離れると中途半端な位置で止まってしまう」).
+            //
+            // Moving the 0.3s here makes it a grace on the *state* instead of a
+            // pause in the *motion*: the bar always finishes the slide it
+            // started, re-entering inside the grace is free, and nothing ever
+            // stops between the two ends. Reading `tb.y` in the transition's
+            // `delay` would express this directly and is not available -- slint
+            // calls it a binding loop (`tb.y -> delay -> tb.y`).
+            //
+            // Recreated on leaving full screen (the `if` above). No `init`
+            // reset here any more: `root`'s own `changed any-fullscreen`
+            // already cleared `titlebar-out` the moment full screen started,
+            // so by the time this is rebuilt it is already retracted --
+            // resetting it again here, after the rebuild, was one frame too
+            // late and caused a drop-then-snap flicker on the way out
+            // (follow-up of t260919-fd3d).
+            changed hovered => {
+                if (self.hovered) {
+                    root.titlebar-out = true;
+                }
+            }
+
+            // The grace. Only ever runs in the 0.3s after the pointer leaves, so
+            // it costs nothing at rest -- which matters here, see KNOWLEDGE
+            // 「装飾が1つでも動いていると静止画面でも present が出続ける」.
+            // Where the bar and its hot zone start: 0, or the flyout panel's
+            // right edge while the picker is open (t260917-099c for the zone;
+            // t260928-b780 F4 for the bar, DS TitleBar README 「パネルの上で
+            // タイトルバーが下りてこない」, which fulfils t260916-3e57's intent).
+            // One formula, read by both, so they cannot drift apart.
+            property <length> lane-start: root.picker-open ? Tokens.picker-rail-gap + root.picker-dialog-width : 0px;
+
+            Timer {
+                interval: Tokens.duration-linger;
+                running: root.titlebar-out && !tblane.hovered;
+                triggered => {
+                    root.titlebar-out = false;
+                }
+            }
+
+            x: Tokens.size-rail;
+            y: 0px;
+            width: parent.width - Tokens.size-rail;
+            // Bar-height, no clip. The lane used to be 48px taller and
+            // clipping, to keep the bar's drop shadow off the rail (2026-09-16);
+            // round25 §4-1 took the shadow away with the bar's fill
+            // (t260919-fd3d). A retracted bar sits at y < 0, where the window's
+            // own edge cuts it.
+            height: Tokens.titlebar-height;
+
+            // The hot zone, under the bar (declared first = lower z, mock
+            // `.tbhot` z 6 against `.tb` z 7).
+            //
+            // 12px was the mock's number and **measured to be enough** (task4370
+            // Step 3); `Tokens.titlebar-hot-zone` moved to 20px on 2026-09-13
+            // (see its own comment in `tokens.slint`), one step out from that 12.
+            // The task suspected the window's resize band -- 8 logical
+            // px at dpi=96, `resize-band-width` -- would swallow the hover the
+            // way it swallows presses (task4120, task4320) and leave 4px of
+            // usable zone (at the original 12px). It does not: `i-slint-backend-winit-1.17.1`
+            // `event_loop.rs:378` computes the resize direction from
+            // `CursorMoved` and then stores the move in `pending_mouse_move`
+            // unconditionally; only the *press* is swallowed, at `:431`. Measured
+            // on the machine against the shipped bar: hovering the close button
+            // at y=3 (inside the band) gives `IDC_HAND` and the hovered glyph
+            // colour, exactly as y=10/16/20 do, while y=48 gives `IDC_ARROW` and
+            // the resting colour. Evidence:
+            // `.agents/tasks/evidence/4370-titlebar-collapse/`.
+            //
+            // This `TouchArea` does eat presses in its 20px -- the top 8 of
+            // which the resize band was eating already, so the new cost is the
+            // 12px between them (and the whole 20 while maximized, where there
+            // is no band). Accepted: once the bar is out it covers all 32px, so
+            // the only press that can fall through is one aimed during the
+            // 0.24s slide.
+            //
+            // Two heights, not one (ユーザー報告 2026-09-13
+            // 「たまにアニメーションがひっかかる」). `titlebar-hot-zone` is only
+            // what it takes to *start* the reveal; the moment the bar is out it
+            // becomes the bar's full height. Otherwise the band between the zone
+            // (20px) and the bar belongs to no sensor for as long as the slide
+            // lasts -- and a pointer that arrives at the top and keeps drifting
+            // down, which is the ordinary way to reach ─ □ ✕, lands in it. The
+            // state then drops mid-slide and the `out` transition's
+            // `duration-linger` holds the bar frozen half out for 0.3s
+            // before it retracts. That freeze is the 「ひっかかる」.
+            //
+            // Following the bar's *animated* bottom edge (`titlebar-height +
+            // tb.y`) does not fix it: early in the slide that edge is still
+            // above the pointer, which is exactly when the gap is widest. The
+            // sensor has to jump to the bar's final rect on the first hover
+            // frame, so `titlebar-out` is read here rather than any geometry.
+            //
+            // No binding loop: `has-hover` is set by the input system, not by a
+            // binding, so `titlebar-out -> tbhot.height -> has-hover` is not a cycle
+            // the compiler can see, and at runtime it is plain hysteresis --
+            // the zone only ever grows while the pointer is already inside it.
+            // While the target picker is open the zone starts at the panel's
+            // right edge (t260917-099c; t260916-3e57 had collapsed it whole).
+            // The flyout's panel sits at y 9, so its top 11px fell inside this
+            // zone: arriving on the flyout's own top edge slid the bar out over
+            // it (root/t260913-7ea7 measured 52 `barGlyphs` there against 0
+            // parked). Only the panel's band is taken out -- right of it the
+            // bar still slides out. The 12px gap between the rail and the panel
+            // goes with the band: one TouchArea is one rect, and two would give
+            // `titlebar-out`'s hysteresis two entrances. `x` is in `tblane`'s frame,
+            // which already starts at the rail, so the panel's right edge is
+            // `picker-rail-gap + picker-dialog-width` here, not `size-rail + …`.
+            // The picker opens from a rail press, left of `tblane`, so
+            // `tbhot.has-hover` is already false when it opens; a `titlebar-out`
+            // still in its 0.3s grace simply retracts.
+            tbhot := TouchArea {
+                x: tblane.lane-start;
+                y: 0px;
+                width: parent.width - self.x;
+                height: root.titlebar-out ? Tokens.titlebar-height : Tokens.titlebar-hot-zone;
+            }
+
+            // The bar itself: no fill and no shadow (round25 §4-1,
+            // t260919-fd3d) -- only its glyphs, on the window ground the panel
+            // steps down to uncover. Parked one pixel above the window when
+            // retracted (the mock's `translateY(calc(-100% - 1px))`).
+            //
+            // A plain `animate`, not `states`: the states block existed to
+            // animate the shadow alongside `y` in both directions, and with the
+            // shadow gone the two directions are the same animation. The 0.3s
+            // the mock writes as `transition-delay:.3s` is `titlebar-out`'s
+            // grace, not a delay here. Same duration, curve and trigger as
+            // `panel-drop`, so the bar and the panel's top edge move as one.
+            //
+            // While the picker is open the bar starts where `tbhot` does, right
+            // of the flyout's panel, so it never lands on the flyout's top
+            // edge (t260928-b780 F4); `tbhover`, filling it, narrows with it.
+            tb := Rectangle {
+                x: tblane.lane-start;
+                width: parent.width - self.x;
+                y: root.titlebar-out ? 0px : -(Tokens.titlebar-height + 1px);
+                height: Tokens.titlebar-height;
+                animate y {
+                    duration: Tokens.duration-reveal;
+                    easing: Motion.easing-reveal;
+                }
+
+                // One hover sensor for the whole bar, as an **ancestor** of
+                // everything in it rather than a sibling. A sibling cannot do
+                // this job: `CaptionButton` declares its own `TouchArea` later in z-order and wins
+                // the hit test, so a sibling's `has-hover` goes false the
+                // moment the pointer reaches X -- and the bar would retract
+                // 0.3s later, taking the button the user was aiming at with it.
+                // An ancestor does not have that problem:
+                // `i-slint-core-1.17.1/items/input_items.rs` sets
+                // `has_hover` in `input_event_filter_before_children`, which
+                // runs down the whole chain before any child sees the event,
+                // and returns `ForwardAndInterceptGrab` so the children still
+                // get it. Presses are untouched: this area declares no
+                // handlers, and its `input_event` is only reached when no
+                // descendant took the event -- which never happens, since the
+                // drag area below covers the bar.
+                tbhover := TouchArea {
+                    // Drag first, buttons on top: the caption buttons declare their own
+                    // TouchArea later in z-order and win the hit test where they overlap.
+                    TouchArea {
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                root.titlebar-pressed();
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: Tokens.space-3;
+                        spacing: Tokens.space-2;
+
+                        // Left of ─ □ ✕ (t260927-4c04 決めたこと 5, DS TitleBar):
+                        // while anything records, the DS `Tally` as a plain
+                        // chip -- lamp (steady: the rail's is the one that
+                        // blinks), the app's icon, the target, the buffer
+                        // length. No ground, no edge, `ink-muted`, no hover:
+                        // it must never read as the stage's stop button (the
+                        // user, 2026-09-27). Two or more give the count and up
+                        // to three app icons instead of one name. Plain, no
+                        // TouchArea: a press here is the drag above.
+                        // Two or more (t260928-b780 F11): the count, the DS
+                        // rule, then one mark per capture 2px apart -- all
+                        // inside the `Tally`, the same shape as one capture's
+                        // rule and name. The first capture's detail either way.
+                        if root.titlebar-tally-count > 0: Tally {
+                            y: (parent.height - self.height) / 2;
+                            variant: TallyVariant.plain;
+                            state: TallyState.live;
+                            label: root.titlebar-tally-label;
+                            target: root.titlebar-tally-count == 1 ? root.titlebar-tally-target : "";
+                            // An index past the end reads the default (no
+                            // icon, no letter), so an empty list needs no guard.
+                            app-icon: root.titlebar-tally-apps[0].icon;
+                            app-letter: root.titlebar-tally-apps[0].letter;
+                            app-hue: root.titlebar-tally-apps[0].hue;
+                            app-monitor: root.titlebar-tally-apps[0].monitor;
+                            app-icons: root.titlebar-tally-count > 1 ? root.titlebar-tally-apps : [];
+                            detail: root.titlebar-tally-detail;
+                        }
+
+                        // 確認 with a session loaded names it: the recorded
+                        // app's mark and the session's name (the user,
+                        // 2026-09-20), `ink-muted` 13px since the DS. Not while
+                        // that session is the one recording -- the chip already
+                        // says so (`live-chip-visible` is exactly "the stage's
+                        // session is running"). The mark is the history's three
+                        // rungs (t260928-b780 F3): the `monitor` glyph for a
+                        // whole screen, else the app's own icon (`review.rs`
+                        // `title_icon`), else its monogram. Plain, no
+                        // TouchArea: a press here is the drag above (the
+                        // rename that lived here went 2026-09-19).
+                        //
+                        // The marks are centred. The +1px measured 2026-09-20
+                        // was for the then-bundled face; IBM Plex Sans JP sits
+                        // high in its box, so the name beside it drops instead
+                        // (NudgedLabel's rule, t260928-4ac5).
+                        if root.active-pane == 0 && root.loaded-title != "" && !ReviewVm.live-chip-visible && root.loaded-whole-screen: AppIcon {
+                            y: (parent.height - self.height) / 2;
+                            commands: Icons.monitor;
+                            stroke-color: Tokens.ink-muted;
+                            size: 16px;
+                        }
+
+                        if root.active-pane == 0 && root.loaded-title != "" && !ReviewVm.live-chip-visible && !root.loaded-whole-screen && root.loaded-icon.width > 0: Image {
+                            source: root.loaded-icon;
+                            width: 16px;
+                            height: 16px;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        if root.active-pane == 0 && root.loaded-title != "" && !ReviewVm.live-chip-visible && !root.loaded-whole-screen && root.loaded-icon.width == 0 && root.loaded-app-letter != "": AppMonogram {
+                            y: (parent.height - self.height) / 2;
+                            letter: root.loaded-app-letter;
+                            hue: root.loaded-app-hue;
+                            size: 16px;
+                        }
+
+                        if root.active-pane == 0 && root.loaded-title != "" && !ReviewVm.live-chip-visible: Text {
+                            text: root.loaded-title;
+                            // DS optical centre, size-only: 13px drops 1.5px (README ~:64, t260928-4ac5 follow-up).
+                            y: 1.5px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            // DS TitleBar README: `ink-muted`, 13px -- the
+                            // label step, 500 (t260928-b780 F12).
+                            font-size: Tokens.type-label-size;
+                            font-weight: Tokens.type-label-weight;
+                            color: Tokens.ink-muted;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        // round8 §1: nothing but ─ □ ✕ lives at this end any more.
+                        // The stop button that task810 put here is gone -- one slip
+                        // beside the close box was too much to ask of it -- and the
+                        // verb moved onto the stage as the LIVE capsule.
+                        //
+                        // Butted together, 46 each with no gap (DS
+                        // `.lb-titlebar__controls`, as Windows does; t260928-b780
+                        // F1): their own layout, so the bar's 8px spacing stays
+                        // between the chip and them and never opens a seam of
+                        // drag strip between two buttons.
+                        caps := HorizontalLayout {
+                            spacing: 0px;
+
+                            minimize-btn := CaptionButton {
+                                commands: Icons.caption-minimize;
+                                clicked => {
+                                    root.minimize-clicked();
+                                }
+                            }
+
+                            maximize-btn := CaptionButton {
+                                commands: root.maximized ? Icons.caption-restore : Icons.caption-maximize;
+                                clicked => {
+                                    root.maximize-clicked();
+                                }
+                            }
+
+                            close-btn := CaptionButton {
+                                commands: Icons.caption-close;
+                                danger: true;
+                                clicked => {
+                                    root.close-clicked();
+                                }
+                            }
+                        }
+                    }
+
+                    // The export block-out reaches the title bar too (task2130): the
+                    // mock dims the whole window. Last child, so it takes the drag area
+                    // and the caption buttons it covers with it. The other two pieces
+                    // are the rail's, below, and the review pane's -- see `review.slint`
+                    // for why the cover is laid in pieces instead of one sheet.
+                    //
+                    // Minimize and close are deliberately left outside the cover
+                    // (user decision 2026-08-28, a departure from the mock): a multi-GB
+                    // export would otherwise hold the window hostage for its whole run,
+                    // and the progress row's own ✕ is already the way to stop it. They
+                    // are left *undimmed* on purpose -- bright reads as live, and a
+                    // dimmed button that still works is the live-but-invisible target
+                    // task194-B warned about, wearing the other mask. Everything else,
+                    // maximize and the drag strip included, stays blocked.
+                    //
+                    // `Tokens.scrim` in either theme (t260928-b780 F5). The buttons
+                    // are butted together since F1, so maximize takes one sheet of
+                    // its own, exactly its rect -- there is no seam left to cover.
+                    if ReviewVm.export-busy: Rectangle {
+                        x: 0;
+                        width: caps.x + minimize-btn.x;
+                        background: Tokens.scrim;
+
+                        TouchArea { }
+                    }
+
+                    if ReviewVm.export-busy: Rectangle {
+                        x: caps.x + maximize-btn.x;
+                        width: maximize-btn.width;
+                        background: Tokens.scrim;
+
+                        TouchArea { }
+                    }
+                }
+            }
+        }
+
+        // The chip's elapsed time (t260928-b780 F13, DS Tally `detail`
+        // 「バッファ長や経過時間」): only while the first capture has no
+        // retention limit. Rust re-reads it and writes `titlebar-tally-detail`
+        // only when the text changed -- it is in whole minutes, so once a
+        // minute -- and never rebuilds the chip's marks for it. 10s rather
+        // than 60s so the minute turns over at most 10s late whatever phase
+        // the timer started in.
+        Timer {
+            interval: 10s;
+            running: root.titlebar-tally-count > 0 && root.titlebar-tally-elapsed;
+            triggered => {
+                root.titlebar-tally-tick();
+            }
+        }
+
+        // The rail lamp's words (DS Tally `dot`: 「語はツールチップか
+        // aria-label で補う」, t260928-b780 F8): 「録画中」 / 「3 本を録画中」
+        // right of キャプチャ while it is hovered and something records.
+        // Here, after the title bar, rather than inside the rail item: the
+        // rail is declared before the page, which would paint over a tip
+        // reaching right of the rail. Not while the flyout is open -- the tip
+        // would land on its arrow.
+        Tooltip {
+            x: Tokens.size-rail + Tokens.space-1;
+            y: root.picker-anchor-y - self.height / 2;
+            armed: root.capture-hover && root.titlebar-tally-count > 0 && !root.picker-open && !root.any-fullscreen;
+            label: root.titlebar-tally-label;
+        }
+
+        // The stop confirmation that used to stand here is gone (task2030
+        // 判断4 / round9 §1-5). Every stop -- capsule, history LIVE row,
+        // picker LIVE tile, tray -- is immediate: what has been recorded is
+        // kept, so it destroys nothing, and a mis-click costs one click to
+        // undo. The stop toast is the feedback instead. The discard
+        // confirmation in `sessions.slint` is a different dialog and stays.
+
+        // The three-or-more warning bar that stood here (task2030 判断2) is the
+        // flyout's foot line now (t260927-711d, DS CaptureScreen 「状態」:
+        // no second bar at the window's foot).
+
+        // ---------- moving the buffer root (round5 §7-C) ----------
+        // Worth a confirmation because of what it does *not* do: existing
+        // recordings stay where they are, and the history follows the new
+        // root. Here rather than in the settings pane (t260928-7e9a F15, DS
+        // `.lb-scrim` is `position: fixed; inset: 0`): after the title bar,
+        // so its scrim covers the rail and the bar too and neither can take
+        // the pane -- and the dialog with it -- away. The toast still draws
+        // over it. The DS Dialog's parts (t260928-5f3b F2): the question,
+        // what will happen, and what stays behind as the note.
+        if SettingsVm.confirm-title != "": ConfirmDialog {
+            width: 100%;
+            height: 100%;
+            icon: Icons.folder;
+            title: SettingsVm.confirm-title;
+            body: SettingsVm.confirm-lead;
+            note: SettingsVm.confirm-note;
+            cancel-label: SettingsLabels.confirm-cancel;
+            ok-label: SettingsLabels.confirm-ok;
+            cancelled => {
+                SettingsVm.buffer-confirm-cancelled();
+            }
+            accepted => {
+                SettingsVm.buffer-confirm-accepted();
+            }
+        }
+
+        // ---------- toast (round5 3-C) ----------
+        // Last child of the body, so it draws over the picker too: a failure
+        // raised by something the modal did has to be visible from inside
+        // it. Bottom-right, 24 / 24 from the edges (DS `.lb-toaster`,
+        // `space-6`; t260928-5f3b).
+        // t260927-73fd: a stack (DS `.lb-toaster`, column, gap space-2),
+        // oldest on top and the newest at the bottom.
+        VerticalLayout {
+            width: 380px;
+            height: self.preferred-height;
+            x: parent.width - self.width - Tokens.space-6;
+            // t260926-e49b: lifted above the review panel's 自動録画 card
+            // while that card is on screen, so the switch stays reachable
+            // (an error toast stays until closed). The card, not the panel,
+            // decides: monitor recordings have no card. Since t260927-7d08
+            // the card is the panel's fixed floor, so `autorec-top` is the
+            // floor plate's top and no longer moves with a scroll. The
+            // stack's foot is the bottom card's, so lifting the stack is
+            // lifting that card.
+            y: root.active-pane == 0 && root.session-loaded
+                    && ReviewVm.panel-open && ReviewVm.autorec-visible
+                ? min(parent.height - self.height - Tokens.space-6,
+                    ReviewVm.autorec-top - parent.absolute-position.y
+                        - self.height - 12px)
+                // t260928-c743: the same lift over the history page's footer
+                // while its selection bar is up (the hold-to-discard button
+                // is its right end, right under the stack).
+                : root.active-pane == 1 && SessionsVm.selected > 0
+                ? min(parent.height - self.height - Tokens.space-6,
+                    SessionsVm.foot-top - parent.absolute-position.y
+                        - self.height - 12px)
+                // t260928-ce76: and over the clips page's selection bar. That
+                // bar is mounted by an `if`, so `foot-top` is 0 until its
+                // `init` has run once; 0 means "no bar yet", not the top edge.
+                : root.active-pane == 3 && root.clips-selection-count > 0
+                    && ClipVm.foot-top > 0
+                ? min(parent.height - self.height - Tokens.space-6,
+                    ClipVm.foot-top - parent.absolute-position.y
+                        - self.height - 12px)
+                : parent.height - self.height - Tokens.space-6;
+            spacing: Tokens.space-2;
+
+            for item in root.toasts: Rectangle {
+                // The layout owns this slot's `y`; the card inside it rises
+                // into place on its own (`rise`, the DS `lb-rise`).
+                height: card.height;
+
+                card := Toast {
+                    y: self.rise;
+                    title: item.title;
+                    detail: item.detail;
+                    detail-mono: item.mono;
+                    action: item.action;
+                    // The only action is フォルダで表示.
+                    action-icon: item.action != "" ? Icons.folder-open : "";
+                    variant: item.variant == 2
+                        ? ToastVariant.error
+                        : item.variant == 1
+                            ? ToastVariant.success
+                            : item.variant == 3 ? ToastVariant.warning : ToastVariant.info;
+                    // DS: the line along the foot drains over the card's
+                    // own hold (4 s, the marker's 2 s, the auto-stop's 4 s);
+                    // a card that waits to be closed has no clock.
+                    timeout: item.hold-ms * 1ms;
+                    dismissed => {
+                        root.toast-dismissed(item.id);
+                    }
+                    action-clicked => {
+                        root.toast-action-clicked(item.id);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- the inline-edit overlay (task3640) ----------
+    // While any inline edit is open, everything but the field itself is covered
+    // by these four rectangles, and the first press on them ends the edit and
+    // goes no further. **Being eaten is the ruling, not a defect** (user
+    // decision 2026-09-08, 案 B of three): pressing a button while an editor is
+    // open costs two clicks, the first to close and the second to act. Do not
+    // "fix" that by letting the press through, and do not add an exception for
+    // a widget that looks harmless -- either one puts the hole back.
+    //
+    // What the hole is for. Before this, a press ended an edit two ways: the
+    // field blurred, or a pane's ground `TouchArea` caught it. A `Btn` /
+    // `IconBtn` / `Switch` is on neither path -- a `TouchArea` takes no key
+    // focus, and it swallows the press before any ground area under it sees it
+    // -- so the editor simply stayed open behind whatever was clicked
+    // (task3430's V2, measured on the machine). Counting those places and
+    // patching each was 案 A, and it was rejected for the same reason: the next
+    // widget puts the hole back.
+    //
+    // Four rectangles rather than one sheet with a hit test: a `TouchArea` that
+    // is hit hides everything under it, so a single sheet would take the
+    // presses *inside* the field too, and caret placement and drag-select would
+    // die with them (task3430's V3). The frame leaves the field's own rect
+    // genuinely uncovered, so it keeps its clicks without anyone forwarding
+    // them.
+    //
+    // Laid at the window root, so `InlineEditVm`'s window coordinates are this
+    // element's coordinates and nothing is subtracted from them -- the
+    // subtraction is what put `settings.slint`'s language popup 294px off its
+    // box.
+    if root.inline-edit-open: Rectangle {
+        width: 100%;
+        height: 100%;
+
+        // Above the field's y.
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: Math.max(0px, InlineEditVm.field-y);
+            TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.close-inline-edit();
+                    }
+                }
+            }
+        }
+
+        // Below it.
+        Rectangle {
+            x: 0;
+            y: InlineEditVm.field-y + InlineEditVm.field-h;
+            width: 100%;
+            height: Math.max(0px,
+                root.height - (InlineEditVm.field-y + InlineEditVm.field-h));
+            TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.close-inline-edit();
+                    }
+                }
+            }
+        }
+
+        // Left of it, on the field's own band only -- the two above already
+        // own everything off that band.
+        Rectangle {
+            x: 0;
+            y: InlineEditVm.field-y;
+            width: Math.max(0px, InlineEditVm.field-x);
+            height: InlineEditVm.field-h;
+            TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.close-inline-edit();
+                    }
+                }
+            }
+        }
+
+        // Right of it.
+        Rectangle {
+            x: InlineEditVm.field-x + InlineEditVm.field-w;
+            y: InlineEditVm.field-y;
+            width: Math.max(0px,
+                root.width - (InlineEditVm.field-x + InlineEditVm.field-w));
+            height: InlineEditVm.field-h;
+            TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.close-inline-edit();
+                    }
+                }
+            }
+        }
+    }
+
+    // Always mounted (t260928-ce76) so the fade-out can outlive
+    // `DropVm.active`; the overlay hides itself once it has faded.
+    DropOverlay {
+        width: 100%;
+        height: 100%;
+    }
+
+}

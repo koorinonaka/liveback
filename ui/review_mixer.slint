@@ -1,0 +1,62 @@
+// One track's row in the review screen's mixer (task1300).
+//
+// Deliberately the same shape as the transport bar's master volume: a mute
+// button and the same `VolumeRail` the master slider is built on (task3980).
+// Two controls that do the same kind of thing should not look like two
+// different kinds of thing -- and the master slider is the one a person has
+// already learned.
+//
+// Named `review_mixer`, not `review_track`: that file is the *timeline's*
+// track and has nothing to do with sound.
+
+import { Tokens } from "tokens.slint";
+import { Icons } from "icons.slint";
+import { IconBtn, VolumeRail } from "controls.slint";
+
+export component MixerRow inherits Rectangle {
+    in property <string> name;
+    in property <float> volume-ratio;
+    in property <bool> muted;
+    callback volume-changed(float);
+    callback mute-toggled();
+
+    height: row.preferred-height;
+
+    row := HorizontalLayout {
+        spacing: 6px;
+
+        // The DS IconButton sm (28 / 16), its default (t260928-bae5 F6).
+        IconBtn {
+            icon: root.muted ? Icons.volume-muted : Icons.volume;
+            label: root.name;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                root.mute-toggled();
+            }
+        }
+
+        Text {
+            // The panel is 280px wide and an executable name can be longer
+            // than the space left over, so it elides rather than pushing the
+            // slider off the edge. The DS label: 13px 500.
+            width: 96px;
+            text: root.name;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: Tokens.type-label-size;
+            font-weight: Tokens.type-label-weight;
+            color: root.muted ? Tokens.ink-muted : Tokens.ink;
+        }
+
+        // The rail's own DS Slider colours (t260928-ac18); nothing overridden.
+        VolumeRail {
+            horizontal-stretch: 1;
+            height: Tokens.size-control-sm;
+            ratio: root.volume-ratio;
+            muted: root.muted;
+            ratio-changed(v) => {
+                root.volume-changed(v);
+            }
+        }
+    }
+}
