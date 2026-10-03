@@ -1,0 +1,124 @@
+// The clip player's view-model global (task3510), a separate file for the same
+// reason `review_vm.slint` is one: the pane and the pieces it is built from can
+// both reference it without a circular import.
+//
+// Why not reuse `ReviewVm` (task-create's exploration, 2026-09-07): the review
+// engine survives leaving the pane -- it only pauses (`offscreen_transport`) and
+// keeps that session's state in `ReviewVm`. A clip writing to
+// `ReviewVm.stage-frame` would collide with the picture the review comes back
+// to. So the clip player gets its own global with the transport half copied and
+// nothing else.
+//
+// Everything time-valued stays in Rust, exactly as on the review side: 100ns
+// ticks do not fit slint's 32-bit int, so this carries percents, ratios and
+// pre-formatted strings, and the callbacks hand back ratios.
+export global ClipVm {
+    // ---------- which clip, and whether the player is mounted ----------
+    // `open` is the *engine's* state -- a clip is decoded and this global's
+    // stage/transport fields describe it. It is not the grid's layout state:
+    // the in-grid expansion (round20 §2-1 B案) is `ClipsPane.expanded-row`,
+    // owned by task3880, and the two can disagree while the collapse animation
+    // runs. `row` indexes the same clip model the grid draws from.
+    in-out property <bool> open;
+    in-out property <int> row: -1;
+    // t260928-ce76: the selection bar's top edge in window coordinates, pushed
+    // from `clips.slint` (a global cannot bind to geometry) -- the clips twin
+    // of `SessionsVm.foot-top`. The toast in `app.slint` sits above it while
+    // the bar is up.
+    in-out property <length> foot-top;
+    // A案 (an overlay that scales up from the pressed tile) wanted
+    // `origin-x/y/width/height` here for the animation's start rectangle. B案
+    // was chosen instead (2026-09-08) and the grid animates its own footprint,
+    // so those four ports are not declared -- nothing would ever read them.
+
+    // ---------- video stage ----------
+    in-out property <image> stage-frame;
+    in-out property <bool> stage-has-frame;
+    // The clip's shape, so the surface can hold what it was recorded in. 16:9
+    // until a frame says otherwise, like the review stage.
+    in-out property <float> stage-aspect: 1.7777778;
+    // How big the picture is actually being drawn, in logical pixels: Rust
+    // turns it into physical pixels and resamples each frame to it (task990's
+    // rule, same reason).
+    callback stage-size-changed(length, length);
+    // Same as `ReviewVm.stage-rescaled` (t260918-b743).
+    callback stage-rescaled();
+    // The engine thread rings this through the event loop; the bin-side handler
+    // pulls the frame mailbox and updates the scalars.
+    callback frame-ready();
+    // ---------- hover storyboard (task3540, round20 §7 H2) ----------
+    // The tile being scrubbed once the dwell has passed, -1 otherwise.
+    in-out property <int> scrub-row: -1;
+    in-out property <image> scrub-frame;
+    in-out property <bool> scrub-has-frame;
+    // The pointer over a tile: (tile, x, tile width). Rust owns the dwell.
+    callback scrub-moved(int, length, length);
+    callback scrub-left(int);
+    // The storyboard thread rings this after each frame lands in its mailbox.
+    callback storyboard-ready();
+    // task3520. The picture's own box inside the surface, and a press in it --
+    // `ReviewStage`'s pair, with the same contract: coordinates are relative to
+    // the video box's top-left, so `ui_state::playback::stage_hit` can reject
+    // the letterbox without knowing anything about the grid.
+    callback stage-pressed(length, length, length, length);
+    callback stage-released();
+    // Any pointer sign of life over the surface (the review stage's `activity`).
+    // It is what resets the 3-second hide, decided in Rust.
+    callback activity();
+    // What the ±N second hover bands say, pushed once
+    // (`ui_state::playback::stage_zone_seconds`).
+    in-out property <string> zone-seconds;
+
+    // ---------- transport ----------
+    // round20 §2-2 fixed what the in-place controls carry: play/pause, the seek
+    // bar, the clock, mute + volume, and full screen. Repeat was added on top of
+    // that list by the user's own 2026-09-16 request (t260916-0ee4); range jump
+    // and the panel toggle are still out, so there is no port for those here.
+    in-out property <bool> playing;
+    in-out property <string> position-text;
+    in-out property <string> total-text;
+    in-out property <float> played-percent;
+    in-out property <float> volume-ratio;
+    in-out property <bool> muted;
+    in-out property <bool> fullscreen;
+    // Repeat, and deliberately not `ReviewVm.repeat-enabled`: the user's
+    // 2026-09-16 ruling is 「クリップ専用・保存しない」 (t260916-0ee4). It is
+    // held in `Clips` for as long as the app runs, so it survives opening
+    // another clip, and it is never written to `settings.json` -- a restart
+    // comes up off.
+    in-out property <bool> repeat-enabled;
+    // The 3-second auto-hide, decided in Rust
+    // (`ui_state::clip_player::controls_visible`) rather than by a timer in the
+    // `.slint`, so the rule has a test.
+    in-out property <bool> controls-visible;
+    // The other half of that rule's inputs: whatever the user is in the middle
+    // of on this side -- the pointer resting on the bar, a seek drag. Written
+    // here and read by the pump, because none of it is knowable in Rust
+    // (`controls_visible`'s `pinned`). The pane's own reasons to pin -- an open
+    // comment editor, an open menu -- are folded in on the Rust side.
+    in-out property <bool> controls-pinned;
+
+    // ---------- callbacks ----------
+    callback play-toggled();
+    callback seek(float);
+    callback volume-changed(float);
+    callback mute-toggled();
+    callback repeat-toggled();
+    callback fullscreen-toggled();
+    callback close-requested();
+    // The expanded player's 「フォルダで表示」 (t260928-6080 F2): the playing
+    // clip, selected in Explorer.
+    callback reveal-requested();
+    // Their words (the close's tooltip, the reveal's accessible name), pushed
+    // once from Rust. Here rather than on `ClipLabels`, which lives in
+    // `clips.slint` and would be a circular import from `clip_stage.slint`.
+    in property <string> close-label;
+    in property <string> reveal-label;
+    // The transport's accessible names (t260928-13e9): the review's
+    // `transport_tips` list, read by the same indices (1 play, 2 pause,
+    // 4 repeat, 9 mute, 10 unmute, 12 full screen, 13 leave full screen).
+    in property <[string]> transport-tips;
+    // (key text) -> handled. One argument, not the review's three: the clip
+    // player has no shift-modified or key-repeat transport step to tell apart.
+    callback key-pressed-cb(string) -> bool;
+}

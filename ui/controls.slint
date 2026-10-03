@@ -1,0 +1,4525 @@
+// Shared controls, transcribed from the React-era src/styles/chrome.css and
+// src/App.css the same way tokens.slint was transcribed from tokens.css. All
+// three CSS files went away with the React app in task131 -- this file is the
+// source of truth now, and the design-side reference is the mock,
+// .agents/docs/design/mock/liveback-mock.html (see .agents/docs/design/README.md).
+// The transcription rule still holds: `color-mix(in oklch, X, transparent N%)`
+// becomes `X.with-alpha(1 - N)` with the original expression in a comment.
+
+import { Dark, Tokens, Motion } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+
+// The words these shared controls show without a caller passing them: the
+// Toast's ×, the SearchField's clear button (read aloud only) and a hold
+// row's trailing hint in a menu. Pushed from Rust for the language in force
+// (`push_shell_labels`), so an English UI does not fall back to Japanese.
+export global ControlLabels {
+    in property <string> close;
+    in property <string> clear;
+    in property <string> hold;
+    in property <string> keep-holding;
+}
+
+// A run of static text the user can select and copy (task2380). `Text` has no
+// selection at all in slint, so this is a read-only `TextInput` -- which
+// brings mouse drag, double-click for a word, triple-click for the line and
+// Ctrl+C with it, and needs no keyboard handling of its own.
+//
+// Not for text that sits inside a click target: a selection drag on a chip, a
+// key cap or a button fights the click it lives in. Those stay `Text`.
+//
+// `single-line: false` so a caller can just set `wrap: word-wrap`; with the
+// default `no-wrap` it still draws as one line. `overflow: elide` has no
+// equivalent here -- a caller that needs the box to cut the run sets `clip` on
+// the box (recorded as a deliberate diff: the ellipsis is gone, the text is
+// reachable by dragging instead).
+export component SelText inherits TextInput {
+    read-only: true;
+    single-line: false;
+    // Nothing to type at, so no caret -- only the selection is drawn.
+    text-cursor-width: 0px;
+    // The pair every `TextInput` in the app carries (task1140).
+    selection-background-color: Tokens.color-primary;
+    selection-foreground-color: Tokens.color-on-primary;
+}
+
+// ---------- buttons (t260927-2ee5: the design system's Button / IconButton) ----------
+// Sizes are the DS's outer box: its CSS is `border-box` with the edge drawn as
+// an inset 1px line, and slint's `border-width` also paints inside, so the
+// same numbers give the same box. Outer rings (focus, the fields' 3px halo)
+// are drawn as a larger sibling rectangle around the box.
+//
+// No press squash: the DS's 0.97 is not taken (task3300, ユーザー判断
+// 2026-09-07). A press is the ground colour alone.
+
+export enum BtnVariant { secondary, primary, ghost, danger-quiet, danger }
+export enum ControlSize { sm, md, lg }
+export enum IconBtnVariant { ghost, secondary, stage }
+export enum KeycapTone { plain, on-accent, stage }
+
+// Press-and-hold to confirm (the DS's `useHold`), shared by `Btn` and the
+// `ContextMenu` row so the two cannot drift. `start()` on press, `cancel()` on
+// release; `completed` fires once, when the fill is full. Let go inside 250ms
+// and the phase goes to `hint` for 1.8s instead -- the owner shows its hint
+// and shakes by `shake-dx`.
+//
+// phase: 0 idle / 1 holding / 2 done (the check shows for 1.4s) / 3 hint.
+// `progress` is the fill: linear over `duration-hold` while holding, back over
+// `duration-base` / `easing-exit` when let go. `states` rather than a plain
+// `animate`, so each run's clock is the one fixed at the phase change
+// (KNOWLEDGE「`states` の遷移時計」). `duration-hold` is not zeroed by
+// reduce-motion -- the fill *is* the progress -- but the shake is.
+component HoldGesture {
+    in property <duration> hold-time: Tokens.duration-hold;
+    out property <int> phase: 0;
+    out property <float> progress: 0;
+    // DS `lb-shake`: -3 / 3 / -2 / 2 px over 360ms.
+    out property <length> shake-dx: root.shake-t <= 0 || root.shake-t >= 1 ? 0px
+        : root.shake-t < 0.2 ? -15px * root.shake-t
+        : root.shake-t < 0.4 ? -3px + 30px * (root.shake-t - 0.2)
+        : root.shake-t < 0.6 ? 3px - 25px * (root.shake-t - 0.4)
+        : root.shake-t < 0.8 ? -2px + 20px * (root.shake-t - 0.6)
+        : 2px - 10px * (root.shake-t - 0.8);
+    callback completed();
+
+    property <bool> past-quick;
+    property <float> shake-t: 0;
+
+    public function start() {
+        if (root.phase == 1 || root.phase == 2) {
+            return;
+        }
+        root.past-quick = false;
+        root.phase = 1;
+    }
+
+    public function cancel() {
+        if (root.phase == 1) {
+            root.phase = root.past-quick ? 0 : 3;
+        }
+    }
+
+    Timer {
+        interval: 250ms;
+        running: root.phase == 1;
+        triggered => {
+            root.past-quick = true;
+        }
+    }
+
+    Timer {
+        interval: root.hold-time;
+        running: root.phase == 1;
+        triggered => {
+            root.phase = 2;
+            root.completed();
+        }
+    }
+
+    Timer {
+        interval: 1400ms;
+        running: root.phase == 2;
+        triggered => {
+            root.phase = 0;
+        }
+    }
+
+    Timer {
+        interval: 1800ms;
+        running: root.phase == 3;
+        triggered => {
+            root.phase = 0;
+        }
+    }
+
+    states [
+        holding when root.phase == 1: {
+            progress: 1;
+            in {
+                animate progress { duration: root.hold-time; easing: linear; }
+            }
+            out {
+                animate progress { duration: Tokens.duration-base; easing: Motion.easing-exit; }
+            }
+        }
+        done when root.phase == 2: {
+            progress: 1;
+            out {
+                animate progress { duration: Tokens.duration-base; easing: Motion.easing-exit; }
+            }
+        }
+        hint when root.phase == 3 && !Tokens.reduce-motion: {
+            shake-t: 1;
+            in {
+                animate shake-t { duration: 360ms; easing: linear; }
+            }
+        }
+    ]
+}
+
+// The DS `Keycap` (`lb-keys` / `lb-kbd`): one cap per key and no "+" between
+// them. `size` is md 20 / sm 16 (lg reads as md).
+export component Keycap inherits HorizontalLayout {
+    in property <[string]> keys;
+    in property <ControlSize> size: ControlSize.md;
+    in property <KeycapTone> tone: KeycapTone.plain;
+
+    spacing: Tokens.space-0-5;
+
+    for key in root.keys: cap := Rectangle {
+        property <length> side: root.size == ControlSize.sm ? 16px : 20px;
+        height: self.side;
+        width: max(self.side, cap-text.preferred-width + (root.size == ControlSize.sm ? 8px : 10px));
+        opacity: root.tone == KeycapTone.on-accent ? 0.7 : 1;
+
+        // `0 1px 0 line-strong`: the cap's lip. A copy of the face one pixel
+        // lower, drawn first, so the face covers all of it but the bottom row.
+        if root.tone == KeycapTone.plain: Rectangle {
+            y: 1px;
+            border-radius: Tokens.radius-xs;
+            background: Tokens.line-strong;
+        }
+
+        Rectangle {
+            border-radius: Tokens.radius-xs;
+            border-width: 1px;
+            border-color: root.tone == KeycapTone.on-accent
+                ? Tokens.on-accent
+                : root.tone == KeycapTone.stage ? Tokens.on-stage-muted : Tokens.line-strong;
+            background: root.tone == KeycapTone.on-accent
+                ? transparent
+                : root.tone == KeycapTone.stage ? Tokens.stage-veil : Tokens.raised;
+        }
+
+        cap-text := Text {
+            text: key;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            font-family: Tokens.font-family-mono;
+            font-size: root.size == ControlSize.sm ? 10px : 11px;
+            font-weight: 600;
+            color: root.tone == KeycapTone.on-accent
+                ? Tokens.on-accent
+                : root.tone == KeycapTone.stage ? Tokens.on-stage : Tokens.ink-muted;
+        }
+    }
+}
+
+// The DS `.lb-tip` plate: `Tooltip` and a hold button's hint both draw it.
+component TipPlate inherits Rectangle {
+    in property <string> label;
+    in property <int> label-weight: 400;
+    in property <[string]> shortcut;
+
+    width: tip-row.preferred-width;
+    height: 26px;
+    border-radius: Tokens.radius-sm;
+    border-width: 1px;
+    border-color: Tokens.line-strong;
+    background: Tokens.overlay;
+    drop-shadow-offset-y: Tokens.shadow-overlay-offset-y;
+    drop-shadow-blur: Tokens.shadow-overlay-blur;
+    drop-shadow-color: Tokens.shadow-overlay-color;
+
+    tip-row := HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: Tokens.space-2;
+        alignment: center;
+
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            font-size: 12px;
+            font-weight: root.label-weight;
+            color: Tokens.ink;
+        }
+
+        // A layout's cross axis puts a 16px cap at the top of the 26px row;
+        // the column centres it (t260928-88a2, the settings rows' pattern).
+        if root.shortcut.length > 0: VerticalLayout {
+            alignment: center;
+
+            Keycap {
+                keys: root.shortcut;
+                size: ControlSize.sm;
+            }
+        }
+    }
+}
+
+// A confirmed hold's check, drawn left to right by a widening clip (決めたこと
+// 3). Mounted by an `if`, so the entry runs from `init`. The clip runs from the
+// tick's left end to its right end (`Icons.check` x 4.5 .. 15.5 on the 20 grid,
+// plus the round cap's half stroke either side -- the bounds `AppIcon`'s own
+// hover `draw` uses), not from 0 to the box: the ink is only the middle of the
+// box, and with easing-standard front-loaded a full-box clip finished drawing
+// about a third of the way in (t260928-d906).
+component CheckDraw inherits Rectangle {
+    in property <length> size: 16px;
+    in property <color> ink;
+
+    width: root.size;
+
+    Rectangle {
+        x: 0;
+        width: root.size * 3.75 / 20;
+        clip: true;
+        init => {
+            self.width = root.size * 16.25 / 20;
+        }
+        animate width {
+            duration: Tokens.reduce-motion ? 0ms : 420ms;
+            easing: Motion.easing-standard;
+        }
+
+        AppIcon {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            commands: Icons.check;
+            stroke-color: root.ink;
+            size: root.size;
+        }
+    }
+}
+
+// A label set on its optical centre (決めたこと 4). IBM Plex Sans JP sits high
+// in its box, so the label is dropped -- never the icon beside it. The drop
+// is the caller's `nudge`. The DS says 13px by 1.5px and 11-12 / 14px by 1px,
+// measured in a browser; measured here instead (slint's text box, 400%,
+// `evidence/t260927-2ee5-controls/optical.csv`): 12 / 13 / 14px by 1px and
+// the 11px Badge by 0.5px put the glyphs' ink within 0.5px of centre, where
+// the DS's 1.5px left the 13px label 1px low.
+component NudgedLabel inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: 13px;
+    in property <int> font-weight: 500;
+    in property <color> ink;
+    in property <length> nudge: 1px;
+
+    width: label-text.preferred-width;
+
+    label-text := Text {
+        y: root.nudge;
+        height: parent.height;
+        text: root.text;
+        vertical-alignment: center;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        color: root.ink;
+    }
+}
+
+// The face of a `Btn`: icon and label. A hold button draws it twice -- once in
+// its own colours and once, clipped to the fill, in the fill's (the DS's
+// `.lb-hold-fill` repeats the face the same way), so the part under the fill
+// reads inverted.
+component BtnFace inherits HorizontalLayout {
+    in property <string> icon;
+    in property <string> label;
+    in property <color> ink;
+    in property <length> icon-size;
+    in property <length> label-size;
+    in property <int> label-weight;
+    in property <length> nudge;
+    in property <length> pad;
+    in property <length> gap;
+    in property <bool> icon-active;
+    in property <bool> done;
+    // The DS Button's `keys`: caps right after the label, `space-1` apart.
+    in property <[string]> keys;
+    in property <ControlSize> keys-size;
+    in property <KeycapTone> keys-tone;
+
+    padding-left: root.label == "" ? 0 : root.pad;
+    padding-right: root.label == "" ? 0 : root.pad;
+    spacing: root.gap;
+    alignment: center;
+
+    if root.icon != "" || root.done: Rectangle {
+        width: root.icon-size;
+
+        if !root.done: AppIcon {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            commands: root.icon;
+            active: root.icon-active;
+            stroke-color: root.ink;
+            size: root.icon-size;
+        }
+
+        if root.done: CheckDraw {
+            x: 0;
+            size: root.icon-size;
+            ink: root.ink;
+        }
+    }
+
+    if root.label != "": HorizontalLayout {
+        spacing: Tokens.space-1;
+
+        NudgedLabel {
+            text: root.label;
+            font-size: root.label-size;
+            font-weight: root.label-weight;
+            ink: root.ink;
+            nudge: root.nudge;
+        }
+
+        // A layout's cross axis puts the cap at the top; the column centres it.
+        if root.keys.length > 0: VerticalLayout {
+            alignment: center;
+
+            Keycap {
+                keys: root.keys;
+                size: root.keys-size;
+                tone: root.keys-tone;
+            }
+        }
+    }
+}
+
+// The DS Button. `variant` secondary (default) / primary / ghost /
+// danger-quiet / danger, `size` sm 28 / md 32 / lg 40.
+// The keyboard half of a pressable control (t260928-d9b4): a Tab stop that
+// takes Enter / Space for itself and rejects every other key, so it bubbles
+// up to the pane's own `FocusScope` and the screen's shortcuts keep working
+// while a control has the focus. A click never focuses it (`focus-on-click:
+// false`), so `has-focus` means "arrived by keyboard" -- the DS's
+// `:focus-visible` -- and the ring can hang off it alone.
+//
+// `pressed` fires as the key goes down, once: Windows repeats the down while
+// the key is held, and `repeat` never says so (KNOWLEDGE「`KeyEvent.repeat`」).
+// `released` fires as it comes up, or when the focus leaves with it down --
+// the pair a hold button needs. Both are accepted, press and release alike,
+// so a pane that books key-downs (the review's `key_down`) never sees half
+// of a pair.
+export component PressFocus inherits FocusScope {
+    // The control's own corner radius; the ring's is 4px more.
+    in property <length> ring-radius: Tokens.radius-sm;
+    // Off for a control that lives inside something that is already one Tab
+    // stop (a clip card's 「…」).
+    in property <bool> tab-stop: true;
+    // Negative draws the ring inside the box, for a control whose outside is
+    // the window's edge (the caption buttons).
+    in property <length> ring-gap: 2px;
+    // Off for a stop that only carries the ring and lets every key through to
+    // the pane (the expanded clip's seek bar, t260929-9dc3).
+    in property <bool> press-keys: true;
+    callback pressed();
+    callback released();
+
+    property <bool> down;
+
+    focus-on-click: false;
+    focus-on-tab-navigation: root.tab-stop;
+
+    changed has-focus => {
+        if (!self.has-focus && root.down) {
+            root.down = false;
+            root.released();
+        }
+    }
+
+    key-pressed(event) => {
+        if (root.press-keys && (event.text == " " || event.text == Key.Return)) {
+            if (!root.down) {
+                root.down = true;
+                root.pressed();
+            }
+            return accept;
+        }
+        reject
+    }
+
+    key-released(event) => {
+        if (root.press-keys && (event.text == " " || event.text == Key.Return)) {
+            if (root.down) {
+                root.down = false;
+                root.released();
+            }
+            return accept;
+        }
+        reject
+    }
+
+    // The DS focus: a 2px `focus` line, `ring-gap` (2px) off the box.
+    if root.has-focus: Rectangle {
+        x: -2px - root.ring-gap;
+        y: -2px - root.ring-gap;
+        width: root.width + 2 * (2px + root.ring-gap);
+        height: root.height + 2 * (2px + root.ring-gap);
+        border-radius: Math.max(0px, root.ring-radius + 2px + root.ring-gap);
+        border-width: 2px;
+        border-color: Tokens.focus;
+    }
+}
+
+export component Btn inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <BtnVariant> variant: BtnVariant.secondary;
+    in property <ControlSize> size: ControlSize.md;
+    // The names the screens were written against, kept so no call site moves
+    // with this task: `primary` is `variant: primary` and `danger` is
+    // `variant: danger` -- the solid one, whose only caller is
+    // `ConfirmDialog`'s destructive confirm, which is where the DS puts it.
+    in property <bool> primary;
+    in property <bool> danger;
+    in property <bool> disabled;
+    // Press and hold to confirm (決めたこと 3). A hold button never fires
+    // `clicked`; `hold-complete` fires once, when the fill is full.
+    in property <bool> hold;
+    in property <string> hold-hint: "長押しで確定";
+    // The DS Button's `keys` (t260928-5f3b): the shortcut as Keycaps right
+    // after the label -- the primary's Enter. `on-accent` caps on a solid
+    // ground, plain ones elsewhere.
+    in property <[string]> keys;
+    // For the specimen (`evidence/t260927-2ee5-controls/`): the hover and
+    // pressed looks without a pointer. Nothing in the app sets these.
+    in property <bool> force-hover;
+    in property <bool> force-pressed;
+    callback clicked;
+    callback hold-complete;
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: !root.disabled;
+    accessible-action-default => {
+        if (!root.hold && !root.disabled) {
+            root.clicked();
+        }
+    }
+
+    // Readable from outside so a caller can keep the button on screen while
+    // the pointer is on it (`IconBtn` carries the same).
+    out property <bool> has-hover: touch.has-hover;
+    out property <float> hold-progress: gesture.progress;
+    out property <int> hold-phase: gesture.phase;
+
+    // The keyboard path's two ends, public so the specimen can press without
+    // a pointer.
+    public function hold-start() {
+        gesture.start();
+    }
+
+    public function hold-cancel() {
+        gesture.cancel();
+    }
+
+    // For `ConfirmDialog`'s Tab loop (t260928-d9b4).
+    out property <bool> key-focused: fs.has-focus;
+    public function take-focus() {
+        fs.focus();
+    }
+
+    property <BtnVariant> v: root.primary
+        ? BtnVariant.primary
+        : root.danger ? BtnVariant.danger : root.variant;
+    property <bool> hovered: (touch.has-hover || root.force-hover) && !root.disabled;
+    property <bool> down: (touch.pressed || root.force-pressed) && !root.disabled;
+    property <length> box-height: root.size == ControlSize.sm
+        ? Tokens.size-control-sm
+        : root.size == ControlSize.lg ? Tokens.size-control-lg : Tokens.size-control-md;
+    property <color> ground: root.disabled
+        ? (root.v == BtnVariant.ghost ? transparent : Tokens.fill)
+        : root.v == BtnVariant.primary
+            ? (root.down ? Tokens.accent-pressed : root.hovered ? Tokens.accent-hover : Tokens.accent)
+        : root.v == BtnVariant.danger
+            ? (root.hovered || root.down ? Tokens.danger-fill-hover : Tokens.danger-fill)
+        : root.v == BtnVariant.danger-quiet
+            ? (root.hovered || root.down ? Tokens.danger-soft : Tokens.fill)
+        : root.v == BtnVariant.ghost
+            ? (root.down ? Tokens.fill-pressed : root.hovered ? Tokens.fill-hover : transparent)
+            : (root.down ? Tokens.fill-pressed : root.hovered ? Tokens.fill-hover : Tokens.fill);
+    property <color> ink: root.disabled
+        ? Tokens.ink-faint
+        : root.v == BtnVariant.primary
+            ? Tokens.on-accent
+        : root.v == BtnVariant.danger
+            ? Tokens.on-danger
+        : root.v == BtnVariant.danger-quiet
+            ? Tokens.danger
+        : root.v == BtnVariant.ghost
+            ? (root.hovered ? Tokens.ink : Tokens.ink-muted)
+            : Tokens.ink;
+    // The hold fill: `danger-fill` for the quiet destructive button (and the
+    // hover step of it for the solid one), `accent` for everything else.
+    property <color> fill-ground: root.v == BtnVariant.danger-quiet
+        ? Tokens.danger-fill
+        : root.v == BtnVariant.danger ? Tokens.danger-fill-hover : Tokens.accent;
+    property <color> fill-ink: root.v == BtnVariant.danger-quiet || root.v == BtnVariant.danger
+        ? Tokens.on-danger
+        : Tokens.on-accent;
+    property <length> icon-size: root.size == ControlSize.lg ? 20px : 16px;
+    property <length> label-size: root.size == ControlSize.sm
+        ? 12px
+        : root.size == ControlSize.lg ? 14px : 13px;
+    property <int> label-weight: root.v == BtnVariant.primary || root.v == BtnVariant.danger
+        || root.size == ControlSize.lg ? 600 : 500;
+    property <length> nudge: 1px;
+    property <length> pad: root.size == ControlSize.sm
+        ? 10px
+        : root.size == ControlSize.lg ? 18px : 14px;
+    property <length> gap: root.size == ControlSize.sm ? 6px : 8px;
+    property <bool> icon-active: root.hovered || fs.has-focus;
+    property <ControlSize> keys-size: root.size == ControlSize.sm ? ControlSize.sm : ControlSize.md;
+    property <KeycapTone> keys-tone: !root.disabled
+        && (root.v == BtnVariant.primary || root.v == BtnVariant.danger)
+        ? KeycapTone.on-accent : KeycapTone.plain;
+
+    // DS 動き: colour changes over `duration-fast`, the press itself over
+    // `duration-instant` (t260928-5f3b F12).
+    animate ink {
+        duration: Tokens.duration-fast;
+        easing: Motion.easing-standard;
+    }
+
+    height: root.box-height;
+    // A floor rather than a pinned width (task330): a caller that asks the
+    // button to stretch gets to. Icon-only, it is square.
+    min-width: root.label == "" ? root.box-height : face.preferred-width;
+    horizontal-stretch: 0;
+
+    gesture := HoldGesture {
+        completed => {
+            root.hold-complete();
+        }
+    }
+
+    // Every button is a Tab stop (t260928-d9b4): Space / Enter presses a
+    // plain one, and on a hold button the key going down starts the fill and
+    // coming up lets go.
+    fs := PressFocus {
+        enabled: !root.disabled;
+        ring-radius: plate.border-radius;
+        pressed => {
+            if (root.hold) {
+                gesture.start();
+            } else {
+                root.clicked();
+            }
+        }
+        released => {
+            if (root.hold) {
+                gesture.cancel();
+            }
+        }
+    }
+
+    plate := Rectangle {
+        x: gesture.shake-dx;
+        width: root.width;
+        height: root.height;
+        border-radius: root.size == ControlSize.lg ? Tokens.radius-md : Tokens.radius-sm;
+        border-width: !root.disabled
+            && (root.v == BtnVariant.secondary || root.v == BtnVariant.danger-quiet) ? 1px : 0px;
+        border-color: Tokens.line-strong;
+        background: root.ground;
+        animate background {
+            duration: root.down ? Tokens.duration-instant : Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+
+        face := BtnFace {
+            icon: root.icon;
+            label: root.label;
+            ink: root.ink;
+            icon-size: root.icon-size;
+            label-size: root.label-size;
+            label-weight: root.label-weight;
+            nudge: root.nudge;
+            pad: root.pad;
+            gap: root.gap;
+            icon-active: root.icon-active;
+            done: gesture.phase == 2;
+            keys: root.keys;
+            keys-size: root.keys-size;
+            keys-tone: root.keys-tone;
+        }
+
+        if root.hold: Rectangle {
+            x: 0;
+            width: parent.width * gesture.progress;
+            clip: true;
+
+            Rectangle {
+                x: 0;
+                width: plate.width;
+                height: plate.height;
+                border-radius: plate.border-radius;
+                background: root.fill-ground;
+
+                BtnFace {
+                    icon: root.icon;
+                    label: root.label;
+                    ink: root.fill-ink;
+                    icon-size: root.icon-size;
+                    label-size: root.label-size;
+                    label-weight: root.label-weight;
+                    nudge: root.nudge;
+                    pad: root.pad;
+                    gap: root.gap;
+                    icon-active: root.icon-active;
+                    done: gesture.phase == 2;
+                    keys: root.keys;
+                    keys-size: root.keys-size;
+                    keys-tone: KeycapTone.on-accent;
+                }
+            }
+        }
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            if (!root.hold) {
+                root.clicked();
+            }
+        }
+        // The pointer hold. A `TouchArea` keeps the grab while pressed, so
+        // leaving the box with the button down keeps the hold running until
+        // the release (決めたこと 3).
+        pointer-event(event) => {
+            if (root.hold) {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    gesture.start();
+                } else if ((event.kind == PointerEventKind.up && event.button == PointerEventButton.left)
+                    || event.kind == PointerEventKind.cancel) {
+                    gesture.cancel();
+                }
+            }
+        }
+    }
+
+    // Let go too soon: the hint above the button (DS `.lb-btn__hint`).
+    if gesture.phase == 3: TipPlate {
+        x: (root.width - self.width) / 2;
+        y: -self.height - 6px;
+        label: root.hold-hint;
+        label-weight: 500;
+    }
+}
+
+// The DS IconButton. `variant` ghost (default) / secondary / stage, `pressed`
+// for a toggle that is on, `badge` for the small dot ("live" / "marker" /
+// "accent"). `size` is the only size: sm 28 / md 32 / lg 40, a 16px glyph on
+// sm and 20px above (t260928-5f3b F14: the free `box` / `icon-size` are gone,
+// so no call site can leave the three steps). The default stays sm, the box
+// the app's icon buttons already had.
+//
+// `label` is the button's name for a screen reader (DS: `label` 必須) --
+// an icon has no words of its own. The tooltip stays the caller's (Tooltip).
+//
+// `danger` colours the hover and pressed states only: a destructive row action
+// that is red at rest turns the whole list into a warning.
+//
+// `hold` makes it press-and-hold to confirm, the same gesture as `Btn`'s
+// (`HoldGesture`): the fill runs left to right, a check on completion, the
+// hint and a shake when let go too soon. A hold button never fires `clicked`.
+//
+// `dock` (t260928-ac18) is the review band's crossover: 1 (the default) is
+// the ghost's own theme colours, 0 the on-stage ones over the floating band's
+// black, and the band slides between the two with the panel.
+export component IconBtn inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <IconBtnVariant> variant: IconBtnVariant.ghost;
+    in property <float> dock: 1;
+    in property <ControlSize> size: ControlSize.sm;
+    in property <bool> pressed;
+    in property <string> badge;
+    in property <bool> danger;
+    // The glyph in `danger` at rest too, not only under the pointer: the
+    // history's LIVE-row stop (t260927-9a17, DS SessionRow 「danger 色」).
+    in property <bool> danger-ink;
+    in property <bool> disabled;
+    in property <bool> hold;
+    in property <string> hold-hint: "長押しで確定";
+    // Off where the button sits inside something that is already one Tab
+    // stop: a clip card's 「…」 (t260928-d9b4).
+    in property <bool> tab-stop: true;
+    // Off for a button faded out over something that takes the press
+    // instead: the pointer goes through, the Tab stop stays (the expanded
+    // clip's ✕, t260929-fcc6). Not `disabled`, which drops the Tab stop.
+    in property <bool> pointer-input: true;
+    // Specimen only, as on `Btn`.
+    in property <bool> force-hover;
+    in property <bool> force-pressed;
+    callback clicked;
+    callback hold-complete;
+
+    // Readable from outside so a caller can keep the button on screen while the
+    // pointer is on it. A row whose hover is computed somewhere else needs this:
+    // see the pencils in `sessions_tile.slint` (task184).
+    out property <bool> has-hover: touch.has-hover;
+    out property <float> hold-progress: gesture.progress;
+    out property <int> hold-phase: gesture.phase;
+    // The key focus is on it (t260928-d9b4).
+    out property <bool> key-focused: fs.has-focus;
+
+    public function hold-start() {
+        gesture.start();
+    }
+
+    public function hold-cancel() {
+        gesture.cancel();
+    }
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: !root.disabled;
+    accessible-action-default => {
+        if (!root.hold && !root.disabled) {
+            root.clicked();
+        }
+    }
+
+    property <bool> hovered: (touch.has-hover || root.force-hover) && !root.disabled;
+    property <bool> down: (touch.pressed || root.force-pressed) && !root.disabled;
+    property <bool> stage: root.variant == IconBtnVariant.stage;
+    property <length> box: root.size == ControlSize.sm
+        ? Tokens.size-control-sm
+        : root.size == ControlSize.lg ? Tokens.size-control-lg : Tokens.size-control-md;
+    property <length> icon-size: root.size == ControlSize.sm ? Tokens.size-icon-sm : Tokens.size-icon;
+    property <color> ink: root.disabled
+        ? Tokens.ink-faint.mix(Dark.ink-faint, root.dock)
+        : root.pressed
+            ? Tokens.accent-text.mix(Dark.accent-text, root.dock)
+        : root.danger && (root.hovered || root.down || root.danger-ink)
+            ? Tokens.danger
+        : root.stage
+            ? Dark.on-stage
+        : root.hovered || root.variant == IconBtnVariant.secondary
+            ? Tokens.ink.mix(Dark.on-stage, root.dock)
+            : Tokens.ink-muted.mix(Dark.on-stage, root.dock);
+    // The hold fill, as `Btn`'s: `danger-fill` for a destructive one.
+    property <color> fill-ground: root.danger ? Tokens.danger-fill : Tokens.accent;
+    property <color> fill-ink: root.danger ? Tokens.on-danger : Tokens.on-accent;
+
+    width: root.box;
+    height: root.box;
+
+    gesture := HoldGesture {
+        completed => {
+            root.hold-complete();
+        }
+    }
+
+    // A Tab stop, as `Btn` (t260928-d9b4); the keyboard path of `hold` is
+    // the key held down.
+    fs := PressFocus {
+        enabled: !root.disabled;
+        tab-stop: root.tab-stop;
+        ring-radius: plate.border-radius;
+        pressed => {
+            if (root.hold) {
+                gesture.start();
+            } else {
+                root.clicked();
+            }
+        }
+        released => {
+            if (root.hold) {
+                gesture.cancel();
+            }
+        }
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled && root.pointer-input;
+        mouse-cursor: pointer;
+        clicked => {
+            if (!root.hold) {
+                root.clicked();
+            }
+        }
+        pointer-event(event) => {
+            if (root.hold) {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    gesture.start();
+                } else if ((event.kind == PointerEventKind.up && event.button == PointerEventButton.left)
+                    || event.kind == PointerEventKind.cancel) {
+                    gesture.cancel();
+                }
+            }
+        }
+    }
+
+    plate := Rectangle {
+        x: gesture.shake-dx;
+        width: root.width;
+        height: root.height;
+        border-radius: root.size == ControlSize.lg ? Tokens.radius-md : Tokens.radius-sm;
+        border-width: root.variant == IconBtnVariant.secondary && !root.disabled ? 1px : 0px;
+        border-color: Tokens.line-strong;
+        background: root.disabled
+            ? transparent
+            : root.pressed
+                ? Tokens.accent-soft.mix(Dark.accent-soft, root.dock)
+            : root.danger && (root.hovered || root.down)
+                ? Tokens.danger-soft
+            : root.stage
+                ? (root.down ? Dark.fill-pressed : root.hovered ? #ffffff24 : transparent)
+            : root.down
+                ? Tokens.fill-pressed.mix(Dark.fill-pressed, root.dock)
+            : root.hovered
+                ? Tokens.fill-hover.mix(#ffffff24, root.dock)
+                : (root.variant == IconBtnVariant.secondary ? Tokens.fill : transparent);
+        animate background {
+            duration: root.down ? Tokens.duration-instant : Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+
+        if gesture.phase != 2: AppIcon {
+            commands: root.icon;
+            active: root.hovered || fs.has-focus;
+            stroke-color: root.ink;
+            animate stroke-color {
+                duration: Tokens.duration-fast;
+                easing: Motion.easing-standard;
+            }
+            size: root.icon-size;
+        }
+
+        if gesture.phase == 2: CheckDraw {
+            x: (parent.width - root.icon-size) / 2;
+            size: root.icon-size;
+            ink: root.ink;
+        }
+
+        if root.hold: Rectangle {
+            x: 0;
+            width: parent.width * gesture.progress;
+            clip: true;
+
+            Rectangle {
+                x: 0;
+                width: plate.width;
+                height: plate.height;
+                border-radius: plate.border-radius;
+                background: root.fill-ground;
+
+                if gesture.phase != 2: AppIcon {
+                    commands: root.icon;
+                    stroke-color: root.fill-ink;
+                    size: root.icon-size;
+                }
+
+                if gesture.phase == 2: CheckDraw {
+                    x: (parent.width - root.icon-size) / 2;
+                    size: root.icon-size;
+                    ink: root.fill-ink;
+                }
+            }
+        }
+    }
+
+    // DS `.lb-ibtn__badge`: a 7px dot at the top-right corner, ringed 2px in
+    // the ground it sits on.
+    if root.badge != "": Rectangle {
+        x: root.width - 5px - 7px - 2px;
+        y: 5px - 2px;
+        width: 11px;
+        height: 11px;
+        border-radius: 5.5px;
+        background: Tokens.surface;
+
+        Rectangle {
+            x: 2px;
+            y: 2px;
+            width: 7px;
+            height: 7px;
+            border-radius: 3.5px;
+            background: root.badge == "live"
+                ? Tokens.live
+                : root.badge == "marker" ? Tokens.marker : Tokens.accent;
+        }
+    }
+
+    // Let go too soon: the hint above the button, as on `Btn`.
+    if gesture.phase == 3: TipPlate {
+        x: (root.width - self.width) / 2;
+        y: -self.height - 6px;
+        label: root.hold-hint;
+        label-weight: 500;
+    }
+}
+
+// The hover label an icon-only control needs to keep the word it gave up (the
+// DS Tooltip: `overlay`, a 1px `line-strong` edge, 12px caption, an optional
+// Keycap `shortcut`, 400ms late).
+//
+// Slint has no built-in tooltip, so this is a plain Rectangle and the caller
+// places it. Two shapes were tried and rejected (task290): `PopupWindow` takes
+// the input inside its own window while open, so the very button being
+// labelled stops being clickable; and `absolute-position` anchoring put a
+// popup off screen once already (the rate-menu comment in `review.slint`,
+// task148). Place this as the **last child of the pane** so it draws over the
+// siblings declared before it, and compute its position from the containing
+// layout's own constants.
+//
+// It carries no `TouchArea` on purpose: a tooltip is never a click target, and
+// a TouchArea inside a hover-conditional element destroys itself on press and
+// eats the click (task194-B's quirk).
+export component Tooltip inherits TipPlate {
+    // The caller's hover. The tip appears `delay` after this goes true and
+    // vanishes the instant it goes false, so the caller needs no timer.
+    in property <bool> armed;
+    in property <duration> delay: 400ms;
+
+    // Cleared on every edge of `armed` so a second hover waits out the delay
+    // again instead of flashing up on contact: the timer restarts when
+    // `running` goes true, but it would otherwise find `elapsed` still set from
+    // the previous hover.
+    property <bool> elapsed;
+    property <bool> shown: root.armed && root.elapsed;
+
+    changed armed => {
+        root.elapsed = false;
+    }
+
+    Timer {
+        interval: root.delay;
+        running: root.armed;
+        triggered => {
+            root.elapsed = true;
+        }
+    }
+
+    // In over `duration-base` (the DS's `lb-pop`); out at once, as the DS
+    // unmounts it.
+    opacity: root.shown ? 1.0 : 0.0;
+    animate opacity {
+        duration: root.shown ? Tokens.duration-base : 0ms;
+        easing: Motion.easing-enter;
+    }
+}
+
+// The DS Switch: 40x22. Off is a 1.5px `line-control` edge with an
+// `ink-muted` knob; on is an `accent` ground with an `on-accent` knob. The
+// 12px knob sits at (5, 5) and slides 18px over `duration-fast` on
+// `easing-standard` -- no overshoot (the old `ease-out-back` is gone). While
+// pressed it stretches 3px toward the middle.
+export component Switch inherits Rectangle {
+    in property <bool> checked;
+    in property <bool> disabled;
+    // The name a screen reader gives it (t260928-5f3b F5): the row's title.
+    in property <string> label;
+    // Specimen only, as on `Btn`.
+    in property <bool> force-hover;
+    in property <bool> force-pressed;
+    callback toggled;
+
+    accessible-role: switch;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: !root.disabled;
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.toggled();
+        }
+    }
+
+    // For the specimen's slide measurement.
+    out property <length> knob-x: knob.x;
+
+    property <bool> hovered: (touch.has-hover || root.force-hover) && !root.disabled;
+    property <bool> down: (touch.pressed || root.force-pressed) && !root.disabled;
+
+    width: 40px;
+    height: 22px;
+    border-radius: Tokens.radius-full;
+    border-width: root.checked ? 0px : 1.5px;
+    border-color: Tokens.line-control;
+    background: root.checked
+        ? (root.hovered ? Tokens.accent-hover : Tokens.accent)
+        : (root.hovered ? Tokens.fill-hover : transparent);
+    opacity: root.disabled ? 0.4 : 1.0;
+    animate background {
+        duration: Tokens.duration-fast;
+        easing: Motion.easing-standard;
+    }
+
+    knob := Rectangle {
+        x: root.checked ? (root.down ? 20px : 23px) : 5px;
+        y: 5px;
+        width: root.down ? 15px : 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: root.checked
+            ? Tokens.on-accent
+            : (root.hovered ? Tokens.ink : Tokens.ink-muted);
+        animate x, width, background {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.toggled();
+        }
+    }
+
+    // A Tab stop; Space / Enter flips it (t260928-d9b4).
+    PressFocus {
+        enabled: !root.disabled;
+        ring-radius: root.height / 2;
+        pressed => {
+            root.toggled();
+        }
+    }
+}
+
+// The DS Checkbox: an 18px box with a 1.5px `line-control` edge, `accent`
+// with an `on-accent` check when on; a 13px label and an optional 12px
+// description beside it.
+export component Checkbox inherits Rectangle {
+    in property <bool> checked;
+    in property <string> label;
+    in property <string> description;
+    in property <bool> disabled;
+    // The name a screen reader gives a box with no `label` beside it -- a
+    // row's own check (t260928-5f3b F5). A drawn `label` wins.
+    in property <string> reader-label;
+    // Specimen only, as on `Btn`.
+    in property <bool> force-hover;
+    callback toggled;
+
+    accessible-role: checkbox;
+    accessible-label: root.label != "" ? root.label : root.reader-label;
+    accessible-description: root.description;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: !root.disabled;
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.toggled();
+        }
+    }
+    // Readable from outside, as on `Btn`: a caller fading the box in on hover
+    // keeps it up while the pointer is on the box itself (t260927-9a17).
+    out property <bool> has-hover: touch.has-hover;
+    // The key focus is on it (t260928-d9b4): a caller fading the box in on
+    // hover keeps it up for the keyboard too.
+    out property <bool> key-focused: keys.has-focus;
+
+    property <bool> hovered: (touch.has-hover || root.force-hover) && !root.disabled;
+
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    min-height: row.min-height;
+    opacity: root.disabled ? 0.4 : 1.0;
+
+    row := HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+
+        Rectangle {
+            width: 18px;
+            min-height: 20px;
+
+            Rectangle {
+                y: 1px;
+                width: 18px;
+                height: 18px;
+                border-radius: Tokens.radius-xs;
+                border-width: root.checked ? 0px : 1.5px;
+                border-color: Tokens.line-control;
+                background: root.checked
+                    ? Tokens.accent
+                    : (root.hovered ? Tokens.fill-hover : transparent);
+                animate background {
+                    duration: Tokens.duration-instant;
+                    easing: Motion.easing-standard;
+                }
+
+                if root.checked: AppIcon {
+                    x: 2px;
+                    y: 2px;
+                    commands: Icons.check;
+                    stroke-color: Tokens.on-accent;
+                    size: 14px;
+                }
+            }
+        }
+
+        if root.label != "" || root.description != "": VerticalLayout {
+            alignment: start;
+
+            if root.label != "": Text {
+                min-height: 20px;
+                text: root.label;
+                vertical-alignment: center;
+                font-size: 13px;
+                font-weight: 500;
+                color: Tokens.ink;
+            }
+
+            if root.description != "": Text {
+                text: root.description;
+                wrap: word-wrap;
+                font-size: 12px;
+                color: Tokens.ink-muted;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.toggled();
+        }
+    }
+
+    // A Tab stop; Space / Enter flips it (t260928-d9b4). The ring goes round
+    // the box and its words together, as the click target does.
+    keys := PressFocus {
+        enabled: !root.disabled;
+        ring-radius: Tokens.radius-xs;
+        pressed => {
+            root.toggled();
+        }
+    }
+}
+
+// The scrim-and-card confirmation: the DS Dialog. 440 wide, `overlay`,
+// `radius-lg`, `shadow-dialog`; the footer is a `line` over natural-width
+// buttons at the right. Windows order, action first (user ruling 2026-09-26,
+// t260926-e49b); Enter / Esc keep their own bindings at the call sites.
+// `danger` makes the confirm the solid `danger` button.
+//
+// The DS's parts are drawn here (t260928-5f3b F2): `title` (a question) at
+// title-2 17/600, `body` (what will happen) at 14/22 `ink-muted`, `note` (what
+// to watch for) at 12/18 behind an info glyph, `icon` in a 40px circle at the
+// head. `@children` still lands under the body for anything else.
+export component ConfirmDialog inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    in property <string> note;
+    in property <string> icon;
+    in property <string> cancel-label;
+    in property <string> ok-label;
+    in property <string> ok-icon;
+    /// The confirmed action cannot be undone.
+    in property <bool> danger;
+    callback cancelled();
+    callback accepted();
+
+    background: Tokens.scrim;
+
+    // Entry only (DS `lb-dialog`): fade in while the card rises 6px and grows
+    // 0.98 -> 1 over `duration-slow`. Every caller mounts this with an `if`,
+    // so `init` runs as it appears and the exit stays instant. The card's
+    // scale is on a child, since `transform-scale` on a component root is
+    // dropped.
+    opacity: 0;
+    property <length> lift: 6px;
+    property <float> card-scale: 0.98;
+    init => {
+        self.opacity = 1;
+        self.lift = 0;
+        self.card-scale = 1;
+    }
+    animate opacity, lift, card-scale {
+        duration: Tokens.duration-slow;
+        easing: Motion.easing-enter;
+    }
+
+    // Swallows anything aimed at the screen behind it.
+    TouchArea { }
+
+    // The keyboard (t260928-d9b4): the dialog takes the focus as it opens,
+    // Tab and Shift+Tab go round its two buttons and never out to the screen
+    // behind the scrim, and Esc cancels. An ancestor of the buttons, so a
+    // key they reject reaches it.
+    trap := FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        init => {
+            self.focus();
+        }
+        capture-key-pressed(event) => {
+            if (event.text == Key.Tab || event.text == Key.Backtab) {
+                if (ok-btn.key-focused) {
+                    cancel-btn.take-focus();
+                } else {
+                    ok-btn.take-focus();
+                }
+                return accept;
+            }
+            reject
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            reject
+        }
+
+        Rectangle {
+            transform-scale: root.card-scale;
+            width: Math.min(440px, root.width - 48px);
+            height: dialog.preferred-height;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2 + root.lift;
+            border-radius: Tokens.radius-lg;
+            border-width: 1px;
+            border-color: Tokens.line-strong;
+            background: Tokens.overlay;
+            clip: true;
+            drop-shadow-offset-y: Tokens.shadow-dialog-offset-y;
+            drop-shadow-blur: Tokens.shadow-dialog-blur;
+            drop-shadow-color: Tokens.shadow-dialog-color;
+
+            dialog := VerticalLayout {
+                VerticalLayout {
+                    padding-top: Tokens.space-6;
+                    padding-left: Tokens.space-6;
+                    padding-right: Tokens.space-6;
+                    padding-bottom: Tokens.space-5;
+                    spacing: Tokens.space-2;
+
+                    if root.icon != "": HorizontalLayout {
+                        alignment: start;
+                        padding-bottom: Tokens.space-2;
+
+                        Rectangle {
+                            width: 40px;
+                            height: 40px;
+                            border-radius: 20px;
+                            background: root.danger ? Tokens.danger-soft : Tokens.accent-soft;
+
+                            AppIcon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                commands: root.icon;
+                                stroke-color: root.danger ? Tokens.danger : Tokens.accent-text;
+                                size: 20px;
+                            }
+                        }
+                    }
+
+                    if root.title != "": SelText {
+                        text: root.title;
+                        wrap: word-wrap;
+                        font-size: Tokens.type-title-2-size;
+                        font-weight: Tokens.type-title-2-weight;
+                        line-height-factor: Tokens.type-title-2-line-height;
+                        color: Tokens.ink;
+                    }
+
+                    if root.body != "": SelText {
+                        text: root.body;
+                        wrap: word-wrap;
+                        font-size: Tokens.type-body-size;
+                        line-height-factor: Tokens.type-body-line-height;
+                        color: Tokens.ink-muted;
+                    }
+
+                    @children
+
+                    if root.note != "": HorizontalLayout {
+                        spacing: Tokens.space-2;
+                        padding-top: Tokens.space-1;
+
+                        // On the first line's centre: 18px line, 14px glyph.
+                        AppIcon {
+                            y: 2px;
+                            commands: Icons.info;
+                            stroke-color: Tokens.ink-muted;
+                            size: 14px;
+                        }
+
+                        SelText {
+                            horizontal-stretch: 1;
+                            text: root.note;
+                            wrap: word-wrap;
+                            font-size: Tokens.type-caption-size;
+                            line-height-factor: Tokens.type-caption-line-height;
+                            color: Tokens.ink-muted;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: footer.preferred-height;
+
+                    Rectangle {
+                        y: 0;
+                        height: 1px;
+                        background: Tokens.line;
+                    }
+
+                    footer := HorizontalLayout {
+                        padding-top: Tokens.space-4;
+                        padding-bottom: Tokens.space-4;
+                        padding-left: Tokens.space-6;
+                        padding-right: Tokens.space-6;
+                        spacing: Tokens.space-2;
+                        alignment: end;
+
+                        ok-btn := Btn {
+                            label: root.ok-label;
+                            icon: root.ok-icon;
+                            variant: root.danger ? BtnVariant.danger : BtnVariant.primary;
+                            clicked => {
+                                root.accepted();
+                            }
+                        }
+
+                        cancel-btn := Btn {
+                            label: root.cancel-label;
+                            clicked => {
+                                root.cancelled();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The one empty state, for every list that can be empty (task3800), now the
+// DS EmptyState: the glyph in a 52px `fill` frame (`radius-lg`, a 1px `line`
+// edge, `ink-muted`), a 15px/600 title in `ink`, a 13px description in
+// `ink-muted`, and at most one primary action. `on-stage` is the DS's
+// `tone="stage"` for the dark video stage.
+export component EmptyState inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    // The description; no second line when there is nothing for it.
+    in property <string> sub;
+    in property <string> action;
+    in property <string> action-icon;
+    in property <bool> on-stage;
+    callback action-clicked;
+
+    // Fades in as it appears. `EmptyState` is always created by an `if`, so
+    // `init` runs exactly then. On the motion tokens now: the old fixed 600ms
+    // fade ignored reduce-motion (t260927-01d1 measured it).
+    opacity: 0;
+    init => {
+        self.opacity = 1;
+    }
+    animate opacity {
+        duration: Tokens.duration-slow;
+        easing: Motion.easing-enter;
+    }
+
+    // Centred on both axes (task144). The DS block is 400 wide with 24 of
+    // padding each side (border-box), so the content is at most 352.
+    HorizontalLayout {
+        alignment: center;
+        padding-left: Tokens.space-6;
+        padding-right: Tokens.space-6;
+
+        VerticalLayout {
+            alignment: center;
+            max-width: 352px;
+            spacing: Tokens.space-2;
+
+            HorizontalLayout {
+                alignment: center;
+                padding-bottom: Tokens.space-2;
+
+                // No breathing loop (task3940): an animation that never ends
+                // keeps the window presenting every frame.
+                Rectangle {
+                    width: 52px;
+                    height: 52px;
+                    border-radius: Tokens.radius-lg;
+                    border-width: 1px;
+                    border-color: root.on-stage ? #ffffff1f : Tokens.line;
+                    background: root.on-stage ? #ffffff0f : Tokens.fill;
+
+                    AppIcon {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        commands: root.icon;
+                        stroke-color: root.on-stage ? #ffffffb8 : Tokens.ink-muted;
+                        size: 24px;
+                    }
+                }
+            }
+
+            Text {
+                text: root.label;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+                font-size: 15px;
+                font-weight: 600;
+                color: root.on-stage ? Tokens.on-stage : Tokens.ink;
+            }
+
+            if root.sub != "": Text {
+                text: root.sub;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+                font-size: 13px;
+                line-height-factor: Tokens.type-label-line-height;
+                color: root.on-stage ? Tokens.on-stage-muted : Tokens.ink-muted;
+            }
+
+            // No action, no button: an empty-labelled Btn still paints its
+            // frame and fires an unwired callback. 24 above it: the column's
+            // 8 plus 16 (DS `margin-top: space-4`).
+            if root.action != "": HorizontalLayout {
+                alignment: center;
+                padding-top: Tokens.space-4;
+
+                Btn {
+                    label: root.action;
+                    icon: root.action-icon;
+                    variant: BtnVariant.primary;
+                    clicked => {
+                        root.action-clicked();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- round5 primitives (task168, design §8) ----
+//
+// Every dimension below is a design literal on purpose: round5 specifies these
+// in px for one component each, and `tokens.slint` is for values more than one
+// component shares. The task's rule for this batch is a zero-line diff there.
+
+export enum ToastVariant { info, success, error, warning }
+
+// The DS Toast: bottom-right, 380 wide, `overlay` with a 1px `line-strong`
+// edge. Only the icon carries the tone (success `positive`, error `danger`,
+// warning `warning`, info `accent-text`); the title says what happened at
+// 13.5px/600, the detail qualifies it.
+//
+// Stacking three and timing them out is the host's: `app.slint` lays the
+// stack out of `ui_state::toast`. `timeout` draws the DS's draining line along
+// the bottom; the host that passes it still owns the dismissal.
+export component Toast inherits Rectangle {
+    in property <string> title;
+    // Second line: why, or where, or how many. It wraps, so a failure's reason
+    // and next step are read whole (t260928-5f3b F1). A path (`detail-mono`)
+    // stays one line: it wants its *tail* kept, slint elides from the right,
+    // so the caller shortens the front before sending it here.
+    in property <string> detail;
+    in property <bool> detail-mono;
+    in property <ToastVariant> variant: ToastVariant.info;
+    in property <string> action;
+    // The DS's `action.icon` (「フォルダを開く」 takes folder-open).
+    in property <string> action-icon;
+    in property <string> close-label: ControlLabels.close;
+    in property <duration> timeout: 0ms;
+    callback action-clicked();
+    callback dismissed();
+
+    width: 380px;
+    height: body.preferred-height;
+    border-radius: Tokens.radius-md;
+    border-width: 1px;
+    border-color: Tokens.line-strong;
+    background: Tokens.overlay;
+    clip: true;
+    drop-shadow-offset-y: Tokens.shadow-overlay-offset-y;
+    drop-shadow-blur: Tokens.shadow-overlay-blur;
+    drop-shadow-color: Tokens.shadow-overlay-color;
+
+    // Entry only (DS `lb-rise`): fade in while rising 8px. The caller mounts
+    // this with an `if`, so `init` runs as it appears; the exit stays instant.
+    // The card's `y` belongs to the caller, which adds `rise` to it (a root
+    // cannot be translated from inside).
+    out property <length> rise: 8px;
+    opacity: 0;
+    property <float> drain: 1;
+    init => {
+        self.opacity = 1;
+        self.rise = 0;
+        self.drain = 0;
+    }
+    animate opacity, rise {
+        duration: Tokens.duration-base;
+        easing: Motion.easing-enter;
+    }
+    animate drain {
+        duration: root.timeout;
+        easing: linear;
+    }
+
+    property <color> tint: root.variant == ToastVariant.error
+        ? Tokens.danger
+        : root.variant == ToastVariant.success
+            ? Tokens.positive
+            : root.variant == ToastVariant.warning ? Tokens.warning : Tokens.accent-text;
+
+    body := HorizontalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        padding-left: 14px;
+        padding-right: 8px;
+        spacing: Tokens.space-3;
+
+        Rectangle {
+            width: 20px;
+
+            AppIcon {
+                x: 0;
+                y: 1px;
+                commands: root.variant == ToastVariant.error
+                    ? Icons.error
+                    : root.variant == ToastVariant.success
+                        ? Icons.success
+                        : root.variant == ToastVariant.warning ? Icons.warning : Icons.info;
+                stroke-color: root.tint;
+                size: 20px;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            padding-top: 1px;
+            spacing: 2px;
+
+            Text {
+                text: root.title;
+                wrap: word-wrap;
+                font-size: 13.5px;
+                font-weight: 600;
+                color: Tokens.ink;
+            }
+
+            if root.detail != "" && root.detail-mono: Text {
+                text: root.detail;
+                overflow: elide;
+                font-family: Tokens.font-family-mono;
+                font-size: 11.5px;
+                color: Tokens.ink-muted;
+            }
+
+            if root.detail != "" && !root.detail-mono: Text {
+                text: root.detail;
+                wrap: word-wrap;
+                font-size: 12px;
+                line-height-factor: Tokens.type-caption-line-height;
+                color: Tokens.ink-muted;
+            }
+
+            // 10 above the action: the column's 2 plus 8 (DS `bundle.css`).
+            if root.action != "": HorizontalLayout {
+                alignment: start;
+                padding-top: 8px;
+
+                Btn {
+                    size: ControlSize.sm;
+                    label: root.action;
+                    icon: root.action-icon;
+                    clicked => {
+                        root.action-clicked();
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            width: Tokens.size-control-sm;
+
+            IconBtn {
+                y: -4px;
+                icon: Icons.close;
+                label: root.close-label;
+                clicked => {
+                    root.dismissed();
+                }
+            }
+        }
+    }
+
+    if root.timeout > 0ms: Rectangle {
+        x: 0;
+        y: parent.height - 2px;
+        width: parent.width * root.drain;
+        height: 2px;
+        background: Tokens.line-strong;
+    }
+}
+
+// ---------- fields (t260928-5f3b F16: the DS TextField / Timecode / overline) ----------
+
+// The DS TextField's box, shared by `TextField`, `SearchField` and
+// `NumberField` so the edge cannot drift between them: `sunken` with a 1px
+// `line-strong` edge, `line-control` under the pointer, `accent` and a 3px
+// `accent-soft` halo outside while `focused`; `error` turns the edge `danger`
+// on `danger-soft` (and the halo with it). No underline -- it would bend with
+// the corners (決めたこと 5). The content is the caller's `@children`, drawn
+// over the frame's own `TouchArea`: the input wins the hit test where they
+// overlap and keeps click-to-place-caret, and the padding still focuses it.
+component FieldFrame inherits Rectangle {
+    in property <bool> focused;
+    in property <bool> error;
+    in property <bool> enabled: true;
+    out property <bool> hovered: frame-touch.has-hover;
+    callback clicked();
+
+    border-radius: Tokens.radius-sm;
+    border-width: 1px;
+    border-color: root.error
+        ? Tokens.danger
+        : root.focused
+            ? Tokens.accent
+            : frame-touch.has-hover ? Tokens.line-control : Tokens.line-strong;
+    background: root.error ? Tokens.danger-soft : Tokens.sunken;
+    animate border-color, background {
+        duration: Tokens.duration-fast;
+        easing: Motion.easing-standard;
+    }
+
+    // The halo, outside the edge: a thicker border would move the text.
+    if root.focused: Rectangle {
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        border-radius: Tokens.radius-sm + 3px;
+        border-width: 3px;
+        border-color: root.error ? Tokens.danger-soft : Tokens.accent-soft;
+    }
+
+    frame-touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.text;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    @children
+}
+
+// The DS TextField with its `label` over the box (13/500), lifted from the
+// review panel's comment field (t260927-7d08 made it there). The `hint` is
+// not under the box as in the DS but at the right end of the label's row,
+// caption-size `ink-faint` -- the same shape as the 範囲 overline and its
+// hint just above the comment field (2026-09-30). Not an inline editor: the
+// shell's overlay never stands over it and a blur discards nothing -- the
+// draft lives in `text`. Enter is `accepted`; Esc is `escaped`, for the
+// caller to hand the keyboard back. `size` md 32 (default) / sm 28.
+export component TextField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    in property <string> hint;
+    in property <ControlSize> size: ControlSize.md;
+    in-out property <string> text;
+    callback accepted();
+    callback escaped();
+
+    public function focus-field() {
+        input.focus();
+    }
+    // Whether the box holds the keyboard, and whether a window point lands on
+    // the box -- for a caller that hands the keyboard back on a press
+    // elsewhere (t260929-40a4).
+    out property <bool> field-focused: input.has-focus;
+    public pure function contains(x: length, y: length) -> bool {
+        x >= frame.absolute-position.x && x < frame.absolute-position.x + frame.width
+            && y >= frame.absolute-position.y && y < frame.absolute-position.y + frame.height
+    }
+
+    spacing: 6px;
+
+    if root.label != "" || root.hint != "": HorizontalLayout {
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            font-size: 13px;
+            font-weight: 500;
+            color: Tokens.ink;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.hint;
+            vertical-alignment: center;
+            font-size: Tokens.type-caption-size;
+            color: Tokens.ink-faint;
+        }
+    }
+
+    frame := FieldFrame {
+        height: root.size == ControlSize.sm ? Tokens.size-control-sm : Tokens.size-control-md;
+        focused: input.has-focus;
+        clicked => {
+            input.focus();
+        }
+
+        // The clipped slot the input slides in to keep the caret in view --
+        // the same shape as `InlineEdit`'s (std `LineEditBase`).
+        Rectangle {
+            x: 10px;
+            width: parent.width - 20px;
+            clip: true;
+
+            input := TextInput {
+                text <=> root.text;
+                property <length> scroll-x;
+                x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll-x));
+                width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                height: 100%;
+                cursor-position-changed(pos) => {
+                    if (pos.x + self.scroll-x < 0px) {
+                        self.scroll-x = -pos.x;
+                    } else if (pos.x + self.scroll-x > parent.width - self.text-cursor-width) {
+                        self.scroll-x = parent.width - pos.x - self.text-cursor-width;
+                    }
+                }
+                vertical-alignment: center;
+                single-line: true;
+                font-size: 13px;
+                color: Tokens.ink;
+                // The IME swap every field in the app carries (see
+                // `SearchField`): an open conversion must not read as a
+                // selection.
+                selection-background-color: self.preedit-text != "" ? Tokens.accent-soft : Tokens.accent;
+                selection-foreground-color: self.preedit-text != "" ? Tokens.ink : Tokens.on-accent;
+                accepted => {
+                    root.accepted();
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.escaped();
+                        return accept;
+                    }
+                    reject
+                }
+            }
+
+            if input.text == "" && input.preedit-text == "": Text {
+                x: 0;
+                width: parent.width;
+                height: 100%;
+                vertical-alignment: center;
+                text: root.placeholder;
+                overflow: elide;
+                font-size: 13px;
+                color: Tokens.ink-faint;
+            }
+        }
+    }
+}
+
+// The DS overline (`.lb-overline`): 11px 600, 0.08em apart, `ink-muted`.
+export component Overline inherits Text {
+    vertical-alignment: center;
+    font-size: Tokens.type-overline-size;
+    font-weight: Tokens.type-overline-weight;
+    letter-spacing: Tokens.type-overline-letter-spacing;
+    color: Tokens.ink-muted;
+}
+
+// The DS Timecode in mono, the whole part in `ink` and the `.t` tail faint
+// (`accent`: both `accent-text`, the tail at 60% -- the range's length;
+// `marker`: both `marker-text`, the tail at 60% -- a marker row,
+// t260928-bae5).
+// `size` sm 12 / md 13 / lg 20. The text is formatted in Rust and handed in
+// already split, since slint cannot split a string.
+//
+// Optionally a cell (lifted from the review panel's range box, t260927-7d08):
+// `label` puts a caption over it; `seekable` makes the cell a press target
+// with a `fill-hover` ground (the range's 開始 / 終了 move the playhead);
+// `sync-tip` adds 「再生位置へ合わせる」 beside the caption with that tooltip
+// (t260928-88a2). `right` sets it against the right edge. The cell sits on
+// its bottom line (`align-items: end`).
+//
+// `stage` (t260928-13e9, as `IconBtnVariant.stage`): on the dark island in
+// either theme -- the whole part `on-stage`, the tail and caption
+// `on-stage-muted`, the hover ground white 6%.
+export component Timecode inherits Rectangle {
+    in property <string> whole;
+    in property <string> frac;
+    in property <ControlSize> size: ControlSize.md;
+    in property <bool> accent;
+    in property <bool> marker;
+    in property <bool> stage;
+    in property <string> label;
+    in property <bool> seekable;
+    in property <bool> right;
+    in property <string> sync-tip;
+    callback pressed();
+    callback synced();
+
+    property <length> digit-size: root.size == ControlSize.sm
+        ? 12px
+        : root.size == ControlSize.lg ? 20px : 13px;
+    property <bool> cell: root.label != "" || root.seekable || root.sync-tip != "";
+
+    border-radius: Tokens.radius-xs;
+    background: root.seekable && touch.has-hover
+        ? (root.stage ? #ffffff0f : Tokens.fill-hover)
+        : transparent;
+
+    // First, so the sync button inside the layout below wins its own presses
+    // and the rest of the cell falls through to this one.
+    touch := TouchArea {
+        enabled: root.seekable;
+        mouse-cursor: root.seekable ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            root.pressed();
+        }
+    }
+
+    // The seekable cell's keyboard half (t260929-475e). Before the layout, so
+    // Tab reaches the cell ahead of its own sync button. Enter is taken here,
+    // so it seeks and never reaches the review pane's save-clip.
+    PressFocus {
+        width: 100%;
+        height: 100%;
+        tab-stop: root.seekable;
+        enabled: root.seekable;
+        ring-radius: Tokens.radius-xs;
+        pressed => {
+            root.pressed();
+        }
+    }
+
+    VerticalLayout {
+        alignment: end;
+        spacing: 4px;
+        // The hover ground stands 8px clear of the digits (t260928-88a2).
+        padding-left: root.cell ? Tokens.space-2 : 0;
+        padding-right: root.cell ? Tokens.space-2 : 0;
+        padding-top: root.cell ? Tokens.space-1 : 0;
+        padding-bottom: root.cell ? Tokens.space-1 : 0;
+
+        if root.label != "" || root.sync-tip != "": HorizontalLayout {
+            spacing: Tokens.space-1;
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.label;
+                horizontal-alignment: root.right ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+                vertical-alignment: center;
+                font-size: 11px;
+                font-weight: 500;
+                color: root.stage ? Dark.on-stage-muted : Tokens.ink-faint;
+            }
+
+            if root.sync-tip != "": Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: Tokens.radius-xs;
+                background: sync-touch.has-hover ? Tokens.fill-hover : transparent;
+                accessible-role: button;
+                accessible-label: root.sync-tip;
+                accessible-action-default => {
+                    root.synced();
+                }
+
+                sync-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.synced();
+                    }
+                }
+
+                sync-keys := PressFocus {
+                    ring-radius: Tokens.radius-xs;
+                    pressed => {
+                        root.synced();
+                    }
+                }
+
+                AppIcon {
+                    commands: Icons.playhead;
+                    active: sync-touch.has-hover || sync-keys.has-focus;
+                    stroke-color: sync-touch.has-hover ? Tokens.ink : Tokens.ink-muted;
+                    // DS: 16 inside a button (t260928-ca36).
+                    size: 16px;
+                }
+
+                Tooltip {
+                    x: (parent.width - self.width) / 2;
+                    y: -self.height - 6px;
+                    armed: sync-touch.has-hover;
+                    label: root.sync-tip;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            Rectangle {
+                horizontal-stretch: root.right ? 1 : 0;
+            }
+
+            Text {
+                text: root.whole;
+                font-family: Tokens.font-family-mono;
+                font-size: root.digit-size;
+                font-weight: 500;
+                color: root.accent ? Tokens.accent-text : root.marker ? Tokens.marker-text : root.stage ? Dark.on-stage : Tokens.ink;
+            }
+
+            Text {
+                text: root.frac;
+                font-family: Tokens.font-family-mono;
+                font-size: root.digit-size;
+                font-weight: 500;
+                color: root.accent ? Tokens.accent-text : root.marker ? Tokens.marker-text : root.stage ? Dark.on-stage-muted : Tokens.ink-faint;
+                opacity: root.accent || root.marker ? 0.6 : 1;
+            }
+
+            Rectangle {
+                horizontal-stretch: root.right ? 0 : 1;
+            }
+        }
+    }
+}
+
+// The number box: the DS TextField look (`sunken`, a 1px `line-strong` edge,
+// `line-control` on hover, `accent` and a 3px `accent-soft` halo on focus,
+// `danger` edge on `danger-soft` when refused), with the value in mono at the
+// right. `suffix` puts the unit inside the box (the DS PresetField); a caller
+// that keeps its own unit column leaves it empty. `size` sm 28 (the settings
+// rows' height, the default) / md 32.
+export component NumberField inherits Rectangle {
+    in property <string> value;
+    // Shown while the field is empty; the accepted range, on the chip rows.
+    in property <string> placeholder;
+    in property <string> suffix;
+    in property <ControlSize> size: ControlSize.sm;
+    // A row whose setting is switched off keeps its number visible -- it is
+    // what the row goes back to -- but nothing in it answers (task1490).
+    in property <bool> enabled: true;
+    // The draft is out of range, so it was refused and the box says so while
+    // it keeps showing what was typed.
+    in property <bool> error;
+    // The chip rows commit on Enter, not on every keystroke.
+    callback accepted(string);
+
+    // Task194-A: typing overwrites `field.text` and drops the binding to
+    // `value` for good, so a number the Rust side clamped on save (5000 ->
+    // 2000) would keep showing what was typed. This puts it back.
+    changed value => {
+        if (field.text != root.value) {
+            field.text = root.value;
+        }
+    }
+
+    width: 88px;
+    height: root.size == ControlSize.sm ? Tokens.size-control-sm : Tokens.size-control-md;
+
+    FieldFrame {
+        focused: field.has-focus;
+        error: root.error;
+        enabled: root.enabled;
+        clicked => {
+            field.focus();
+        }
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: Tokens.space-2;
+
+            Rectangle {
+                horizontal-stretch: 1;
+
+                field := TextInput {
+                    text: root.value;
+                    enabled: root.enabled;
+                    width: parent.width;
+                    height: 100%;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    single-line: true;
+                    input-type: number;
+                    font-family: Tokens.font-family-mono;
+                    font-size: 13px;
+                    color: Tokens.ink;
+                    selection-background-color: Tokens.accent;
+                    selection-foreground-color: Tokens.on-accent;
+                    accepted => {
+                        root.accepted(self.text);
+                    }
+                    // Losing focus discards, exactly as the titlebar's rename
+                    // field does (task3430): this box commits on Enter only.
+                    // Taking the focus selects the number, so the next
+                    // keystroke replaces it (2026-09-13, the user).
+                    changed has-focus => {
+                        if (self.has-focus) {
+                            self.select-all();
+                        } else if (self.text != root.value) {
+                            self.text = root.value;
+                        }
+                    }
+                }
+
+                // Over the field, not beside it: inside a layout the
+                // placeholder would be handed a column of its own.
+                if root.placeholder != "" && field.text == "" && field.preedit-text == "": Text {
+                    width: parent.width;
+                    height: 100%;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    text: root.placeholder;
+                    overflow: elide;
+                    font-family: Tokens.font-family-mono;
+                    font-size: 13px;
+                    color: Tokens.ink-faint;
+                }
+            }
+
+            if root.suffix != "": Text {
+                text: root.suffix;
+                vertical-alignment: center;
+                font-size: 12px;
+                color: Tokens.ink-muted;
+            }
+        }
+    }
+}
+
+// The search box on history, clips and the target picker (task3810): the DS
+// TextField with its `search` icon. No underline -- it would bend with the
+// corners (決めたこと 5). `size` md 32 (the DS's default: history, clips) /
+// sm 28 (the capture flyout), t260928-5f3b F8.
+export component SearchField inherits Rectangle {
+    in property <string> placeholder;
+    in property <ControlSize> size: ControlSize.md;
+    in property <string> clear-label: ControlLabels.clear;
+    in-out property <string> text <=> field.text;
+    // Every keystroke, so callers can filter live.
+    callback search-changed(string);
+
+    public function focus-field() {
+        field.focus();
+    }
+
+    horizontal-stretch: 1;
+    height: root.size == ControlSize.sm ? Tokens.size-control-sm : Tokens.size-control-md;
+
+    FieldFrame {
+        focused: field.has-focus;
+        clicked => {
+            field.focus();
+        }
+
+        AppIcon {
+            x: 10px;
+            commands: Icons.search;
+            stroke-color: Tokens.ink-faint;
+            size: 16px;
+        }
+
+        field := TextInput {
+            x: 34px;
+            width: parent.width - 34px - 30px;
+            height: 100%;
+            vertical-alignment: center;
+            single-line: true;
+            font-size: 13px;
+            color: Tokens.ink;
+            // Swapped out while an IME conversion is open, exactly as the inline
+            // editor does it (see `InlineEdit`'s own comment for why slint paints
+            // the preedit with the selection pair): unconverted kana in the search
+            // box read as a range selection (the user, 2026-09-20).
+            selection-background-color: self.preedit-text != "" ? Tokens.accent-soft : Tokens.accent;
+            selection-foreground-color: self.preedit-text != "" ? Tokens.ink : Tokens.on-accent;
+            edited => {
+                root.search-changed(self.text);
+            }
+        }
+
+        // `preedit-text` too, not just `text`: mid-conversion the IME draws its
+        // own uncommitted run in the field while `text` is still empty.
+        if field.text == "" && field.preedit-text == "": Text {
+            x: 34px;
+            vertical-alignment: center;
+            height: 100%;
+            text: root.placeholder;
+            font-size: 13px;
+            color: Tokens.ink-faint;
+        }
+
+        // Task194-B: `visible`, not an `if` -- the handler's first line clears
+        // `field.text`, which would destroy the element running it. The DS's
+        // clear control: 20px, `fill-hover` under the pointer. Its
+        // own box rather than an `IconBtn`, whose sizes are the three steps
+        // (F14).
+        Rectangle {
+            visible: field.text != "";
+            x: parent.width - self.width - 4px;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            border-radius: Tokens.radius-sm;
+            background: clear-touch.pressed
+                ? Tokens.fill-pressed
+                : clear-touch.has-hover ? Tokens.fill-hover : transparent;
+            accessible-role: button;
+            accessible-label: root.clear-label;
+            accessible-action-default => {
+                field.text = "";
+                root.search-changed("");
+            }
+
+            clear-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    field.text = "";
+                    root.search-changed("");
+                    field.focus();
+                }
+            }
+
+            clear-keys := PressFocus {
+                enabled: field.text != "";
+                pressed => {
+                    field.text = "";
+                    root.search-changed("");
+                    field.focus();
+                }
+            }
+
+            AppIcon {
+                commands: Icons.close;
+                active: clear-touch.has-hover || clear-keys.has-focus;
+                stroke-color: clear-touch.has-hover ? Tokens.ink : Tokens.ink-muted;
+                size: 14px;
+            }
+        }
+    }
+}
+
+// The DS SegmentedControl: 2-5 peers where exactly one is on. A `sunken`
+// groove with a 1px `line` edge, 2px inside and between; the selected ground
+// is one `raised` thumb that slides to the next choice over `duration-base` /
+// `easing-standard`, its width following -- `stretch` or not. Nothing
+// selected (-1) fades the thumb out. `size` md 32 / sm 28.
+export component SegmentTabs inherits Rectangle {
+    in property <[string]> segments;
+    // One glyph per segment, in the same order (task186). Shorter than
+    // `segments`, or empty, means the rest go without.
+    in property <[string]> icons;
+    // The name a screen reader gives each segment, same order (t260928-5f3b
+    // F5). Needed where a segment is a glyph alone; otherwise its word is used.
+    in property <[string]> labels;
+    in property <int> selected;
+    // Full-width segments: the groove takes whatever width it is given and the
+    // segments split it evenly. Off, the group is as narrow as its words.
+    in property <bool> stretch;
+    in property <ControlSize> size: ControlSize.md;
+    // Off: no Tab stop (a dimmed settings row, t260928-d9b4). The pointer
+    // path is gated by the caller, as before.
+    in property <bool> enabled: true;
+    callback selected-changed(int);
+
+    // For the specimen's slide measurement.
+    out property <length> thumb-x: thumb.x;
+    // Which segment the pointer is on, or -1: a caller's tooltip for an
+    // icon-only group reads it (t260927-9a17).
+    out property <int> hovered: -1;
+
+    // Where the selected cell is, pushed by that cell: an element inside a
+    // `for` cannot be read from outside it.
+    property <length> sel-x;
+    property <length> sel-w;
+    // The first placement lands without sliding (the DS's `is-ready`).
+    property <bool> ready;
+
+    height: root.size == ControlSize.sm ? Tokens.size-control-sm : Tokens.size-control-md;
+    width: track.preferred-width;
+    border-radius: Tokens.radius-sm;
+    border-width: 1px;
+    border-color: Tokens.line;
+    background: Tokens.sunken;
+
+    Timer {
+        interval: 100ms;
+        running: !root.ready;
+        triggered => {
+            root.ready = true;
+        }
+    }
+
+    // One Tab stop for the group (t260928-d9b4); ← → move the selection, as
+    // a tab list does. At either end the arrow is handed on, not eaten.
+    keys := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow && root.selected > 0) {
+                root.selected-changed(root.selected - 1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow && root.selected < root.segments.length - 1) {
+                root.selected-changed(root.selected + 1);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    if keys.has-focus: Rectangle {
+        x: -4px;
+        y: -4px;
+        width: root.width + 8px;
+        height: root.height + 8px;
+        border-radius: root.border-radius + 4px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+    }
+
+    // Declared before `track` so it paints under the captions.
+    thumb := Rectangle {
+        x: root.sel-x;
+        y: 2px;
+        width: root.sel-w;
+        height: root.height - 4px;
+        border-radius: Tokens.radius-xs;
+        background: Tokens.raised;
+        drop-shadow-offset-y: Tokens.shadow-raised-offset-y;
+        drop-shadow-blur: Tokens.shadow-raised-blur;
+        drop-shadow-color: Tokens.shadow-raised-color;
+        opacity: root.selected >= 0 && root.selected < root.segments.length ? 1.0 : 0.0;
+        animate x, width {
+            duration: root.ready ? Tokens.duration-base : 0ms;
+            easing: Motion.easing-standard;
+        }
+        animate opacity {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+
+    track := HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+
+        for segment[index] in root.segments: cell := Rectangle {
+            property <bool> on: index == root.selected;
+            property <bool> lit: self.on || segment-touch.has-hover;
+            accessible-role: tab;
+            accessible-label: index < root.labels.length && root.labels[index] != "" ? root.labels[index] : segment;
+            accessible-item-selectable: true;
+            accessible-item-selected: self.on;
+            accessible-item-index: index;
+            accessible-item-count: root.segments.length;
+            accessible-action-default => {
+                root.selected-changed(index);
+            }
+            // Bounds rather than a fixed `width`: an explicit width tells the
+            // layout a child cannot stretch, so pinning both bounds together
+            // is how the narrow case stays narrow.
+            horizontal-stretch: root.stretch ? 1 : 0;
+            min-width: max(40px, caption.preferred-width + 24px);
+            max-width: root.stretch ? 100000px : self.min-width;
+
+            function push() {
+                if (self.on) {
+                    root.sel-x = self.x;
+                    root.sel-w = self.width;
+                }
+            }
+            init => {
+                self.push();
+            }
+            changed on => {
+                self.push();
+            }
+            changed x => {
+                self.push();
+            }
+            changed width => {
+                self.push();
+            }
+
+            caption := HorizontalLayout {
+                alignment: center;
+                spacing: 6px;
+
+                if index < root.icons.length && root.icons[index] != "": AppIcon {
+                    y: (parent.height - self.height) / 2;
+                    commands: root.icons[index];
+                    active: segment-touch.has-hover || (keys.has-focus && cell.on);
+                    stroke-color: cell.lit ? Tokens.ink : Tokens.ink-muted;
+                    size: 16px;
+                }
+
+                // Glyph-only segments leave the label out altogether: an
+                // empty one still takes the 6px spacing (F6: 46 wide, the
+                // glyph 3px off centre).
+                if segment != "": NudgedLabel {
+                    text: segment;
+                    font-size: 13px;
+                    font-weight: cell.on ? 600 : 500;
+                    ink: cell.lit ? Tokens.ink : Tokens.ink-muted;
+                    nudge: 1px;
+                }
+            }
+
+            segment-touch := TouchArea {
+                mouse-cursor: pointer;
+                changed has-hover => {
+                    if (self.has-hover) {
+                        root.hovered = index;
+                    } else if (root.hovered == index) {
+                        root.hovered = -1;
+                    }
+                }
+                clicked => {
+                    root.selected-changed(index);
+                }
+            }
+        }
+    }
+}
+
+// The DS Tabs: switches what fills the same place. 40 tall, 20 between tabs,
+// the selected one `ink` 600 with a 2px `accent` bar along its bottom, a
+// `line` under the whole row. `counts` (same order, "" for none) is the round
+// count chip.
+export component Tabs inherits Rectangle {
+    in property <[string]> tabs;
+    in property <[string]> counts;
+    in property <int> selected;
+    callback selected-changed(int);
+
+    height: 40px;
+    min-width: tab-row.preferred-width;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Tokens.line;
+    }
+
+    // One Tab stop for the row, ← → to move (t260928-d9b4), as `SegmentTabs`.
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow && root.selected > 0) {
+                root.selected-changed(root.selected - 1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow && root.selected < root.tabs.length - 1) {
+                root.selected-changed(root.selected + 1);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    if keys.has-focus: Rectangle {
+        x: -4px;
+        y: -4px;
+        width: tab-row.preferred-width + 8px;
+        height: root.height + 8px;
+        border-radius: Tokens.radius-sm + 4px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+    }
+
+    tab-row := HorizontalLayout {
+        spacing: Tokens.space-5;
+        alignment: start;
+
+        for tab[index] in root.tabs: tab-cell := Rectangle {
+            property <bool> on: index == root.selected;
+            width: tab-face.preferred-width;
+
+            tab-face := HorizontalLayout {
+                padding-left: 2px;
+                padding-right: 2px;
+                spacing: 6px;
+                alignment: center;
+
+                NudgedLabel {
+                    text: tab;
+                    font-size: 13px;
+                    font-weight: tab-cell.on ? 600 : 500;
+                    ink: tab-cell.on || tab-touch.has-hover ? Tokens.ink : Tokens.ink-muted;
+                    nudge: 1px;
+                }
+
+                if index < root.counts.length && root.counts[index] != "": Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    height: 18px;
+                    width: max(18px, count-text.preferred-width + 10px);
+                    border-radius: 9px;
+                    background: tab-cell.on ? Tokens.accent-soft : Tokens.fill;
+
+                    count-text := Text {
+                        text: root.counts[index];
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        font-family: Tokens.font-family-mono;
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: tab-cell.on ? Tokens.accent-text : Tokens.ink-muted;
+                    }
+                }
+            }
+
+            if tab-cell.on: Rectangle {
+                y: parent.height - 2px;
+                height: 2px;
+                border-top-left-radius: 2px;
+                border-top-right-radius: 2px;
+                background: Tokens.accent;
+            }
+
+            // Out into half the gap on each side: 「音量」 alone was 30 wide.
+            tab-touch := TouchArea {
+                x: -Tokens.space-5 / 2;
+                width: parent.width + Tokens.space-5;
+                mouse-cursor: pointer;
+                clicked => {
+                    root.selected-changed(index);
+                }
+            }
+        }
+    }
+}
+
+// The DS PresetField: the common values as a SegmentedControl and, beside it,
+// a mono box for any other value with the unit inside (104 wide). Which
+// segment is on -- and whether none is -- is decided in `ui_state::settings`;
+// this side only paints what it is told. A refused draft turns the box
+// `danger` and puts the reason under the row, right-aligned.
+//
+// `editable: false` is a row with no free value: the unit column then carries
+// the current value (task191), outside the segments.
+export component PresetField inherits VerticalLayout {
+    in property <[string]> presets;
+    // Index into `presets`, or -1 when the value is not one of them.
+    in property <int> selected: -1;
+    in property <string> value-text;
+    in property <string> placeholder;
+    in property <string> unit;
+    in property <bool> editable: true;
+    in property <bool> enabled: true;
+    in property <bool> range-error;
+    in property <string> error-text;
+    callback preset-clicked(int);
+    callback value-edited(string);
+
+    spacing: 6px;
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        alignment: end;
+
+        SegmentTabs {
+            y: (parent.height - self.height) / 2;
+            segments: root.presets;
+            selected: root.selected;
+            enabled: root.enabled;
+            selected-changed(index) => {
+                // Gated here rather than with a `disabled` flag: the dimmed
+                // row already looks inert.
+                if (root.enabled) {
+                    root.preset-clicked(index);
+                }
+            }
+        }
+
+        if root.editable: NumberField {
+            y: (parent.height - self.height) / 2;
+            width: 104px;
+            size: ControlSize.md;
+            value: root.value-text;
+            placeholder: root.placeholder;
+            suffix: root.unit;
+            enabled: root.enabled;
+            error: root.range-error;
+            accepted(text) => {
+                // Every draft goes to Rust, in range or not: refusing one is a
+                // decision with a message attached, and both live in
+                // `ui_state` where a test can see them.
+                if (root.enabled) {
+                    root.value-edited(text);
+                }
+            }
+        }
+
+        if !root.editable && root.unit != "": SelText {
+            text: root.unit;
+            min-width: 26px;
+            vertical-alignment: center;
+            font-size: 12px;
+            color: Tokens.ink-muted;
+        }
+    }
+
+    if root.range-error && root.error-text != "": HorizontalLayout {
+        alignment: end;
+        spacing: 6px;
+
+        AppIcon {
+            y: (parent.height - self.height) / 2;
+            commands: Icons.error;
+            stroke-color: Tokens.danger;
+            size: 14px;
+        }
+
+        SelText {
+            text: root.error-text;
+            font-size: 12px;
+            color: Tokens.danger;
+        }
+    }
+}
+
+export struct MenuEntry {
+    label: string,
+    icon: string,
+    // Right-aligned accelerator hint (`F2`), or "" for none.
+    hint: string,
+    // Draws a rule above this entry. Cheaper than a separator entry, which
+    // would need its own kind and an index the caller has to skip.
+    separator-above: bool,
+    danger: bool,
+    // Listed but refused: the entry stays so the reason a door is shut is
+    // visible rather than merely absent (t260920-bb09). The Rust side has
+    // carried this decision since round5 (`SessionMenuItem.disabled`, and the
+    // handler's `if item.disabled { return; }`) but it never reached the
+    // drawing, so `load_disabled` -- and then the recording's 破棄 -- looked
+    // exactly like a live entry and did nothing when pressed.
+    disabled: bool,
+}
+
+// One `ContextMenu` row's face: the 16px icon column (always reserved, so the
+// labels line up), the 13px label and the right-hand hint in mono. Drawn twice
+// on a hold row, like `BtnFace`.
+component MenuFace inherits HorizontalLayout {
+    in property <string> icon;
+    in property <string> label;
+    in property <string> trailing;
+    in property <color> ink;
+    in property <color> icon-ink;
+    in property <color> trailing-ink;
+    in property <bool> icon-active;
+    in property <bool> done;
+    // The current choice's check in the icon column (t260928-ac18).
+    in property <bool> checked;
+
+    padding-left: 8px;
+    padding-right: 10px;
+    spacing: 10px;
+
+    Rectangle {
+        width: 16px;
+
+        if !root.done && root.checked: AppIcon {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            commands: Icons.check;
+            stroke-color: Tokens.accent-text;
+            size: 16px;
+        }
+
+        if !root.done && !root.checked && root.icon != "": AppIcon {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            commands: root.icon;
+            active: root.icon-active;
+            stroke-color: root.icon-ink;
+            size: 16px;
+        }
+
+        if root.done: CheckDraw {
+            x: 0;
+            size: 16px;
+            ink: root.icon-ink;
+        }
+    }
+
+    Rectangle {
+        horizontal-stretch: 1;
+
+        Text {
+            y: 1px;
+            width: parent.width;
+            height: parent.height;
+            text: root.label;
+            vertical-alignment: center;
+            overflow: elide;
+            font-size: 13px;
+            font-weight: 500;
+            color: root.ink;
+        }
+    }
+
+    if root.trailing != "": Text {
+        text: root.trailing;
+        vertical-alignment: center;
+        font-family: Tokens.font-family-mono;
+        font-size: 11px;
+        font-weight: 500;
+        color: root.trailing-ink;
+    }
+}
+
+// One `ContextMenu` row. `hold` makes it confirm by press-and-hold (決めたこと
+// 3): 「長押し」 where the hint would be, `danger-fill` filling from the left.
+component MenuRow inherits Rectangle {
+    in property <MenuEntry> entry;
+    in property <bool> hold;
+    in property <bool> checked;
+    // The menu's keyboard cursor is on this row (t260928-d9b4): lit as under
+    // the pointer. `key-down` is Enter / Space held on it, for a hold row.
+    in property <bool> key-current;
+    in property <bool> key-down;
+    changed key-down => {
+        if (root.hold && !root.entry.disabled) {
+            if (self.key-down) {
+                gesture.start();
+            } else {
+                gesture.cancel();
+            }
+        }
+    }
+    callback chosen();
+    // The row's own hover, for a menu that stays open while the pointer is
+    // on it (the review's rate menu): each row's TouchArea is the topmost one
+    // over it, so nothing above can see the pointer there.
+    callback hover-changed(bool);
+
+    property <bool> hovered: (touch.has-hover || root.key-current) && !root.entry.disabled;
+    property <color> ink: root.entry.disabled
+        ? Tokens.ink-faint
+        : root.entry.danger ? Tokens.danger : Tokens.ink;
+    property <color> icon-ink: root.entry.disabled
+        ? Tokens.ink-faint
+        : root.entry.danger ? Tokens.danger : Tokens.ink-muted;
+    property <string> trailing: root.hold
+        ? (gesture.phase == 3 ? ControlLabels.keep-holding : ControlLabels.hold)
+        : root.entry.hint;
+
+    height: 32px;
+
+    gesture := HoldGesture {
+        completed => {
+            root.chosen();
+        }
+    }
+
+    Rectangle {
+        x: gesture.shake-dx;
+        width: root.width;
+        height: root.height;
+        border-radius: Tokens.radius-sm;
+        background: root.hovered
+            ? (root.entry.danger ? Tokens.danger-soft : Tokens.fill-hover)
+            : transparent;
+
+        MenuFace {
+            icon: root.entry.icon;
+            label: root.entry.label;
+            trailing: root.trailing;
+            ink: root.ink;
+            icon-ink: root.icon-ink;
+            trailing-ink: Tokens.ink-faint;
+            icon-active: root.hovered;
+            done: gesture.phase == 2;
+            checked: root.checked;
+        }
+
+        if root.hold: Rectangle {
+            x: 0;
+            width: parent.width * gesture.progress;
+            clip: true;
+
+            Rectangle {
+                x: 0;
+                width: root.width;
+                height: root.height;
+                border-radius: Tokens.radius-sm;
+                background: root.entry.danger ? Tokens.danger-fill : Tokens.accent;
+
+                MenuFace {
+                    icon: root.entry.icon;
+                    label: root.entry.label;
+                    trailing: root.trailing;
+                    ink: root.entry.danger ? Tokens.on-danger : Tokens.on-accent;
+                    icon-ink: root.entry.danger ? Tokens.on-danger : Tokens.on-accent;
+                    trailing-ink: root.entry.danger ? Tokens.on-danger : Tokens.on-accent;
+                    icon-active: root.hovered;
+                    done: gesture.phase == 2;
+                }
+            }
+        }
+    }
+
+    // Dimmed rather than removed, and the row stops answering the pointer:
+    // no hover fill, no hand cursor. The entry still takes the click (this
+    // `TouchArea` is what keeps it from falling through to the grid) -- it
+    // just does not report it.
+    touch := TouchArea {
+        mouse-cursor: root.entry.disabled ? default : pointer;
+        changed has-hover => {
+            root.hover-changed(self.has-hover);
+        }
+        clicked => {
+            if (!root.entry.disabled && !root.hold) {
+                root.chosen();
+            }
+        }
+        pointer-event(event) => {
+            if (root.hold && !root.entry.disabled) {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    gesture.start();
+                } else if ((event.kind == PointerEventKind.up && event.button == PointerEventButton.left)
+                    || event.kind == PointerEventKind.cancel) {
+                    gesture.cancel();
+                }
+            }
+        }
+    }
+}
+
+// The DS Menu. §6-D: positioned by the caller, which is the half that knows
+// where the pointer was; this only draws and reports which row was chosen.
+// 248 wide, `overlay`, `radius-md`, a 1px `line-strong` edge, `shadow-overlay`;
+// rows 32 tall.
+export component ContextMenu inherits Rectangle {
+    in property <[MenuEntry]> entries;
+    // Danger entries confirm by press-and-hold instead of a click (決めたこと
+    // 3). A menu-level switch rather than a `MenuEntry` field: the entries are
+    // built in Rust, outside this task's Scope, and a screen turns hold on
+    // when it drops its confirmation dialog for it.
+    in property <bool> hold-danger;
+    // The row that is the current choice, checked (t260928-ac18); -1 for none.
+    in property <int> checked-index: -1;
+    // As wide as the widest label needs rather than the DS's 248 (t260929-40a4,
+    // the review's rate menu: five short labels in a 248 box read as empty).
+    // Only for rows with no trailing hint, which this width leaves no room for.
+    in property <bool> fit-content;
+    // Opened from the keyboard (Shift+F10, t260928-d9b4): the menu takes the
+    // focus as it appears, ↑ ↓ move a cursor over the rows (lit as under the
+    // pointer, starting on the first), Enter / Space choose -- held, on a hold
+    // row -- and Esc is rejected up to the pane, which closes the menu as it
+    // does for the pointer. A menu the pointer opened leaves the focus alone.
+    in property <bool> keyboard;
+    callback chosen(int);
+    // The pointer is somewhere on the menu: its padding (the backdrop) or a
+    // row (each reports itself). For a menu held open by hover.
+    out property <bool> hovered: backdrop.has-hover || root.hovered-rows > 0;
+    property <int> hovered-rows: 0;
+
+    // Icon column 16, its gap 10, `MenuFace` padding 8 + 10, `items` padding
+    // 4 + 4 -- around the widest label, measured off-screen by `measure`.
+    width: root.fit-content ? measure.preferred-width + 56px : 248px;
+    height: items.preferred-height;
+
+    // Each label in `MenuFace`'s own font, never drawn: the layout's preferred
+    // width is the widest of them. Outside `items`, whose width follows ours.
+    measure := VerticalLayout {
+        visible: false;
+        for entry in root.entries: Text {
+            text: entry.label;
+            font-size: 13px;
+            font-weight: 500;
+        }
+    }
+
+    property <int> cursor: root.keyboard ? 0 : -1;
+    property <bool> key-held;
+
+    keys := FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        init => {
+            if (root.keyboard) {
+                self.focus();
+            }
+        }
+        // A menu that stays mounted and is shown by `visible` (the review's
+        // rate menu) turns `keyboard` on instead of being created with it.
+        property <bool> kb: root.keyboard;
+        changed kb => {
+            if (self.kb) {
+                root.cursor = root.checked-index >= 0 ? root.checked-index : 0;
+                self.focus();
+            }
+        }
+        key-pressed(event) => {
+            if (event.text == Key.DownArrow && root.entries.length > 0) {
+                root.cursor = root.cursor >= root.entries.length - 1 ? 0 : root.cursor + 1;
+                return accept;
+            }
+            if (event.text == Key.UpArrow && root.entries.length > 0) {
+                root.cursor = root.cursor <= 0 ? root.entries.length - 1 : root.cursor - 1;
+                return accept;
+            }
+            if ((event.text == Key.Return || event.text == " ") && root.cursor >= 0
+                && root.cursor < root.entries.length) {
+                if (!root.key-held) {
+                    root.key-held = true;
+                    if (!root.entries[root.cursor].disabled
+                        && !(root.hold-danger && root.entries[root.cursor].danger)) {
+                        root.chosen(root.cursor);
+                    }
+                }
+                return accept;
+            }
+            reject
+        }
+        key-released(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.key-held = false;
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // Entry only -- a fade (the DS Menu's `lb-pop`, opacity alone; t260928-5f3b
+    // F13 dropped the 0.96 -> 1 grow, and t260928-13e9 the grow's origin with
+    // it). Mounted by an `if` at every call site, so `init` runs as it appears;
+    // the exit stays instant.
+    opacity: 0;
+    init => {
+        self.opacity = 1;
+    }
+    animate opacity {
+        duration: Tokens.duration-base;
+        easing: Motion.easing-enter;
+    }
+
+    panel := Rectangle {
+        border-radius: Tokens.radius-md;
+        border-width: 1px;
+        border-color: Tokens.line-strong;
+        background: Tokens.overlay;
+        drop-shadow-offset-y: Tokens.shadow-overlay-offset-y;
+        drop-shadow-blur: Tokens.shadow-overlay-blur;
+        drop-shadow-color: Tokens.shadow-overlay-color;
+
+        // Stops a click on the menu's own padding or a separator from falling
+        // through to whatever is behind it (task1120). First child, so the entry
+        // rows below are declared after it and win the hit test.
+        backdrop := TouchArea { }
+
+        items := VerticalLayout {
+            padding: 4px;
+
+            for entry[index] in root.entries: VerticalLayout {
+                if entry.separator-above: Rectangle {
+                    height: 9px;
+
+                    Rectangle {
+                        x: 6px;
+                        y: 4px;
+                        width: parent.width - 12px;
+                        height: 1px;
+                        background: Tokens.line;
+                    }
+                }
+
+                MenuRow {
+                    entry: entry;
+                    hold: root.hold-danger && entry.danger;
+                    checked: index == root.checked-index;
+                    key-current: index == root.cursor && keys.has-focus;
+                    key-down: index == root.cursor && root.key-held;
+                    chosen => {
+                        root.chosen(index);
+                    }
+                    hover-changed(on) => {
+                        root.hovered-rows += on ? 1 : -1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Where the one open inline editor is, in window coordinates (task3640).
+//
+// `app.slint` lays a full-window overlay while any inline edit is open and cuts
+// a hole in it for the field itself -- four frame rectangles around this rect,
+// so the field keeps its own clicks (caret, drag-select) while every press
+// beside it is taken by the overlay and ends the edit. The rect has to travel
+// through a global because every editor lives inside an `if`, and a conditional
+// element cannot be named from outside its own subtree.
+//
+// Only one editor is ever open at a time, so one rect is enough: whichever
+// field is alive owns these four values. Written by `InlineEdit` below and by
+// `app.slint`'s hand-built titlebar rename box, which is the sixth caller and
+// not an `InlineEdit`.
+//
+// Nothing clears it on teardown -- slint has no destructor -- so a stale rect
+// outlives the field that wrote it. That is harmless: the overlay only exists
+// while `app.slint`'s aggregate flag says an edit is open, and the field that
+// re-opens rewrites all four before the frame is laid out.
+export global InlineEditVm {
+    in-out property <length> field-x;
+    in-out property <length> field-y;
+    in-out property <length> field-w;
+    in-out property <length> field-h;
+
+    // ---------- the review confirm step's second and third holes (task3860,
+    // user ruling 2026-09-09) ----------
+    // The overlay normally cuts one hole, the field's own rect above. The
+    // 確認 screen's 確定ステップ is the single exception the user granted: the
+    // track and the panel's range block stay live *while* the comment field is
+    // open, because round19 §1 puts the range edit inside that step rather
+    // than behind the 「範囲を編集」 toggle it replaced. Every other editor
+    // keeps the one-hole frame and the 2026-09-08 「最初の押下は食われる」
+    // ruling with it.
+    //
+    // Window coordinates, pushed the same way `field-*` is: a global cannot
+    // carry a binding to an element's geometry, so `review.slint` writes these
+    // from `absolute-position` on `changed`, and the panel scroll moves them
+    // on its own (task3110 measured that).
+    //
+}
+
+// §4-D / §6-C2. Editing in place: the field appears where the text was and
+// keeps the row's rhythm. Enter is the only exit that saves; Esc and losing
+// focus both discard (task3430 -- see the `changed has-focus` block below for
+// why that stopped being a commit). `title` is the heavier variant the
+// session-name edit uses.
+export component InlineEdit inherits Rectangle {
+    in property <string> text;
+    in property <string> hint;
+    /// Task3250. Off by default, and it has to stay that way: every other
+    /// caller opens the field with text already in it (a session title, a
+    /// note, a marker label, an existing clip's comment on the history
+    /// screen), so hiding the hint on non-empty input would mean their `Enter`
+    /// never appears at all. The one opt-in is review's clip-save prompt,
+    /// which opens empty and whose guidance is long enough to squeeze the
+    /// input down to a sliver.
+    in property <bool> hint-only-while-empty;
+    in property <bool> title;
+    /// Where the first glyph sits, measured from this component's own left
+    /// edge (task3850). 6px everywhere -- the default is the mock's
+    /// `.memoedit .box{padding:0 6px}` and must not move, because the other
+    /// four call sites (review's marker label and clip-save prompt,
+    /// `sessions_tile`'s title and note) replace a row of text whose origin was
+    /// already tuned to it. `app.slint`'s hand-built rename box is the app's
+    /// sixth inline field but is not an `InlineEdit`, so it is untouched by
+    /// this.
+    ///
+    /// Left only, and deliberately so. The clip tile is the one caller that has
+    /// to put the editor's text exactly where its comment `Text` was, and in
+    /// slint that distance is this padding alone: `border-width` is drawn
+    /// *inside* the element's bounds and does not inset its children -- unlike
+    /// CSS, where the mock's own `margin-left:-7px` is border 1px + padding 6px
+    /// (`mock/liveback-mock.html:710`). So the number to cancel here is 6, not
+    /// the mock's 7. The right side keeps its 6px whatever this is set to: only
+    /// the left decides the first glyph's origin, and a 0 there as well would
+    /// leave the trailing `Enter` hint touching the border for nothing.
+    in property <length> text-inset: 6px;
+    callback committed(string);
+    callback cancelled();
+    /// Every keystroke, so the caller can keep the draft where a re-render
+    /// cannot take it (task1340).
+    callback edited(string);
+
+    // Task194-D: whichever of the three exits fires first wins. Enter and Esc
+    // both end with the caller tearing this element down, and a teardown can
+    // blur the field on the way out -- without this the blur would fire a
+    // second exit after the first one had already been answered (task3430
+    // changed what that second exit *is*, not the need to swallow it: a blur
+    // arriving after Enter would now cancel a commit that already happened).
+    property <bool> settled: false;
+
+    // task3640. The overlay in `app.slint` cuts its hole out of these four
+    // numbers, so they have to be the field's *window* rect -- the overlay is a
+    // child of the window root, whose coordinate frame `absolute-position` is
+    // already in, so nothing is subtracted from them. Pushed rather than bound:
+    // a global cannot carry a binding to an element's geometry.
+    //
+    // The `changed` pair is what keeps the hole under the field when the row
+    // moves -- the marker list and both grids scroll while an editor is open,
+    // and `absolute-position` follows a scroll on its own (task3110 measured
+    // that in `review.slint`'s export row).
+    property <length> abs-x: root.absolute-position.x;
+    property <length> abs-y: root.absolute-position.y;
+    changed abs-x => {
+        InlineEditVm.field-x = self.abs-x;
+    }
+    changed abs-y => {
+        InlineEditVm.field-y = self.abs-y;
+    }
+    changed width => {
+        InlineEditVm.field-w = self.width;
+    }
+    changed height => {
+        InlineEditVm.field-h = self.height;
+    }
+
+    height: root.title ? 24px : 22px;
+    // The DS TextField while focused (決めたこと 5): `accent` edge on
+    // `sunken`, a 3px `accent-soft` halo outside, no underline.
+    border-radius: Tokens.radius-sm;
+    border-width: 1px;
+    border-color: Tokens.accent;
+    background: Tokens.sunken;
+
+    // Drawn outside the border rather than inside it, so the field's own height
+    // stays exactly the row height it replaced.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 3px;
+        border-color: Tokens.accent-soft;
+    }
+
+    // task3430. The field's own hit area, declared before the layout so the
+    // `TextInput` below still wins where the two overlap (the same layering
+    // `app.slint`'s rename field uses for its own padding). Without it a press
+    // on the 6px padding or on the trailing hint falls straight through this
+    // `Rectangle` to whatever ground area sits under the row -- and every one
+    // of those now cancels the edit, so clicking *inside* the field would end
+    // it. Focusing on the click also puts the caret back where the user aimed
+    // if the press landed off the glyphs.
+    TouchArea {
+        // Qualified: `text` on its own resolves to this component's own
+        // `in property <string> text` before it reaches the enum.
+        mouse-cursor: MouseCursor.text;
+        // task3640. The first write of this field's rect, so the overlay's hole
+        // is not left over the *previous* editor: the four `changed` handlers
+        // above only fire on a change, and a field that opens exactly where the
+        // last one was would never produce one.
+        //
+        // On a child rather than on the component root: no component in this
+        // repo declares a root `init`, and every caller of `InlineEdit` already
+        // sets one at the instantiation site (`init => self.begin-edit()`).
+        // Whether slint runs both is not something to find out by breaking the
+        // focus of all five editors.
+        init => {
+            InlineEditVm.field-x = root.abs-x;
+            InlineEditVm.field-y = root.abs-y;
+            InlineEditVm.field-w = root.width;
+            InlineEditVm.field-h = root.height;
+        }
+        clicked => {
+            input.focus();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: root.text-inset;
+        padding-right: 6px;
+        spacing: 6px;
+
+        // A single-line `TextInput` reports its text width as its minimum, so
+        // a long draft widened the field past its caller and shoved the clip
+        // tile's date out (task t260925-b354). The input therefore sits in a
+        // clipped slot whose floor is cut, and a bare `TextInput` does not
+        // scroll itself -- it only draws from its own `x` -- so it slides
+        // inside the slot to keep the caret visible. Same shape as std
+        // `LineEditBase` (i-slint-compiler 1.18.0,
+        // `widgets/common/lineedit-base.slint`); 1px, not 0, because a
+        // `TextInput` clipped to nothing cannot take focus (the same file).
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 1px;
+            clip: true;
+
+            input := TextInput {
+                // Poured in once, not bound (task1340). A binding is re-evaluated
+                // when the row model behind `root.text` is rewritten, and a
+                // re-render while the editor is open would overwrite the draft
+                // with the stored title -- which is exactly what the user was in
+                // the middle of replacing. `init` on this child runs before the
+                // caller's own `init => begin-edit()`, so the select-all still
+                // selects the right text.
+                init => {
+                    self.text = root.text;
+                }
+                property <length> scroll-x;
+                x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll-x));
+                width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                height: 100%;
+                cursor-position-changed(pos) => {
+                    if (pos.x + self.scroll-x < 0px) {
+                        self.scroll-x = -pos.x;
+                    } else if (pos.x + self.scroll-x > parent.width - self.text-cursor-width) {
+                        self.scroll-x = parent.width - pos.x - self.text-cursor-width;
+                    }
+                }
+                vertical-alignment: center;
+                single-line: true;
+                // 11.5px, the mock's `.memoedit .box` and the clip tile's resting
+                // comment `Text` (task4070): at 11px the comment shrank the moment
+                // the editor opened. Shared by every caller, on purpose (user,
+                // 2026-09-24).
+                font-size: root.title ? 12.5px : 11.5px;
+                font-weight: root.title ? 600 : Tokens.type-body-weight;
+                color: Tokens.color-on-surface;
+                text-cursor-width: 1.5px;
+                // Opaque, with a foreground to match (task1140). At 30% primary
+                // over the field's own ground the selected run came out barely
+                // tinted, and with no `selection-foreground-color` anywhere in the
+                // repo the glyphs kept `color-on-surface` -- so selecting text was
+                // something you had to squint to see. Every `TextInput` in the app
+                // now carries this same pair.
+                //
+                // 2026-09-12 (the user, in person): the pair is swapped out while
+                // an IME conversion is open. slint draws the preedit *with these*
+                // -- `sharedparley::draw_text_input` replaces the selection
+                // range with the preedit range whenever one exists (1.17.1,
+                // sharedparley.rs:1417) -- so unconverted kana came out looking
+                // exactly like a range selection. There is no underline to ask
+                // for: nothing in the .slint API reaches the preedit run, and no
+                // renderer in 1.17 draws one. The swap is what is left, and it
+                // is exact rather than approximate: while `preedit-text` is
+                // non-empty slint never paints a real selection, so these two
+                // values can only ever land on the composition. 0.16 is the
+                // field's own focus-ring alpha above. The user chose this over a
+                // bare undecorated run on 2026-09-12, knowing it is not the
+                // underline a Windows field would draw.
+                selection-background-color: self.preedit-text != ""
+                    ? Tokens.color-primary.with-alpha(0.16)
+                    : Tokens.color-primary;
+                selection-foreground-color: self.preedit-text != ""
+                    ? Tokens.color-on-surface
+                    : Tokens.color-on-primary;
+                edited => {
+                    root.edited(self.text);
+                }
+                accepted => {
+                    root.commit-once();
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.cancel-once();
+                        return accept;
+                    }
+                    reject
+                }
+                // Losing focus discards. This is a deliberate reversal of
+                // task194-D, which had made blur *commit*: 194-D read "clicking
+                // another row closes the editor and drops what was typed" as the
+                // only path in the app that silently lost input, and made the blur
+                // save instead. The user's instruction of 2026-09-07 overrides
+                // that -- 「他をクリックしたらフォーカスを失って戻るようにして
+                // 編集もキャンセルでよい」, and 「全部同じ挙動だよ」 for all six
+                // fields (task3430). 194-D's concern is real and is now the
+                // accepted cost: a stray click while a long note is half-typed
+                // throws the whole draft away, with no warning and no undo.
+                //
+                // Blur alone does not end an edit everywhere, because a `TouchArea`
+                // takes no key focus -- a press on a plain button leaves this field
+                // focused. Each screen therefore also clears its own "which row is
+                // being edited" on a press outside the field, and the teardown that
+                // follows is what brings the exit back through here.
+                //
+                // Since task3640 neither path is what usually runs: `app.slint`
+                // lays a full-window overlay while any editor is open, and it takes
+                // the press before a button or a ground area can. **That first
+                // press is eaten -- the button under it does not act -- and that is
+                // the user's ruling of 2026-09-08, not an oversight.** Two ground
+                // areas stay reachable underneath it -- the review panel's and the
+                // clips pane's, each still hit through a gap the overlay leaves
+                // (task3990) -- the other four 3430 had wired were unreachable
+                // dead code and task3990 removed them.
+                //
+                // The 確認 screen's 確定ステップ used to be a one-field exception
+                // here (a widened overlay hole, and a window-deactivate blur that
+                // did not cancel it) -- t260927-7d08 removed the confirm step
+                // itself, so all six editors now share this one rule.
+                changed has-focus => {
+                    if (!self.has-focus) {
+                        root.cancel-once();
+                    }
+                }
+            }
+        }
+
+        // The hint is a trailing label sharing this layout with the input, so
+        // it keeps its width for as long as it is here (task3180). Reading
+        // `input.text` directly is what makes `hint-only-while-empty` cheap:
+        // the binding re-evaluates on every keystroke, with no draft copy for
+        // the caller to keep in sync.
+        // 2026-09-12 (the user). `preedit-text` is in the emptiness
+        // test alongside `text`, the same pair `SearchField` tests too:
+        // mid-conversion the IME draft is not in `text` yet, so the hint
+        // stayed up while kana were being typed -- and a `TextInput`'s
+        // layout *min* width is its own
+        // text width (`text_layout_info`, no elide, no wrap), so every extra
+        // character of the draft shoved the hint further right and off the
+        // end of the field.
+        if root.hint != "" && (!root.hint-only-while-empty || (input.text == "" && input.preedit-text == "")): Text {
+            text: root.hint;
+            vertical-alignment: center;
+            font-size: 9.5px;
+            color: Tokens.color-on-surface-variant;
+        }
+    }
+
+    function commit-once() {
+        if (!root.settled) {
+            root.settled = true;
+            root.committed(input.text);
+        }
+    }
+
+    // The other half of the pair (task3430). Esc and blur share it, so an Esc
+    // that tears the field down cannot be followed by a second `cancelled()`
+    // from the blur the teardown produces.
+    function cancel-once() {
+        if (!root.settled) {
+            root.settled = true;
+            root.cancelled();
+        }
+    }
+
+    /// Named `begin-edit` rather than `focus`, which every element already has:
+    /// opening an inline edit is "focus *and* select everything", so a caller
+    /// that only focused would leave the old text for the user to clear.
+    public function begin-edit() {
+        input.focus();
+        input.select-all();
+    }
+}
+
+// A scroll area with the mock's scrollbar (round6, 2026-08-16). slint's own
+// `ScrollView` offers no way at the styling of its `ScrollBar`, so this is the
+// same shape it uses -- a non-interactive `Flickable` with a bar drawn beside
+// it -- with the bar drawn here instead.
+//
+// The lane is always reserved (the mock's `scrollbar-gutter: stable`): the
+// viewport is inset by its width whether or not there is anything to scroll, so
+// a row's right edge does not move as the list grows past one screen. That is
+// the one behavioural difference from `ScrollView`, whose bar floats over the
+// content.
+export component AppScroll {
+    in property <length> viewport-width <=> flickable.content-width;
+    in property <length> viewport-height <=> flickable.content-height;
+    in-out property <length> viewport-x <=> flickable.content-x;
+    in-out property <length> viewport-y <=> flickable.content-y;
+    out property <length> visible-width <=> flickable.width;
+    out property <length> visible-height <=> flickable.height;
+    // How short the thumb may get: 48px for rows and tiles, 36px for the
+    // marker list, which is a smaller column of smaller things.
+    in property <length> min-thumb: 48px;
+    // The part of a wheel notch this view could not use because it is already
+    // at that end (task3110). Nobody listens by default, so a scroll that runs
+    // out of room still just stops -- only a caller that has somewhere to pass
+    // it on wires this up (the marker list, into the panel behind it).
+    //
+    // A callback rather than "reject the event and let it bubble": rejecting
+    // hands the wheel to the `Flickable` below this `TouchArea`, and a
+    // `Flickable` with any overflow at all accepts a wheel it cannot act on
+    // (`process_wheel_event` sets `last_scroll_event` on every
+    // `TouchPhase::Moved`, then returns `EventAccepted` via
+    // `should_capture_scroll`), so nothing would ever reach an ancestor.
+    callback overflow-scrolled(length);
+
+    // How far in from this component's right edge the lane sits (task4320).
+    // 0 by default, so an `AppScroll` that does not reach the window edge is
+    // untouched; the four that do are handed `Tokens.resize-band-inset`, which
+    // is the window's resize band in logical px (0 while maximized).
+    //
+    // The lane is *moved*, not made wider, and the viewport loses the same
+    // width: the thumb keeps its 4px/6px and the lane its 12px, and the strip
+    // left over at the right edge belongs to the band. Without this the thumb's
+    // right edge sits 4px in from the client edge against an 8px band, so three
+    // of its four columns are pressed-through to winit's resize (task4120).
+    in property <length> right-inset: 0px;
+
+    // How long a *programmatic* `viewport-y` move takes. See the `animate` on
+    // the flickable below: 0ms is the immediate scroll every caller had, and a
+    // caller that jumps the view itself (the clip grid, scrolling an expansion
+    // into view) raises it while that jump is on.
+    in property <duration> scroll-tween: 0ms;
+
+    min-height: 50px;
+    min-width: 50px;
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    preferred-height: 100%;
+    preferred-width: 100%;
+
+    property <length> lane: 12px;
+    // 2026-09-13 (the user): the rod used to run into the view's top and bottom
+    // edges, so at either end its rounded cap was flush against the boundary
+    // and read as cut off. The travel is inset by this instead -- the thumb
+    // still reaches both ends of the range, it just never touches the edge.
+    property <length> lane-pad: 4px;
+    // `out` since task3110: the panel's scroll has to clamp a handed-over
+    // delta against the room its own view still has.
+    out property <length> overflow: Math.max(0px, flickable.content-height - flickable.height);
+    property <length> travel: Math.max(0px,
+        flickable.height - 2 * root.lane-pad - root.thumb-length);
+    property <length> thumb-length: root.overflow <= 0px
+        ? 0px
+        // The `min` keeps a short view's thumb inside the padded lane: without
+        // it the 48px floor could outrun the room left after the inset.
+        : Math.min(flickable.height - 2 * root.lane-pad,
+            Math.max(root.min-thumb,
+                flickable.height * flickable.height / flickable.content-height));
+
+    flickable := Flickable {
+        // As in `ScrollView`: the wheel still scrolls, but dragging the content
+        // does not -- the history's marquee selection needs that drag.
+        interactive: false;
+        x: 0;
+        y: 0;
+        width: parent.width - root.lane - root.right-inset;
+        height: parent.height;
+
+        // Here rather than on the caller's `AppScroll` element: `viewport-y` up
+        // there is a two-way alias (`<=>`) of this property, and an `animate`
+        // on the alias never fires -- the clip grid carried one since task3880
+        // and its scroll-into-view still jumped the whole way on the first
+        // frame (measured 2026-09-13: the heading was already at its final y
+        // 60ms in, while the tile was a third of the way open).
+        //
+        // 0ms by default, so every other `AppScroll` and every wheel notch is
+        // exactly as immediate as it was -- the TouchArea below exists to keep
+        // the wheel on the same frame, and an animation here would put slint's
+        // easing back on top of it. Only a caller with a jump worth softening
+        // raises it, and only for as long as that jump lasts.
+        animate content-y {
+            duration: root.scroll-tween;
+            easing: Tokens.motion-curve;
+        }
+
+        // The wheel, answered here rather than by the Flickable. slint 1.17
+        // gives every mouse-wheel notch a 180ms deceleration animation
+        // (`WHEEL_SCROLL_DURATION` in `i-slint-core`'s flickable.rs), so the
+        // content keeps sliding after the wheel has stopped and reads as lag.
+        // Accepting the event here moves `viewport-y` the whole notch on the
+        // same frame, and the Flickable never sees it -- it only intercepts a
+        // wheel before its children once it has handled one itself.
+        //
+        // It wraps the children rather than sitting under them: a rejected
+        // scroll bubbles to an ancestor, not to a sibling. Presses still reach
+        // the children first, so the history's marquee is untouched.
+        //
+        // ponytail: this takes the touchpad's phased path with it, which had no
+        // animation to begin with and now loses its fling on release. Give the
+        // handler a `event.delta-y == 0` escape if a trackpad ever has to feel
+        // native here.
+        TouchArea {
+            scroll-event(event) => {
+                // What the clamp is about to throw away, reported before it is
+                // thrown (task3110). Zero for every notch that lands inside the
+                // range, so a listener only hears from the two ends.
+                if (flickable.content-y + event.delta-y != Math.clamp(
+                        flickable.content-y + event.delta-y, -root.overflow, 0px)) {
+                    root.overflow-scrolled(flickable.content-y + event.delta-y
+                        - Math.clamp(flickable.content-y + event.delta-y,
+                            -root.overflow, 0px));
+                }
+                flickable.content-y = Math.clamp(
+                    flickable.content-y + event.delta-y, -root.overflow, 0px);
+                return accept;
+            }
+
+            @children
+        }
+    }
+
+    Rectangle {
+        x: parent.width - root.lane - root.right-inset;
+        width: root.lane;
+        height: 100%;
+        background: transparent;
+
+        thumb := Rectangle {
+            visible: root.overflow > 0px;
+            // `border:4px solid transparent` on a 12px lane, `3px` on hover:
+            // a 4px rod that fattens to 6px rather than a 12px slab.
+            width: bar.has-hover || bar.pressed ? 6px : 4px;
+            x: (parent.width - self.width) / 2;
+            height: root.thumb-length;
+            y: root.lane-pad + (root.overflow <= 0px
+                ? 0px
+                : -flickable.content-y / root.overflow * root.travel);
+            border-radius: self.width / 2;
+            background: bar.has-hover || bar.pressed
+                ? Tokens.color-outline
+                : Tokens.chrome-hairline-strong;
+        }
+
+        bar := TouchArea {
+            // Where in the thumb the drag started, so it does not jump to
+            // centre itself under the pointer on the first move.
+            property <length> grab;
+
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    self.grab = self.pressed-y - thumb.y;
+                }
+            }
+
+            moved => {
+                if (root.overflow > 0px && root.travel > 0px) {
+                    // `grab` was taken against the padded `thumb.y`, so the
+                    // inset comes back off here before the ratio.
+                    root.viewport-y = -Math.min(root.overflow, Math.max(0px,
+                        (self.mouse-y - self.grab - root.lane-pad)
+                            / root.travel * root.overflow));
+                }
+            }
+        }
+    }
+}
+
+// ---------- transport pieces (task3510) ----------
+// Moved here from `review.slint` so the clip player (task3520) can draw the
+// same transport without a second copy. Both read `Dark` directly rather than
+// the themed set: everything drawn on a video stage stays dark while the rest
+// of the screen follows the theme (round16 §2), and that holds wherever the
+// stage is.
+
+// The transport's icon button: the DS IconButton `stage` on the dark island --
+// `on-stage` glyph, white 14% under the pointer, `fill-pressed` pressed, and a
+// toggle that is on takes `accent-soft` / `accent-text` (the IconButton's
+// `pressed`). On the IconButton's steps (t260928-5f3b F14): `size` sm 28 /
+// md 32 (default) / lg 40, a 16px glyph on sm and 20px above.
+export component TransportBtn inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> filled;
+    // The volume toggle carries state in its tint (round 4 §2-B2): muted drops
+    // to the variant colour. Everything else keeps the default.
+    in property <color> tint: Dark.on-stage;
+    in property <ControlSize> size: ControlSize.md;
+    // Toggles that are *on* (round5 §4-C).
+    in property <bool> on;
+    // A button whose target is not there to be toggled (task1030). Greyed and
+    // inert rather than hidden: the row keeps its shape across the transition.
+    in property <bool> disabled;
+    callback clicked;
+    // The key focus is on it, as `IconBtn` (the expanded clip's bar pins
+    // itself on it, t260929-fcc6).
+    out property <bool> key-focused: fs.has-focus;
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: !root.disabled;
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.clicked();
+        }
+    }
+
+    property <length> box: root.size == ControlSize.sm
+        ? Tokens.size-control-sm
+        : root.size == ControlSize.lg ? Tokens.size-control-lg : Tokens.size-control-md;
+    property <length> icon-size: root.size == ControlSize.sm ? Tokens.size-icon-sm : Tokens.size-icon;
+
+    width: root.box;
+    height: root.box;
+    border-radius: root.size == ControlSize.lg ? Tokens.radius-md : Tokens.radius-sm;
+    opacity: root.disabled ? 0.38 : 1.0;
+    background: root.on
+        ? Dark.accent-soft
+        : touch.pressed
+            ? Dark.fill-pressed
+            : touch.has-hover ? #ffffff24 : transparent;
+    animate background {
+        duration: touch.pressed ? Tokens.duration-instant : Tokens.duration-fast;
+        easing: Motion.easing-standard;
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // A Tab stop (t260928-d9b4).
+    fs := PressFocus {
+        enabled: !root.disabled;
+        ring-radius: root.border-radius;
+        pressed => {
+            root.clicked();
+        }
+    }
+
+    AppIcon {
+        commands: root.icon;
+        active: touch.has-hover || fs.has-focus;
+        stroke-color: root.filled ? transparent : (root.on ? Dark.accent-text : root.tint);
+        fill-color: root.filled ? (root.on ? Dark.accent-text : root.tint) : transparent;
+        animate stroke-color, fill-color {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+        size: root.icon-size;
+    }
+}
+
+// The volume rail itself: groove, fill, knob and hit area (task3980). The
+// transport's `VolumeSlider` and the 音量 tab's track rows (`review_volume.slint`) both sit on it, so the
+// two can no longer drift apart one fix at a time. Colours come in rather than
+// being read here: the transport draws on the stage's dark island and passes
+// `Dark.*`, the mixer follows the theme and passes `Tokens.*` (tokens.slint).
+// No `width` / `height` of its own -- a fixed size would stop it stretching
+// inside the mixer's `HorizontalLayout`; the caller sizes it.
+//
+// The DS Slider (t260928-ac18, review 06 F12): a 4px `line-strong` groove,
+// the fill `ink-muted` at rest and `accent` under the pointer, a 12px `ink`
+// knob ringed 2px in `surface`. `dock` is the review band's crossover, as on
+// `IconBtn`: 1 the theme, 0 on-stage over the floating band's black.
+export component VolumeRail inherits Rectangle {
+    in property <float> ratio;
+    in property <bool> muted;
+    in property <float> dock: 1;
+    in property <brush> rail: Tokens.line-strong.mix(#ffffff33, root.dock);
+    in property <brush> fill: Tokens.ink-muted.mix(Dark.on-stage-muted, root.dock);
+    in property <brush> fill-hover: Tokens.accent.mix(Dark.accent, root.dock);
+    in property <brush> knob: Tokens.ink.mix(Dark.on-stage, root.dock);
+    in property <brush> ring: Tokens.surface.mix(#000000, root.dock);
+    callback ratio-changed(float);
+
+    Rectangle {
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: root.rail;
+    }
+
+    // Muted drains the fill and hides the knob; the ratio itself is untouched,
+    // so unmuting comes back to the same volume (round5 §4-C).
+    if !root.muted: Rectangle {
+        x: 0;
+        y: (parent.height - 4px) / 2;
+        width: parent.width * root.ratio;
+        height: 4px;
+        border-radius: 2px;
+        background: rail-touch.has-hover || rail-touch.pressed ? root.fill-hover : root.fill;
+        animate background {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+
+    if !root.muted: Rectangle {
+        x: parent.width * root.ratio - 8px;
+        y: (parent.height - 16px) / 2;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: root.ring;
+
+        Rectangle {
+            x: 2px;
+            y: 2px;
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: root.knob;
+        }
+    }
+
+    rail-touch := TouchArea {
+        // Same as the seek track: the whole bar is a click target, so pointer,
+        // not a resize glyph.
+        mouse-cursor: pointer;
+        pointer-event(event) => {
+            if ((event.kind == PointerEventKind.down && event.button == PointerEventButton.left)
+                || (event.kind == PointerEventKind.move && self.pressed)) {
+                root.ratio-changed(max(0.0, min(1.0, self.mouse-x / root.width)));
+            }
+        }
+        // Wheel over the slider, ±5% (task151).
+        scroll-event(event) => {
+            root.ratio-changed(max(0.0, min(1.0,
+                root.ratio + (event.delta-y > 0 ? 0.05 : -0.05))));
+            return accept;
+        }
+    }
+
+    // A Tab stop on every caller -- the clip band, the review band and the
+    // mixer (t260929-9dc3, t260929-475e). `PressFocus`'s manners (keys only,
+    // its ring), with the arrows at the wheel's ±5% (task151). All four are
+    // taken, so ↑ ↓ on a mixer row never reach the review pane's master
+    // volume; every other key goes on to the pane (Space still plays /
+    // pauses). Held keys repeat, as a volume should. Muted still moves the
+    // ratio, as the wheel does.
+    out property <bool> key-focused: fs.has-focus;
+
+    fs := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.RightArrow || event.text == Key.UpArrow) {
+                root.ratio-changed(max(0.0, min(1.0, root.ratio + 0.05)));
+                return accept;
+            }
+            if (event.text == Key.LeftArrow || event.text == Key.DownArrow) {
+                root.ratio-changed(max(0.0, min(1.0, root.ratio - 0.05)));
+                return accept;
+            }
+            reject
+        }
+
+        if fs.has-focus: Rectangle {
+            x: -4px;
+            y: -4px;
+            width: parent.width + 8px;
+            height: parent.height + 8px;
+            border-radius: Tokens.radius-sm + 4px;
+            border-width: 2px;
+            border-color: Tokens.focus;
+        }
+    }
+}
+
+// The transport's volume bar, lifted out of `review.slint` verbatim (task3510).
+// `ratio` and `muted` come in, and every gesture leaves as `ratio-changed` --
+// the component holds no state of its own, so the caller's model stays the one
+// place a volume lives.
+//
+// Not `changed`: that word opens slint's property-observer statement
+// (`changed ratio => {}`), so a callback cannot take it.
+export component VolumeSlider inherits Rectangle {
+    in property <float> ratio;
+    in property <bool> muted;
+    callback ratio-changed(float);
+    // The expanded clip's bar pins itself on it (t260929-9dc3); the keys
+    // themselves live on `VolumeRail` (t260929-475e).
+    out property <bool> key-focused: rail.key-focused;
+
+    width: 84px;
+    // Follows the transport row's 30px so the groove and knob, which centre on
+    // `parent.height`, land on the row's centre whichever way the layout aligns
+    // a shorter child (task2300).
+    height: 30px;
+
+    rail := VolumeRail {
+        width: 100%;
+        height: 100%;
+        ratio: root.ratio;
+        muted: root.muted;
+        // Dark island: the transport stays dark in either theme (tokens.slint).
+        rail: Dark.chrome-hairline-strong;
+        fill: Dark.color-primary;
+        ratio-changed(v) => {
+            root.ratio-changed(v);
+        }
+    }
+}
+
+// ---------- status pieces (t260927-2ee5: the DS Badge / ProgressBar / StorageMeter / Tally) ----------
+// Added for the screens to adopt; no screen reads them yet (each screen's task
+// swaps its inline copy for one of these).
+
+export enum BadgeTone { neutral, accent, live, marker, positive, warning, danger }
+
+// The DS Badge: one or two words on a row or a card. The role's `-soft`
+// ground and the role colour for the words; never colour alone -- a word or an
+// icon is always there.
+export component Badge inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> dot;
+    in property <BadgeTone> tone: BadgeTone.neutral;
+
+    property <color> ink: root.tone == BadgeTone.accent ? Tokens.accent-text
+        : root.tone == BadgeTone.live ? Tokens.live-text
+        : root.tone == BadgeTone.marker ? Tokens.marker-text
+        : root.tone == BadgeTone.positive ? Tokens.positive
+        : root.tone == BadgeTone.warning ? Tokens.warning
+        : root.tone == BadgeTone.danger ? Tokens.danger
+        : Tokens.ink-muted;
+
+    height: 20px;
+    width: badge-row.preferred-width;
+    border-radius: Tokens.radius-xs;
+    background: root.tone == BadgeTone.accent ? Tokens.accent-soft
+        : root.tone == BadgeTone.live ? Tokens.live-soft
+        : root.tone == BadgeTone.marker ? Tokens.marker-soft
+        : root.tone == BadgeTone.positive ? Tokens.positive-soft
+        : root.tone == BadgeTone.warning ? Tokens.warning-soft
+        : root.tone == BadgeTone.danger ? Tokens.danger-soft
+        : Tokens.fill;
+
+    badge-row := HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 4px;
+        alignment: center;
+
+        if root.dot: Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: root.tone == BadgeTone.live ? Tokens.live : Tokens.ink-faint;
+        }
+
+        if root.icon != "": AppIcon {
+            y: (parent.height - self.height) / 2;
+            commands: root.icon;
+            stroke-color: root.ink;
+            size: 14px;
+        }
+
+        if root.label != "": NudgedLabel {
+            text: root.label;
+            font-size: 11px;
+            font-weight: 600;
+            ink: root.ink;
+            nudge: 0.5px;
+        }
+    }
+}
+
+// The DS ProgressBar: a 4px `line-strong` groove with the done part in
+// `accent` (`live` for a recording's), the label over it on the left and the
+// percentage (or `detail`) in mono on the right, 「中止」 when the caller can
+// stop the work. Determinate only: nothing in the app draws an unknown
+// progress, and an endless sweep would keep the window presenting.
+export component ProgressBar inherits VerticalLayout {
+    in property <float> value;
+    in property <string> label;
+    // Replaces the percentage when set.
+    in property <string> detail;
+    in property <bool> live;
+    in property <bool> cancellable;
+    in property <string> cancel-label: "中止";
+    callback cancel();
+
+    spacing: 6px;
+    alignment: start;
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            overflow: elide;
+            font-size: 12px;
+            font-weight: 500;
+            color: Tokens.ink;
+        }
+
+        Text {
+            text: root.detail != "" ? root.detail : Math.round(Math.clamp(root.value, 0, 1) * 100) + "%";
+            font-family: Tokens.font-family-mono;
+            font-size: 12px;
+            color: Tokens.ink-muted;
+        }
+
+        if root.cancellable: Rectangle {
+            width: cancel-text.preferred-width + 8px;
+            border-radius: Tokens.radius-xs;
+            background: cancel-touch.has-hover ? Tokens.fill-hover : transparent;
+
+            cancel-text := Text {
+                text: root.cancel-label;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 12px;
+                font-weight: 500;
+                color: cancel-touch.has-hover ? Tokens.ink : Tokens.ink-muted;
+            }
+
+            cancel-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.cancel();
+                }
+            }
+
+            PressFocus {
+                ring-radius: Tokens.radius-xs;
+                pressed => {
+                    root.cancel();
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        height: 4px;
+        border-radius: 2px;
+        background: Tokens.line-strong;
+        clip: true;
+
+        Rectangle {
+            x: 0;
+            width: parent.width * Math.clamp(root.value, 0, 1);
+            border-radius: 2px;
+            background: root.live ? Tokens.live : Tokens.accent;
+            animate width {
+                duration: Tokens.duration-base;
+                easing: Motion.easing-standard;
+            }
+        }
+    }
+}
+
+// The 135deg hatch the DS draws for protected storage (`accent` with
+// `accent-pressed` stripes, 3px each). slint has no repeating gradient, so the
+// stripes are paths laid side by side; the caller clips them.
+component Hatch inherits Rectangle {
+    in property <length> band: 3px;
+
+    // A 45deg stripe `band` thick is `band * sqrt 2` wide on the horizontal.
+    property <length> run: root.band * 1.41421;
+
+    background: Tokens.accent;
+
+    for i in Math.ceil(root.width / (2 * root.run)) + 2: Path {
+        x: i * 2 * root.run - root.height;
+        width: root.height + root.run;
+        height: root.height;
+        viewbox-width: (root.height + root.run) / 1px;
+        viewbox-height: root.height / 1px;
+        fill: Tokens.accent-pressed;
+        commands: "M0 " + (root.height / 1px) + "L" + (root.height / 1px) + " 0L"
+            + ((root.height + root.run) / 1px) + " 0L" + (root.run / 1px) + " "
+            + (root.height / 1px) + "Z";
+    }
+}
+
+// The DS StorageMeter: how close the buffer is to the auto-delete ceiling.
+// `used` in `accent`, the protected part of it hatched; past 90% of the limit
+// the used part and the label go `warning` with its icon. Numbers in mono,
+// 「17.2 / 50.0 GB」. `compact` is the history footer's one-line form.
+// The full StorageMeter's warning line, under it (t260928-e309 F10): a layout,
+// not a Rectangle, so a wrapped second line is measured and the row grows.
+export component StorageNote inherits HorizontalLayout {
+    in property <string> text;
+
+    spacing: 6px;
+
+    AppIcon {
+        y: 1px;
+        commands: Icons.warning;
+        stroke-color: Tokens.warning;
+        size: 14px;
+    }
+
+    Text {
+        horizontal-stretch: 1;
+        text: root.text;
+        font-size: 12px;
+        color: Tokens.warning;
+        wrap: word-wrap;
+    }
+}
+
+export component StorageMeter inherits Rectangle {
+    in property <float> used;
+    in property <float> protected-size;
+    in property <float> limit: 1;
+    in property <string> unit: "GB";
+    in property <string> label: "録画バッファ";
+    // Legend words; the defaults are the DS's.
+    in property <string> protected-label: "保護";
+    in property <string> deletable-label: "自動削除の対象";
+    in property <string> free-label: "上限まで";
+    in property <bool> compact;
+    // A warning line with its icon beside the compact meter (t260928-e309 F10,
+    // DS 知らせ方: 続けると困ること → その場所の近くに warning の 1 行); empty
+    // draws nothing. The full meter's caller puts it under the meter instead
+    // (`StorageNote`): a wrapped line inside this Rectangle is measured one line
+    // tall and runs over the row below.
+    in property <string> note;
+
+    property <float> used-ratio: root.limit > 0 ? Math.min(root.used / root.limit, 1) : 0;
+    property <float> protected-ratio: root.used > 0 ? Math.min(root.protected-size / root.used, 1) : 0;
+    property <bool> near: root.limit > 0 && root.used / root.limit >= 0.9;
+    property <length> track-height: root.compact ? 6px : 8px;
+
+    pure function amount(n: float) -> string {
+        return n >= 100 ? n.to-fixed(0) : n.to-fixed(1);
+    }
+
+    min-height: meter-body.min-height;
+    preferred-height: meter-body.preferred-height;
+    min-width: root.compact ? 180px : 120px;
+
+    meter-body := VerticalLayout {
+        spacing: Tokens.space-2;
+        alignment: start;
+
+        // Full form: label and value over the track.
+        if !root.compact: HorizontalLayout {
+            spacing: Tokens.space-3;
+
+            HorizontalLayout {
+                horizontal-stretch: 1;
+                spacing: 6px;
+                alignment: start;
+
+                if root.near: AppIcon {
+                    y: (parent.height - self.height) / 2;
+                    commands: Icons.warning;
+                    stroke-color: Tokens.warning;
+                    size: 14px;
+                }
+
+                Text {
+                    text: root.label;
+                    vertical-alignment: center;
+                    font-size: 13px;
+                    font-weight: 500;
+                    color: root.near ? Tokens.warning : Tokens.ink;
+                }
+            }
+
+            // DS `.lb-meter__value b`: the used amount 600 `ink`.
+            HorizontalLayout {
+                Text {
+                    text: root.amount(root.used);
+                    vertical-alignment: center;
+                    font-family: Tokens.font-family-mono;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Tokens.ink;
+                }
+
+                Text {
+                    text: " / " + root.amount(root.limit) + " " + root.unit;
+                    vertical-alignment: center;
+                    font-family: Tokens.font-family-mono;
+                    font-size: 12px;
+                    color: Tokens.ink-muted;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Tokens.space-3;
+
+            Rectangle {
+                horizontal-stretch: root.compact ? 0 : 1;
+                min-width: root.compact ? 180px : 0px;
+                max-width: root.compact ? 180px : 100000px;
+                y: (parent.height - self.height) / 2;
+                height: root.track-height;
+                border-radius: root.track-height / 2;
+                background: Tokens.line-strong;
+                clip: true;
+
+                Rectangle {
+                    x: 0;
+                    width: parent.width * root.used-ratio;
+                    border-radius: root.track-height / 2;
+                    background: root.near ? Tokens.warning : Tokens.accent;
+                    clip: true;
+
+                    Hatch {
+                        x: 0;
+                        width: parent.width * root.protected-ratio;
+                    }
+                }
+            }
+
+            if root.compact: HorizontalLayout {
+                spacing: Tokens.space-2;
+
+                if root.near: AppIcon {
+                    y: (parent.height - self.height) / 2;
+                    commands: Icons.warning;
+                    stroke-color: Tokens.warning;
+                    size: 14px;
+                }
+
+                Text {
+                    text: root.label;
+                    vertical-alignment: center;
+                    font-size: 13px;
+                    font-weight: 500;
+                    color: root.near ? Tokens.warning : Tokens.ink;
+                }
+
+                // DS `.lb-meter__value b`: the used amount 600 `ink`.
+                HorizontalLayout {
+                    Text {
+                        text: root.amount(root.used);
+                        vertical-alignment: center;
+                        font-family: Tokens.font-family-mono;
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Tokens.ink;
+                    }
+    
+                    Text {
+                        text: " / " + root.amount(root.limit) + " " + root.unit;
+                        vertical-alignment: center;
+                        font-family: Tokens.font-family-mono;
+                        font-size: 12px;
+                        color: Tokens.ink-muted;
+                    }
+                }
+
+                if root.note != "": HorizontalLayout {
+                    spacing: 6px;
+
+                    AppIcon {
+                        y: (parent.height - self.height) / 2;
+                        commands: Icons.warning;
+                        stroke-color: Tokens.warning;
+                        size: 14px;
+                    }
+
+                    Text {
+                        text: root.note;
+                        vertical-alignment: center;
+                        font-size: 12px;
+                        color: Tokens.warning;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+
+        if !root.compact: HorizontalLayout {
+            spacing: Tokens.space-4;
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 2px;
+                    clip: true;
+
+                    Hatch {
+                        band: 2px;
+                    }
+                }
+
+                Text {
+                    text: root.protected-label + " " + root.amount(root.protected-size) + " " + root.unit;
+                    font-size: 12px;
+                    color: Tokens.ink-muted;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 2px;
+                    background: Tokens.accent;
+                }
+
+                Text {
+                    text: root.deletable-label + " " + root.amount(root.used - root.protected-size) + " " + root.unit;
+                    font-size: 12px;
+                    color: Tokens.ink-muted;
+                }
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                horizontal-alignment: right;
+                text: root.free-label + " " + root.amount(Math.max(0, root.limit - root.used)) + " " + root.unit;
+                font-size: 12px;
+                color: Tokens.ink-muted;
+            }
+        }
+    }
+}
+
+// The DS `AppIcon` monogram (t260927-9a17): a captured app's stand-in when its
+// own icon could not be read. Named apart from `icons.slint`'s `AppIcon`, which
+// is the glyph renderer. Corners 22%, the letter white 600 (700 is not bundled)
+// at 52% of the box, a 1px white 12% ring inside the edge (DS `bundle.css`),
+// the ground `hsl(hue 38% 34%)` for one of the DS's eight hues (`APP_HUES`
+// 214 / 262 / 18 / 152 / 330 / 40 / 190 / 290), converted here because slint
+// has no `hsl()`. Which one is the name's hash, computed in Rust
+// (`ui_state::sessions::monogram_hue`) because slint cannot hash a string.
+export component AppMonogram inherits Rectangle {
+    in property <string> letter;
+    in property <int> hue;
+    in property <length> size: 16px;
+
+    width: root.size;
+    height: root.size;
+    border-radius: root.size * 0.22;
+    background: root.hue == 0 ? #365278
+        : root.hue == 1 ? #4e3678
+        : root.hue == 2 ? #784a36
+        : root.hue == 3 ? #367859
+        : root.hue == 4 ? #783657
+        : root.hue == 5 ? #786236
+        : root.hue == 6 ? #366d78
+        : #6d3678;
+
+    Text {
+        text: root.letter;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-size: Math.round(root.size / 1px * 0.52) * 1px;
+        font-weight: 600;
+        color: #ffffff;
+    }
+
+    // Drawn over the ground: slint's `border` paints inside the box, so this
+    // is the DS's inset ring.
+    Rectangle {
+        border-radius: root.size * 0.22;
+        border-width: 1px;
+        border-color: #ffffff1f;
+    }
+}
+
+// The history's selection bar (t260927-9a17, DS HistoryScreen), shared with the
+// clip screen (t260927-bb89): 「N 件を選択 · X GB」 on the left, then on the
+// right ghost 「選択を解除」, the protect toggle, and the danger-quiet
+// hold-to-discard (DS `screens.jsx`: count, gap, the buttons; t260928-5f3b F7).
+// A warning line left of the discard says a protected session is in the pile;
+// a recording in it disables the discard and says why instead.
+//
+// DS `.lb-selbar`: 「N 件」 600 `ink`, the rest 400 `ink-muted`. A caller that
+// sends `count` (「2 件」) gets that split, `text` then being the rest
+// (「を選択 · 8.3 GB」); one that sends only `text` gets it whole in `ink`.
+export component SelectionBar inherits HorizontalLayout {
+    in property <string> count;
+    in property <string> text;
+    in property <string> clear-label;
+    // "" leaves the protect button out (a caller with nothing to protect).
+    in property <string> protect-label;
+    in property <string> discard-label;
+    in property <string> hold-hint;
+    // Warning ink, or "".
+    in property <string> warning-text;
+    // Why the discard is refused, or "" when it is not.
+    in property <string> refused-text;
+    // The keyboard's own hold (Delete): true while the key is down. Routed
+    // through a property because the caller's key scope cannot reach an
+    // element inside the `if` this bar usually sits in.
+    in property <bool> key-held;
+    callback clear();
+    callback protect();
+    callback discard();
+
+    spacing: Tokens.space-2;
+    alignment: stretch;
+
+    // `Btn.hold-start` does not look at `disabled` (only the pointer and its
+    // own keys do), so a refused discard is refused here too.
+    changed key-held => {
+        if (root.key-held && root.refused-text == "") {
+            discard-btn.hold-start();
+        } else {
+            discard-btn.hold-cancel();
+        }
+    }
+
+    // One run of words: the two halves sit flush, not the bar's 8 apart.
+    HorizontalLayout {
+        horizontal-stretch: 0;
+
+        if root.count != "": Text {
+            text: root.count;
+            vertical-alignment: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: Tokens.ink;
+        }
+
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            font-size: 13px;
+            font-weight: root.count != "" ? 400 : 500;
+            color: root.count != "" ? Tokens.ink-muted : Tokens.ink;
+        }
+    }
+
+    Rectangle {
+        horizontal-stretch: 1;
+    }
+
+    Btn {
+        y: (parent.height - self.height) / 2;
+        label: root.clear-label;
+        variant: BtnVariant.ghost;
+        clicked => {
+            root.clear();
+        }
+    }
+
+    if root.protect-label != "": Btn {
+        y: (parent.height - self.height) / 2;
+        label: root.protect-label;
+        icon: Icons.lock;
+        clicked => {
+            root.protect();
+        }
+    }
+
+    if root.refused-text != "" || root.warning-text != "": HorizontalLayout {
+        horizontal-stretch: 0;
+        spacing: 6px;
+
+        AppIcon {
+            y: (parent.height - self.height) / 2;
+            commands: Icons.warning;
+            stroke-color: root.refused-text != "" ? Tokens.ink-muted : Tokens.warning;
+            size: 14px;
+        }
+
+        Text {
+            text: root.refused-text != "" ? root.refused-text : root.warning-text;
+            vertical-alignment: center;
+            font-size: 12px;
+            color: root.refused-text != "" ? Tokens.ink-muted : Tokens.warning;
+        }
+    }
+
+    discard-btn := Btn {
+        y: (parent.height - self.height) / 2;
+        label: root.discard-label;
+        icon: Icons.discard;
+        variant: BtnVariant.danger-quiet;
+        hold: true;
+        hold-hint: root.hold-hint;
+        disabled: root.refused-text != "";
+        hold-complete => {
+            root.discard();
+        }
+    }
+}
+
+export enum TallyState { live, standby, off }
+export enum TallyVariant { capsule, plain, badge, stage, dot }
+
+// The DS tally lamp: 8px. `live` is lit `live` with the `glow-live` halo,
+// `standby` a hollow 1.5px `ink-muted` ring, `off` an `ink-faint` dot -- the
+// shape tells them apart as well as the colour. `blink` is for the nav lamp
+// only (決めたこと 7): one blink on the screen at most. It follows
+// `animation-tick()`, so a blinking lamp presents every frame while shown;
+// reduce-motion keeps it lit.
+export component TallyLamp inherits Rectangle {
+    in property <TallyState> state: TallyState.live;
+    in property <bool> blink;
+
+    property <bool> blinking: root.blink && root.state == TallyState.live && !Tokens.reduce-motion;
+
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: root.state == TallyState.live
+        ? Tokens.live
+        : root.state == TallyState.off ? Tokens.ink-faint : transparent;
+    border-width: root.state == TallyState.standby ? 1.5px : 0px;
+    border-color: Tokens.ink-muted;
+    drop-shadow-blur: root.state == TallyState.live ? Tokens.glow-live-blur : 0px;
+    drop-shadow-color: Tokens.glow-live-color;
+    // `lb-tally`: 1 -> 0.5 -> 1 over `duration-tally`, eased in and out --
+    // a cosine is that curve's shape.
+    opacity: root.blinking
+        ? 0.75 + 0.25 * Math.cos(360deg * mod(animation-tick() / 1ms, Tokens.duration-tally / 1ms) / (Tokens.duration-tally / 1ms))
+        : 1.0;
+}
+
+// The DS Tally: the recording state as a lamp and words, always together.
+//   capsule -- `fill` with a `line` edge (the DS's default);
+//   plain   -- the title bar's: no ground, no edge, `ink-muted` words, and it
+//              never turns into a button on hover (決めたこと 7);
+//   badge   -- the small mark inside a row or a card (`live-soft` when live);
+//   stage   -- on the video: `stage-veil`, a 1px white 16% edge, mono caps;
+//   dot     -- the lamp alone; the words go to a tooltip.
+// Only the lamp and the word 「録画中」 are red, never the whole capsule.
+// Left of `target` (t260928-5f3b F9, DS Tally README): `app-icon`, the
+// captured exe's own icon; when that could not be read, the `AppMonogram` of
+// `app-letter` / `app-hue` (`ui_state::sessions::monogram_*`, the same letter
+// and hue the history shows); a whole screen (`app-monitor`) takes the
+// `monitor` glyph instead, as the history's `AppMark` does (user ruling
+// 2026-09-28, t260928-b780). Several captures at once pass `app-icons`
+// instead: up to three, 2px apart, after the rule, each with the same three
+// rungs.
+export struct TallyApp {
+    icon: image,
+    letter: string,
+    hue: int,
+    monitor: bool,
+}
+
+// One 16px app mark of the Tally: monitor glyph, own icon, or monogram.
+component TallyMark inherits Rectangle {
+    in property <TallyApp> app;
+    in property <color> ink;
+
+    width: 16px;
+    height: 16px;
+
+    if root.app.monitor: AppIcon {
+        commands: Icons.monitor;
+        stroke-color: root.ink;
+        size: 16px;
+    }
+
+    if !root.app.monitor && root.app.icon.width > 0: Image {
+        width: 16px;
+        height: 16px;
+        source: root.app.icon;
+    }
+
+    if !root.app.monitor && root.app.icon.width == 0: AppMonogram {
+        letter: root.app.letter;
+        hue: root.app.hue;
+        size: 16px;
+    }
+}
+
+export component Tally inherits Rectangle {
+    in property <TallyState> state: TallyState.live;
+    in property <TallyVariant> variant: TallyVariant.capsule;
+    // Replaces the state's own word.
+    in property <string> label;
+    in property <string> target;
+    in property <image> app-icon;
+    in property <string> app-letter;
+    in property <int> app-hue;
+    in property <bool> app-monitor;
+    in property <[TallyApp]> app-icons;
+    in property <string> detail;
+    in property <int> count: 1;
+    in property <bool> blink;
+    // The state words; the defaults are the DS's.
+    in property <string> live-label: root.count > 1 ? root.count + " 本を録画中" : "録画中";
+    in property <string> standby-label: "待機中";
+    in property <string> off-label: "停止中";
+
+    property <bool> stage: root.variant == TallyVariant.stage;
+    property <bool> badge: root.variant == TallyVariant.badge;
+    property <bool> plain: root.variant == TallyVariant.plain;
+    property <string> word: root.label != ""
+        ? root.label
+        : root.state == TallyState.live
+            ? root.live-label
+            : root.state == TallyState.standby ? root.standby-label : root.off-label;
+    property <color> text-ink: root.stage ? Tokens.on-stage : root.plain ? Tokens.ink-muted : Tokens.ink;
+    property <length> text-size: root.badge || root.stage ? 11px : 12px;
+    // Plex sits high in its box: the words drop, the lamp and icon stay
+    // (DS optical centre, size-only: 11-12px drop 1px; README ~:64, t260928-4ac5 follow-up).
+    property <length> text-nudge: 1px;
+
+    height: root.variant == TallyVariant.dot ? 8px : root.stage ? 24px : root.badge ? 22px : 28px;
+    width: root.variant == TallyVariant.dot ? 8px : tally-row.preferred-width;
+    border-radius: root.variant == TallyVariant.dot ? 4px : Tokens.radius-full;
+    background: root.stage
+        ? Tokens.stage-veil
+        : root.badge
+            ? (root.state == TallyState.live ? Tokens.live-soft : Tokens.fill)
+            : root.variant == TallyVariant.capsule ? Tokens.fill : transparent;
+    border-width: root.variant == TallyVariant.capsule || root.stage ? 1px : 0px;
+    border-color: root.stage ? #ffffff29 : Tokens.line;
+
+    if root.variant == TallyVariant.dot: TallyLamp {
+        state: root.state;
+        blink: root.blink;
+    }
+
+    tally-row := HorizontalLayout {
+        visible: root.variant != TallyVariant.dot;
+        padding-left: root.stage ? 9px : root.badge ? 8px : root.plain ? 0px : 11px;
+        padding-right: root.stage ? 9px : root.badge ? 8px : root.plain ? 0px : 12px;
+        spacing: root.stage ? 7px : root.badge ? 6px : Tokens.space-2;
+        alignment: center;
+
+        TallyLamp {
+            y: (parent.height - self.height) / 2;
+            state: root.state;
+            blink: root.blink;
+        }
+
+        Text {
+            text: root.word;
+            y: root.text-nudge;
+            vertical-alignment: center;
+            font-family: root.stage ? Tokens.font-family-mono : Tokens.font-family;
+            font-size: root.text-size;
+            font-weight: 600;
+            letter-spacing: root.stage ? 0.06 * 11px : 0px;
+            color: root.stage
+                ? Tokens.on-stage
+                : root.state == TallyState.live ? Tokens.live-text : Tokens.ink-muted;
+        }
+
+        if root.target != "" || root.app-icons.length > 1: Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: 1px;
+            height: 12px;
+            background: root.stage ? #ffffff29 : Tokens.line-strong;
+        }
+
+        if root.app-icons.length > 1: HorizontalLayout {
+            spacing: 2px;
+
+            // Three at most: slint cannot slice a model, so one slot each.
+            TallyMark {
+                y: (parent.height - self.height) / 2;
+                app: root.app-icons[0];
+                ink: root.text-ink;
+            }
+
+            TallyMark {
+                y: (parent.height - self.height) / 2;
+                app: root.app-icons[1];
+                ink: root.text-ink;
+            }
+
+            if root.app-icons.length > 2: TallyMark {
+                y: (parent.height - self.height) / 2;
+                app: root.app-icons[2];
+                ink: root.text-ink;
+            }
+        }
+
+        if root.target != "": HorizontalLayout {
+            spacing: 6px;
+
+            if root.app-icons.length <= 1 && (root.app-monitor || root.app-icon.width > 0 || root.app-letter != ""): TallyMark {
+                y: (parent.height - self.height) / 2;
+                app: {
+                    icon: root.app-icon,
+                    letter: root.app-letter,
+                    hue: root.app-hue,
+                    monitor: root.app-monitor,
+                };
+                ink: root.text-ink;
+            }
+
+            Text {
+                max-width: 260px;
+                text: root.target;
+                y: root.text-nudge;
+                vertical-alignment: center;
+                overflow: elide;
+                font-family: root.stage ? Tokens.font-family-mono : Tokens.font-family;
+                font-size: root.text-size;
+                font-weight: root.stage ? 600 : 500;
+                color: root.text-ink;
+            }
+        }
+
+        if root.detail != "": Text {
+            text: root.detail;
+            vertical-alignment: center;
+            font-family: Tokens.font-family-mono;
+            font-size: root.text-size;
+            color: root.stage ? Tokens.on-stage-muted : Tokens.ink-muted;
+        }
+    }
+}

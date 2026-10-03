@@ -1,0 +1,15 @@
+[package]
+name = "livia-pixels"
+version = "0.1.0"
+edition = "2021"
+description = "Pixel-format conversion for Liveback's playback path, kept in its own package so it can be optimized in dev builds"
+
+# The override in the root Cargo.toml raises *this* package's opt-level, never a
+# dependency's, so the one below still compiles exactly as it does for the app --
+# which is the property that keeps optimizing slint+skia (and crashing rustc on
+# this toolchain) out of the picture. Caret, not `=`: slint pins its internal
+# crates exactly, and a hard pin here would split into two incompatible
+# `i-slint-core`s the day slint bumps a patch.
+[dependencies]
+fast_image_resize = "6.1.0"
+i-slint-core = "1.17.1"

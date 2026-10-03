@@ -1,0 +1,376 @@
+// The app's design tokens. Source of truth for the values: the Liveback design
+// system artifact (https://claude.ai/artifact/7CtJazwjLB3oQkUSQNvbEz, Version 17,
+// `project/tokens.json`) -- see .agents/docs/design/DESIGN.md for how to read
+// it and where the app deliberately differs (t260927-01d1). Version 14 -> 17
+// adopted the mark and annotated the READMEs; `tokens.json` is byte-identical.
+//
+// Names follow the design system. The Material-style names the screens were
+// written against (`color-surface`, `chrome-hairline`, `shape-s`, ...) survive
+// as one-line aliases onto the design-system token they now mean, so every
+// screen paints with the new values at once; each screen task re-points its
+// own call sites and drops the aliases it leaves unused (t260927-fde8 sweeps
+// the rest). An alias with no reader left is deleted, not kept "for later".
+//
+// Three globals:
+//
+//   `Dark`   -- the dark values, addressable on their own. The "dark island"
+//               (the video stage and everything drawn on it, plus the badges on
+//               a thumbnail) reads `Dark` directly and so stays dark in either
+//               theme (round16 §2).
+//   `Tokens` -- what the app reads. Every colour is
+//               `light ? <light value> : Dark.<name>`; `Tokens.light` is written
+//               from Rust (the theme setting: system / light / dark).
+//   `Motion` -- the easing curves. Not re-exported from app.slint on purpose:
+//               an `easing` property on an exported global costs one
+//               `Properties of type easing are not supported yet for public
+//               API` warning each, and Rust never reads a curve.
+//
+// rgba() values from tokens.json are written as #rrggbbaa with the alpha byte
+// round(a * 255).
+export global Dark {
+    // ---------- design-system colours (dark) ----------
+    out property <color> canvas: #0d0e11;
+    out property <color> surface: #141517;
+    out property <color> raised: #1b1c1f;
+    out property <color> overlay: #232528;
+    out property <color> sunken: #07080a;
+    out property <color> stage: #000000;
+    out property <color> line: #ffffff14;
+    out property <color> line-strong: #ffffff24;
+    out property <color> line-control: #727579;
+    out property <color> ink: #eff0f2;
+    out property <color> ink-muted: #aeb1b6;
+    out property <color> ink-faint: #86898e;
+    out property <color> fill: #ffffff12;
+    out property <color> fill-hover: #ffffff1c;
+    out property <color> fill-pressed: #ffffff0d;
+    out property <color> accent: #43d0f9;
+    out property <color> accent-hover: #7addff;
+    out property <color> accent-pressed: #2bc0e9;
+    out property <color> accent-text: #5cd5fc;
+    out property <color> accent-soft: #43d0f929;
+    out property <color> on-accent: #061821;
+    out property <color> live: #fc4b44;
+    out property <color> live-text: #ffa098;
+    out property <color> live-soft: #fc4b442e;
+    out property <color> danger: #fd7273;
+    out property <color> danger-fill: #c52b2d;
+    out property <color> danger-fill-hover: #d53d3a;
+    out property <color> on-danger: #ffffff;
+    out property <color> danger-soft: #fd727324;
+    out property <color> marker: #faca4b;
+    out property <color> marker-text: #fbce5c;
+    out property <color> on-marker: #22190a;
+    out property <color> marker-soft: #faca4b29;
+    out property <color> positive: #64d8c4;
+    out property <color> positive-soft: #64d8c424;
+    out property <color> warning: #fca864;
+    out property <color> warning-soft: #fca86424;
+    out property <color> scrim: #00000099;
+    out property <color> stage-veil: #0000008c;
+    out property <color> on-stage: #ffffff;
+    out property <color> on-stage-muted: #ffffffb8;
+    out property <color> focus: accent;
+    out property <color> window-close: #c42b1c;
+
+    // agent-run rail (t260913-c4db). Both tones are yellows of the same hue
+    // (54deg); the light theme swaps them, so the pair is declared once here.
+    // Not a design-system role.
+    out property <color> chrome-rail-agent: #3a3400;                // olive
+    out property <color> on-chrome-rail-agent: #fff9c4;             // pale
+
+    // ---------- old names still read raw by the dark island ----------
+    out property <color> chrome-hairline-strong: line-strong;
+    out property <color> chrome-hover: fill;
+    out property <color> color-primary: accent;
+    out property <color> color-on-surface-variant: ink-muted;
+    out property <color> color-error: danger;
+    out property <color> color-success: positive;
+    out property <color> color-warning: warning;
+}
+
+export global Motion {
+    out property <easing> easing-standard: cubic-bezier(0.2, 0, 0, 1);
+    out property <easing> easing-enter: cubic-bezier(0, 0, 0, 1);
+    out property <easing> easing-exit: cubic-bezier(0.3, 0, 1, 1);
+    out property <easing> easing-tally: cubic-bezier(0.4, 0, 0.6, 1);
+    out property <easing> easing-reveal: cubic-bezier(0.2, 0.75, 0.25, 1);
+}
+
+export global Tokens {
+    // round16: false = dark, true = light. Written from Rust once at start-up,
+    // from the `theme` setting (system / light / dark); "system" reads
+    // `AppsUseLightTheme`. Flipping the OS theme while the app runs does not
+    // repaint it -- same known limitation the tray icon has carried since
+    // task2220.
+    in-out property <bool> light;
+    // Windows' "Animation effects" switch (Settings > Accessibility > Visual
+    // effects) turned off -- this platform's `prefers-reduced-motion`. Written
+    // from Rust once at start-up (`desktop::animations_enabled`); flipping the
+    // switch while the app runs is not followed, same limitation as `light`.
+    // Zeroes the `duration-*` motions below except `duration-hold` (the fill
+    // *is* the progress), `duration-tally` (the lamp's consumer decides) and
+    // `duration-linger` (a wait before hiding, not a motion -- zeroing it
+    // would bring back the title-bar flicker it exists to stop).
+    in-out property <bool> reduce-motion;
+
+    // ---------- the window's resize band, as the layout sees it (task4320) ----
+    // The band's width in **logical** px. Set from Rust
+    // (`ui_state::shell::RESIZE_BAND_LOGICAL_PX`); the 8px here is the fallback
+    // if that setter never runs, exactly like `AppWindow.resize-band-width`'s.
+    //
+    // Since slint 1.18 this holds the same number as
+    // `AppWindow.resize-band-width` -- 1.18 scales the window's supply itself,
+    // so both sides of the edge finally speak logical px. Kept separate anyway:
+    // a global takes no binding from outside itself, the panes cannot see the
+    // window's properties, and the two have different owners. **Do not
+    // re-point either at `resize_band_physical_px`** -- a `length` in a layout
+    // is logical, so the physical number would pull the lane 12 logical px in
+    // at 150%, and handing it to the window would bring back the squared
+    // scale factor 1.18 introduced.
+    in-out property <length> resize-band-logical: 8px;
+    // How far a flush-right `AppScroll` moves its lane in from the window edge:
+    // the band, or nothing while the window is maximized or full screen (where
+    // `AppWindow.resize-border-width` is 0 and there is no band to dodge).
+    // Pushed from `app.slint`, which owns those two flags. Its `init` always
+    // overwrites this before first paint. Since the AppFrame (t260928-b780)
+    // `panel-right` defaults to 0px -- the page reaches the window's right
+    // edge with no margin -- so the push is `resize-band-logical - panel-right`,
+    // i.e. the full 8px band while windowed. 0px here is only the
+    // maximized/full-screen fallback, not the steady state.
+    in-out property <length> resize-band-inset: 0px;
+
+    // ---------- design-system colours ----------
+    out property <color> canvas: light ? #eff0f3 : Dark.canvas;
+    out property <color> surface: light ? #f9fafb : Dark.surface;
+    out property <color> raised: light ? #ffffff : Dark.raised;
+    out property <color> overlay: light ? #ffffff : Dark.overlay;
+    out property <color> sunken: light ? #e8e9ed : Dark.sunken;
+    out property <color> stage: light ? #000000 : Dark.stage;
+    out property <color> line: light ? #14182117 : Dark.line;
+    out property <color> line-strong: light ? #14182129 : Dark.line-strong;
+    out property <color> line-control: light ? #7e8085 : Dark.line-control;
+    out property <color> ink: light ? #16181c : Dark.ink;
+    out property <color> ink-muted: light ? #52555b : Dark.ink-muted;
+    out property <color> ink-faint: light ? #63666c : Dark.ink-faint;
+    out property <color> fill: light ? #1418210d : Dark.fill;
+    out property <color> fill-hover: light ? #14182114 : Dark.fill-hover;
+    out property <color> fill-pressed: light ? #1418211c : Dark.fill-pressed;
+    out property <color> accent: light ? #0378ad : Dark.accent;
+    out property <color> accent-hover: light ? #0571a2 : Dark.accent-hover;
+    out property <color> accent-pressed: light ? #016592 : Dark.accent-pressed;
+    out property <color> accent-text: light ? #026a9d : Dark.accent-text;
+    out property <color> accent-soft: light ? #0378ad1c : Dark.accent-soft;
+    out property <color> on-accent: light ? #ffffff : Dark.on-accent;
+    out property <color> live: light ? #df2a2a : Dark.live;
+    out property <color> live-text: light ? #b7191c : Dark.live-text;
+    out property <color> live-soft: light ? #df2a2a1c : Dark.live-soft;
+    out property <color> danger: light ? #be222a : Dark.danger;
+    out property <color> danger-fill: light ? #c52b2d : Dark.danger-fill;
+    out property <color> danger-fill-hover: light ? #b71920 : Dark.danger-fill-hover;
+    out property <color> on-danger: light ? #ffffff : Dark.on-danger;
+    out property <color> danger-soft: light ? #be222a17 : Dark.danger-soft;
+    out property <color> marker: light ? #ae7102 : Dark.marker;
+    out property <color> marker-text: light ? #915c08 : Dark.marker-text;
+    out property <color> on-marker: light ? #100a03 : Dark.on-marker;
+    out property <color> marker-soft: light ? #ae710224 : Dark.marker-soft;
+    out property <color> positive: light ? #077367 : Dark.positive;
+    out property <color> positive-soft: light ? #0773671a : Dark.positive-soft;
+    out property <color> warning: light ? #a94e00 : Dark.warning;
+    out property <color> warning-soft: light ? #a94e001a : Dark.warning-soft;
+    out property <color> scrim: light ? #10121866 : Dark.scrim;
+    out property <color> stage-veil: light ? #0000008c : Dark.stage-veil;
+    out property <color> on-stage: light ? #ffffff : Dark.on-stage;
+    out property <color> on-stage-muted: light ? #ffffffb8 : Dark.on-stage-muted;
+    out property <color> focus: accent;
+    out property <color> window-close: light ? #c42b1c : Dark.window-close;
+
+    // ---------- window ground (the one translucent layer) ----------
+    // The window's visible ground is `canvas`, translucent so the desktop
+    // behind shows through the DWM blur-behind (t260916-ebdb, the user
+    // 2026-09-18/19): 80 % in dark, 85 % in light -- raised from 55 / 60 by
+    // the user 2026-09-28 (t260928-4ac5): while recording, the captured window
+    // behind showed through the title bar and its text could not be read.
+    // The blur stays. It sits under the whole
+    // client (app.slint's full-window rectangle). Everything from `surface`
+    // forward is opaque, as the design system says -- the pane panel on top
+    // of this ground is `surface` (t260927-01d1). KNOWLEDGE.md「VRR の下端帯」:
+    // keep either this translucency or the blur-behind, never drop both.
+    out property <color> chrome-rail: canvas.with-alpha(light ? 0.85 : 0.80);
+    // The agent-run rail is a yellow of its own (the user, 2026-09-13), so a
+    // window started with `LIVEBACK_BUFFER_ROOT` never passes for the everyday
+    // one. Each theme takes the yellow the rail's own glyph colors can sit on
+    // (light: pale, dark: olive), and the `AGENT` badge takes the other
+    // theme's ground -- which is why `on-` mirrors the pair.
+    out property <color> chrome-rail-agent: light ? Dark.on-chrome-rail-agent : Dark.chrome-rail-agent;
+    out property <color> on-chrome-rail-agent: light ? Dark.chrome-rail-agent : Dark.on-chrome-rail-agent;
+
+    // ---------- old names -> design-system aliases (t260927-01d1) ----------
+    // The screen tasks re-point their call sites and delete these.
+    out property <color> chrome-panel-border: line;
+    out property <color> chrome-hairline-strong: line-strong;
+    out property <color> chrome-control-border: line-strong;
+    out property <color> chrome-hover: fill;
+    out property <color> chrome-active: fill-hover;
+    out property <color> chrome-selected: fill-hover;
+    out property <color> color-on-surface: ink;
+    out property <color> color-on-surface-variant: ink-muted;
+    out property <color> color-outline: ink-faint;
+    out property <color> color-primary: accent;
+    out property <color> color-on-primary: on-accent;
+    out property <color> color-error: danger;
+    out property <color> color-success: positive;
+    out property <color> color-warning: warning;
+
+    // ---------- shadows ----------
+    // slint's `drop-shadow-*` is one layer, so each token carries the design
+    // system's first layer (offset-y / blur / colour); x offset is 0 in all.
+    // `glow-live` carries its second layer (the glow) -- its first is a 3px
+    // spread ring that `drop-shadow` cannot draw.
+    out property <length> shadow-raised-offset-y: 1px;
+    out property <length> shadow-raised-blur: 2px;
+    out property <color> shadow-raised-color: light ? #10121814 : #00000080;
+    out property <length> shadow-overlay-offset-y: 12px;
+    out property <length> shadow-overlay-blur: 32px;
+    out property <color> shadow-overlay-color: light ? #10121824 : #0000008c;
+    out property <length> shadow-dialog-offset-y: 24px;
+    out property <length> shadow-dialog-blur: 64px;
+    out property <color> shadow-dialog-color: light ? #10121833 : #00000099;
+    out property <length> glow-live-blur: light ? 8px : 12px;
+    out property <color> glow-live-color: light ? #df2a2a4d : #fc4b448c;
+    // `highlight-top`: the 1px inner line along the top of `overlay` / `raised`.
+    out property <color> highlight-top: light ? #ffffff99 : #ffffff0d;
+
+    // ---------- radius ----------
+    out property <length> radius-xs: 4px;
+    out property <length> radius-sm: 6px;
+    out property <length> radius-md: 8px;
+    out property <length> radius-lg: 12px;
+    out property <length> radius-full: 999px;
+    // old names: one step rounder each (the design system's direction)
+    out property <length> shape-xs: radius-xs;
+    out property <length> shape-s: radius-sm;
+    out property <length> shape-m: radius-md;
+
+    // ---------- spacing (4px grid) ----------
+    out property <length> space-0-5: 2px;
+    out property <length> space-1: 4px;
+    out property <length> space-2: 8px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-5: 20px;
+    out property <length> space-6: 24px;
+    out property <length> space-8: 32px;
+    out property <length> space-10: 40px;
+    out property <length> space-12: 48px;
+
+    // ---------- sizes ----------
+    out property <length> size-control-sm: 28px;
+    out property <length> size-control-md: 32px;
+    out property <length> size-control-lg: 40px;
+    out property <length> size-rail: 72px;
+    out property <length> size-panel: 320px;
+    out property <length> size-row: 72px;
+    out property <length> size-icon: 20px;
+    out property <length> size-icon-sm: 16px;
+    out property <length> control-height-s: size-control-sm;
+    // old name; the rail is rebuilt to 72 by t260927-4c04
+    out property <length> rail-width: size-rail;
+    // The title bar keeps its own size, not the design system's
+    // `size-titlebar` 40 / 12px hot zone: the auto-hiding bar at 32 / 20 is
+    // one the user likes (t260927-01d1 決めたこと 6; the DS TitleBar README
+    // carries the same note).
+    out property <length> titlebar-height: 32px;
+    // round22 / task4370: the bar is an overlay that is only out while the
+    // pointer is up there. 20px, one step out from the mock's 12 (ユーザー指摘
+    // 2026-09-13: 12 は狭い). The whole band is usable: winit forwards
+    // `CursorMoved` through the window's resize band and only swallows the
+    // press (measured 2026-09-12, `evidence/4370-titlebar-collapse/`). The
+    // ceiling is 24px: this zone eats presses, and 24 is where the 履歴 /
+    // クリップ search field starts. 20 leaves 4px of margin under that.
+    out property <length> titlebar-hot-zone: 20px;
+    // The air between the rail's right edge and the target picker's panel
+    // (round21 §2-1). One source for the panel's `x` (`picker_modal.slint`)
+    // and for the title-bar hot zone that steps around the panel while the
+    // picker is open (`tbhot`, app.slint, t260917-099c).
+    out property <length> picker-rail-gap: 12px;
+
+    // ---------- motion ----------
+    out property <duration> duration-instant: reduce-motion ? 0ms : 80ms;
+    out property <duration> duration-fast: reduce-motion ? 0ms : 140ms;
+    out property <duration> duration-base: reduce-motion ? 0ms : 200ms;
+    out property <duration> duration-slow: reduce-motion ? 0ms : 320ms;
+    out property <duration> duration-reveal: reduce-motion ? 0ms : 240ms;
+    out property <duration> duration-tally: 1600ms;
+    out property <duration> duration-linger: 300ms;
+    out property <duration> duration-hold: 1000ms;
+    // old names
+    out property <duration> motion-duration-short: duration-fast;
+    out property <duration> motion-duration-medium: duration-base;
+    out property <duration> titlebar-slide-duration: duration-reveal;
+    out property <duration> titlebar-collapse-delay: duration-linger;
+    // The one easing left on this exported global, for its ~40 existing
+    // readers (t260914-f561). It costs exactly one warning per build --
+    // `Properties of type easing are not supported yet for public API`
+    // (`passes/check_public_api.rs`); paying that one is ユーザー裁定済み
+    // (2026-09-14). New curves go on `Motion`, which app.slint does not
+    // export, so they cost none.
+    out property <easing> motion-curve: Motion.easing-reveal;
+
+    // ---------- type ----------
+    // IBM Plex Sans JP / IBM Plex Mono, 400 / 500 / 600, bundled (app.slint).
+    // The design system's line heights are the `type-*-line-height` factors at
+    // the end of this block.
+    out property <string> font-family: "IBM Plex Sans JP";
+    out property <string> font-family-mono: "IBM Plex Mono";
+    out property <length> type-display-size: 32px;
+    out property <int> type-display-weight: 600;
+    out property <length> type-display-letter-spacing: -0.32px;   // -0.01em
+    out property <length> type-title-1-size: 22px;
+    out property <int> type-title-1-weight: 600;
+    out property <length> type-title-2-size: 17px;
+    out property <int> type-title-2-weight: 600;
+    out property <length> type-title-3-size: 15px;
+    out property <int> type-title-3-weight: 600;
+    out property <length> type-body-size: 14px;
+    out property <int> type-body-weight: 400;
+    out property <length> type-body-strong-size: 14px;
+    out property <int> type-body-strong-weight: 600;
+    out property <length> type-label-size: 13px;
+    out property <int> type-label-weight: 500;
+    out property <length> type-caption-size: 12px;
+    out property <int> type-caption-weight: 400;
+    out property <length> type-overline-size: 11px;
+    out property <int> type-overline-weight: 600;
+    out property <length> type-overline-letter-spacing: 0.88px;   // 0.08em
+    out property <length> type-tc-display-size: 28px;
+    out property <int> type-tc-display-weight: 500;
+    out property <length> type-tc-display-letter-spacing: -0.28px; // -0.01em
+    out property <length> type-tc-size: 13px;
+    out property <int> type-tc-weight: 500;
+    out property <length> type-mono-size: 12px;
+    out property <int> type-mono-weight: 400;
+    out property <length> type-key-size: 11px;
+    out property <int> type-key-weight: 600;
+
+    // Line heights, as `line-height-factor` values (t260928-d906). slint 1.18's
+    // `Text` / `TextInput` take a factor on the face's natural line height, never
+    // a length, so each is the DS `lineHeight` / (natural height x size): IBM
+    // Plex Sans JP's natural height is 1.5em (hhea 1060 / -440 / 0), IBM Plex
+    // Mono's 1.3em. The expression is the formula, so value and source cannot
+    // drift. Applied where text wraps (shared components t260928-5f3b, the
+    // settings descriptions t260928-7e9a); a one-line label sits in its box.
+    out property <float> type-display-line-height: 40 / (1.5 * 32);
+    out property <float> type-title-1-line-height: 30 / (1.5 * 22);
+    out property <float> type-title-2-line-height: 24 / (1.5 * 17);
+    out property <float> type-title-3-line-height: 22 / (1.5 * 15);
+    out property <float> type-body-line-height: 22 / (1.5 * 14);
+    out property <float> type-body-strong-line-height: 22 / (1.5 * 14);
+    out property <float> type-label-line-height: 18 / (1.5 * 13);
+    out property <float> type-caption-line-height: 18 / (1.5 * 12);
+    out property <float> type-overline-line-height: 16 / (1.5 * 11);
+    out property <float> type-tc-display-line-height: 32 / (1.3 * 28);
+    out property <float> type-tc-line-height: 16 / (1.3 * 13);
+    out property <float> type-mono-line-height: 18 / (1.3 * 12);
+    out property <float> type-key-line-height: 14 / (1.3 * 11);
+}

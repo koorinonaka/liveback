@@ -1,0 +1,657 @@
+// The settings screen in the DS SettingsScreen shape (t260927-fde8): an index
+// of the groups on the left, the SettingsGroup cards on the right, in the
+// order 録画 → 自動録画 → 音声 → 保存先 → 保存領域 → ホットキー → 一般.
+//
+// All strings and every computed decision (what is lit, which row refused its
+// draft, what the clamp did) come from Rust; this file only maps them onto
+// elements. The real validation stays in crate::settings (task121).
+
+import { Tokens } from "tokens.slint";
+import { Icons } from "icons.slint";
+import {
+    AppScroll, Btn, BtnVariant, ContextMenu, ControlSize, SegmentTabs, SelText, StorageMeter,
+    StorageNote, Switch,
+} from "controls.slint";
+import { SessionLabels, SessionsVm } from "sessions_model.slint";
+import { SettingsLabels, SettingsVm } from "settings_vm.slint";
+import {
+    AddRow, AutoCaptureRow, HotkeyField, IndexLink, PathField, PresetSettingsRow, SettingsGroup,
+    SettingsRow, StackedRow,
+} from "settings_rows.slint";
+export { SettingsLabels, SettingsVm }
+
+export component SettingsPane inherits Rectangle {
+    // The content face in app.slint is this pane's ground (t260916-ebdb).
+    background: transparent;
+
+    // NarrowWindow: below 960 the index goes and the groups take the width;
+    // below 720 a PresetField drops under its row's text.
+    property <bool> wide: root.width >= 960px;
+    property <bool> narrow: root.width < 720px;
+
+    // Which group the index marks: the last one whose heading has reached the
+    // top of the page, or the last group once the page is scrolled to its end
+    // (the short groups at the bottom can never reach the top). A press on
+    // a link pins its group for as long as the page stays where that press
+    // put it, since the clamp at the bottom can stop short of the heading.
+    property <length> offset: -scroll.viewport-y;
+    property <length> reach: root.offset + Tokens.space-6 + Tokens.space-4;
+    property <int> scrolled-section: scroll.overflow > 0 && root.offset >= scroll.overflow - 1px ? 6
+        : g-general.y <= root.reach ? 6
+        : g-keys.y <= root.reach ? 5
+        : g-storage.y <= root.reach ? 4
+        : g-where.y <= root.reach ? 3
+        : g-audio.y <= root.reach ? 2
+        : g-auto.y <= root.reach ? 1
+        : 0;
+    property <int> pinned: -1;
+    property <length> pinned-y;
+    // True while a press on a link is sliding the page there. The tween is on
+    // only for that slide, so a wheel notch stays immediate (see `AppScroll`),
+    // and the index holds the target instead of ticking through the groups
+    // the slide passes.
+    property <bool> jumping;
+    property <int> section: root.jumping
+        || (root.pinned >= 0 && scroll.viewport-y == root.pinned-y)
+        ? root.pinned
+        : root.scrolled-section;
+
+    // The audio rows' device Menu (DS AutoCaptureRow: opens downward, the
+    // page scrolls on). Pane level, since `scroll` clips.
+    property <bool> device-menu-open;
+    property <length> device-anchor-x;
+    property <length> device-anchor-y;
+
+    // The pane is built each time the page is entered (`if active-pane == 2`
+    // in app.slint): DS 「設定を開いたときは、どの行も閉じている」.
+    init => {
+        SettingsVm.audio-open-key = "";
+        SettingsVm.audio-adding = false;
+        SettingsVm.settings-opened();
+    }
+
+    function open-device-menu(extra: int, x: length, bottom: length) {
+        root.device-anchor-x = x;
+        root.device-anchor-y = bottom;
+        SettingsVm.audio-device-opened(extra);
+        root.device-menu-open = true;
+    }
+
+    // A row that moved when its press closed the open row above it is put
+    // back under the pointer (AutoCaptureRow `shifted`).
+    function keep-row(delta: length) {
+        scroll.viewport-y = Math.clamp(scroll.viewport-y - delta, -scroll.overflow, 0px);
+    }
+
+    function go(index: int, top: length) {
+        root.pinned = index;
+        root.pinned-y = -Math.clamp(top - Tokens.space-6, 0px, scroll.overflow);
+        root.jumping = true;
+        jump-timer.restart();
+        scroll.viewport-y = root.pinned-y;
+    }
+
+    jump-timer := Timer {
+        // A frame of slack past the tween, so the wheel cannot land inside
+        // its last frame and be eased.
+        interval: Tokens.duration-slow + 20ms;
+        running: false;
+        triggered => {
+            root.jumping = false;
+            self.stop();
+        }
+    }
+
+    // Placed by hand, not by a layout: the index's links change weight with
+    // the scroll position, and a layout would make the page's width depend
+    // on the links (a binding loop).
+    Rectangle {
+        // `.lb-settings__index`: 208 wide, 24 / 12 / 24 / 24 inside, 2 between.
+        if root.wide: VerticalLayout {
+            x: 0;
+            y: 0;
+            width: 208px;
+            height: parent.height;
+            padding-top: Tokens.space-6;
+            padding-bottom: Tokens.space-6;
+            padding-left: Tokens.space-6;
+            padding-right: Tokens.space-3;
+            spacing: 2px;
+            alignment: start;
+
+            IndexLink {
+                label: SettingsLabels.group-capture;
+                icon: Icons.record;
+                current: root.section == 0;
+                clicked => {
+                    root.go(0, g-rec.y);
+                }
+            }
+
+            IndexLink {
+                label: SettingsLabels.auto-capture;
+                icon: Icons.bolt;
+                current: root.section == 1;
+                clicked => {
+                    root.go(1, g-auto.y);
+                }
+            }
+
+            IndexLink {
+                label: SettingsLabels.audio-group;
+                icon: Icons.volume;
+                current: root.section == 2;
+                clicked => {
+                    root.go(2, g-audio.y);
+                }
+            }
+
+            IndexLink {
+                label: SettingsLabels.group-where;
+                icon: Icons.folder;
+                current: root.section == 3;
+                clicked => {
+                    root.go(3, g-where.y);
+                }
+            }
+
+            IndexLink {
+                label: SettingsLabels.group-retention;
+                icon: Icons.storage;
+                current: root.section == 4;
+                clicked => {
+                    root.go(4, g-storage.y);
+                }
+            }
+
+            IndexLink {
+                label: SettingsLabels.group-hotkey;
+                icon: Icons.keyboard;
+                current: root.section == 5;
+                clicked => {
+                    root.go(5, g-keys.y);
+                }
+            }
+
+            IndexLink {
+                label: SettingsLabels.group-general;
+                icon: Icons.globe;
+                current: root.section == 6;
+                clicked => {
+                    root.go(6, g-general.y);
+                }
+            }
+        }
+
+        // The shared scrollbar (task236, task1070).
+        scroll := AppScroll {
+            x: root.wide ? 208px : 0px;
+            width: parent.width - self.x;
+            height: parent.height;
+            right-inset: Tokens.resize-band-inset;
+            viewport-width: scroll.visible-width;
+            viewport-height: body.preferred-height;
+            scroll-tween: root.jumping ? Tokens.duration-slow : 0ms;
+
+            // A press on the empty page cancels whatever number box holds the
+            // caret (`NumberField` puts the committed value back on blur). A
+            // `TouchArea` takes no key focus, so this is a `FocusScope` the size
+            // of the page, declared before the body so every row keeps the hit
+            // test.
+            FocusScope {
+                width: 100%;
+                height: Math.max(body.preferred-height, scroll.visible-height);
+                focus-on-tab-navigation: false;
+                changed has-focus => {
+                    if (self.has-focus) {
+                        SettingsVm.numeric-error-field = -1;
+                    }
+                }
+            }
+
+            // `.lb-settings__body`: at most 760, 24 / 32 / 48 / 16 inside,
+            // 32 between groups. Without the index the left side takes the
+            // top's 24.
+            body := VerticalLayout {
+                x: 0;
+                width: root.wide ? min(760px, scroll.visible-width) : scroll.visible-width;
+                padding-top: Tokens.space-6;
+                padding-right: Tokens.space-8;
+                padding-bottom: Tokens.space-12;
+                padding-left: root.wide ? Tokens.space-4 : Tokens.space-6;
+                spacing: Tokens.space-8;
+                alignment: start;
+
+                // ---------- 録画 ----------
+                g-rec := SettingsGroup {
+                    title: SettingsLabels.group-capture;
+
+                    SettingsRow {
+                        first: true;
+                        title: SettingsLabels.ring-buffer;
+                        description: SettingsLabels.ring-buffer-sub;
+
+                        Switch {
+                            label: SettingsLabels.ring-buffer;
+                            checked: SettingsVm.ring-buffer-enabled;
+                            toggled => {
+                                SettingsVm.ring-buffer-toggled(!SettingsVm.ring-buffer-enabled);
+                            }
+                        }
+                    }
+
+                    // The free field stays (2026-09-13, the user): the presets
+                    // are the answer for almost everyone, but a 15 or a 90 has
+                    // to be typable.
+                    PresetSettingsRow {
+                        narrow: root.narrow;
+                        disabled: !SettingsVm.ring-buffer-enabled;
+                        title: SettingsLabels.retention-minutes;
+                        description: SettingsLabels.retention-minutes-sub;
+                        presets: SettingsLabels.retention-minutes-presets;
+                        selected: SettingsVm.retention-minutes-index;
+                        value-text: SettingsVm.retention-minutes;
+                        placeholder: SettingsLabels.retention-minutes-placeholder;
+                        unit: SettingsLabels.unit-minutes;
+                        range-error: SettingsVm.numeric-error-field == 0;
+                        error-text: SettingsLabels.retention-minutes-error;
+                        preset-clicked(index) => {
+                            SettingsVm.preset-clicked(0, index);
+                        }
+                        value-edited(text) => {
+                            SettingsVm.preset-edited(0, text);
+                        }
+                    }
+
+                    // Never dimmed (task1080): the rate the ring *would* record
+                    // at is a setting you can make while it is stopped.
+                    SettingsRow {
+                        title: SettingsLabels.frame-rate;
+
+                        SegmentTabs {
+                            segments: SettingsLabels.frame-rate-presets;
+                            selected: SettingsVm.frame-rate-index;
+                            selected-changed(index) => {
+                                SettingsVm.preset-clicked(4, index);
+                            }
+                        }
+                    }
+
+                    SettingsRow {
+                        title: SettingsLabels.include-cursor;
+                        description: SettingsLabels.include-cursor-sub;
+
+                        Switch {
+                            label: SettingsLabels.include-cursor;
+                            checked: SettingsVm.include-cursor;
+                            toggled => {
+                                SettingsVm.cursor-toggled(!SettingsVm.include-cursor);
+                            }
+                        }
+                    }
+
+                    SettingsRow {
+                        title: SettingsLabels.capture-all-audio;
+                        description: SettingsLabels.capture-all-audio-sub;
+
+                        Switch {
+                            label: SettingsLabels.capture-all-audio;
+                            checked: SettingsVm.capture-all-audio;
+                            toggled => {
+                                SettingsVm.capture-all-audio-toggled(!SettingsVm.capture-all-audio);
+                            }
+                        }
+                    }
+
+                    // task1760: absent, not dimmed, on a machine that cannot
+                    // both encode and decode AV1.
+                    if SettingsVm.codec-av1-available: SettingsRow {
+                        title: SettingsLabels.codec-av1;
+                        description: SettingsLabels.codec-av1-sub;
+
+                        Switch {
+                            label: SettingsLabels.codec-av1;
+                            checked: SettingsVm.codec-av1;
+                            toggled => {
+                                SettingsVm.codec-av1-toggled(!SettingsVm.codec-av1);
+                            }
+                        }
+                    }
+                }
+
+                // ---------- 自動録画 ----------
+                // Apps first, folder rules after (both in one model, task3610).
+                // Apps are only added from review, which knows what was
+                // recorded; folders only from here.
+                g-auto := SettingsGroup {
+                    title: SettingsLabels.auto-capture;
+                    description: SettingsLabels.auto-capture-sub;
+                    // A picked folder the guard turned down (t260928-7e9a):
+                    // one danger line under the card, not a toast.
+                    error: SettingsVm.auto-capture-refused ? SettingsLabels.auto-capture-rejected : "";
+
+                    for item[index] in SettingsVm.auto-capture-executables: AutoCaptureRow {
+                        first: index == 0;
+                        item: item;
+                        device-clicked(extra, x, bottom) => {
+                            root.open-device-menu(extra, x, bottom);
+                        }
+                        shifted(delta) => {
+                            root.keep-row(delta);
+                        }
+                    }
+
+                    if SettingsVm.auto-capture-executables.length == 0: Rectangle {
+                        min-height: 48px;
+
+                        HorizontalLayout {
+                            padding-left: Tokens.space-4;
+                            padding-right: Tokens.space-4;
+
+                            Text {
+                                text: SettingsLabels.auto-capture-empty;
+                                vertical-alignment: center;
+                                font-size: 13px;
+                                color: Tokens.ink-faint;
+                            }
+                        }
+                    }
+
+                    AddRow {
+                        label: SettingsLabels.auto-capture-add-folder;
+                        clicked => {
+                            SettingsVm.auto-capture-folder-add();
+                        }
+                    }
+                }
+
+                // ---------- 音声 (t261003-82d6) ----------
+                // 画面全体 always first, then the apps with added sounds that
+                // are not in 自動録画 (DS SettingsScreen). Same rows, no ×.
+                g-audio := SettingsGroup {
+                    title: SettingsLabels.audio-group;
+                    description: SettingsLabels.audio-group-sub;
+
+                    for item[index] in SettingsVm.audio-targets: AutoCaptureRow {
+                        first: index == 0;
+                        item: item;
+                        device-clicked(extra, x, bottom) => {
+                            root.open-device-menu(extra, x, bottom);
+                        }
+                        shifted(delta) => {
+                            root.keep-row(delta);
+                        }
+                    }
+                }
+
+                // ---------- 保存先 ----------
+                g-where := SettingsGroup {
+                    title: SettingsLabels.group-where;
+
+                    // The buffer root only moves while nothing is written to
+                    // it (§7-C); the note says why the buttons are dead, and a
+                    // move is confirmed by the dialog below.
+                    StackedRow {
+                        first: true;
+                        title: SettingsLabels.buffer-label;
+                        description: SettingsLabels.buffer-sub;
+
+                        PathField {
+                            path: SettingsVm.buffer-head + SettingsVm.buffer-tail;
+                            disabled: !SettingsVm.buffer-change-enabled;
+                            modified: SettingsVm.buffer-modified;
+                            note: SettingsVm.buffer-change-enabled ? "" : SettingsLabels.buffer-change-blocked;
+                            browse => {
+                                SettingsVm.buffer-change();
+                            }
+                            open => {
+                                SettingsVm.buffer-open();
+                            }
+                            reset => {
+                                SettingsVm.buffer-reset-clicked();
+                            }
+                        }
+                    }
+
+                    // Where 「クリップに保存」 writes (task2970). Moving it moves
+                    // nothing, so no capture state refuses it.
+                    StackedRow {
+                        title: SettingsLabels.clip-label;
+                        description: SettingsLabels.clip-sub;
+
+                        PathField {
+                            path: SettingsVm.clip-head + SettingsVm.clip-tail;
+                            modified: SettingsVm.clip-modified;
+                            browse => {
+                                SettingsVm.clip-change();
+                            }
+                            open => {
+                                SettingsVm.clip-open();
+                            }
+                            reset => {
+                                SettingsVm.clip-reset-clicked();
+                            }
+                        }
+                    }
+                }
+
+                // ---------- 保存領域 ----------
+                g-storage := SettingsGroup {
+                    title: SettingsLabels.group-retention;
+                    description: SettingsLabels.retention-hint;
+
+                    // The history footer's numbers (t260927-9a17), with the
+                    // limit read off this page's own switch and value so it
+                    // follows an edit here at once. No limit: the footer's
+                    // one line instead.
+                    StackedRow {
+                        first: true;
+
+                        if SettingsVm.retention-capacity-on: StorageMeter {
+                            used: SessionsVm.storage-used;
+                            protected-size: SessionsVm.storage-protected;
+                            limit: SettingsVm.retention-capacity.to-float();
+                            label: SessionLabels.storage-label;
+                            protected-label: SessionLabels.storage-protected;
+                            deletable-label: SettingsLabels.storage-deletable;
+                            free-label: SettingsLabels.storage-free;
+                        }
+
+                        if SettingsVm.retention-capacity-on && SessionsVm.storage-note != "": StorageNote {
+                            text: SessionsVm.storage-note;
+                        }
+
+                        if !SettingsVm.retention-capacity-on: Text {
+                            text: SessionsVm.unlimited-text;
+                            font-family: Tokens.font-family-mono;
+                            font-size: 12px;
+                            color: Tokens.ink-muted;
+                        }
+                    }
+
+                    PresetSettingsRow {
+                        narrow: root.narrow;
+                        has-switch: true;
+                        checked: SettingsVm.retention-capacity-on;
+                        title: SettingsLabels.retention-capacity;
+                        presets: SettingsLabels.retention-capacity-presets;
+                        selected: SettingsVm.retention-capacity-index;
+                        value-text: SettingsVm.retention-capacity;
+                        placeholder: SettingsLabels.retention-capacity-placeholder;
+                        unit: SettingsLabels.unit-gigabytes;
+                        range-error: SettingsVm.numeric-error-field == 1;
+                        error-text: SettingsLabels.retention-capacity-error;
+                        toggled(next) => {
+                            SettingsVm.retention-toggled(1, next);
+                        }
+                        preset-clicked(index) => {
+                            SettingsVm.preset-clicked(1, index);
+                        }
+                        value-edited(text) => {
+                            SettingsVm.preset-edited(1, text);
+                        }
+                    }
+
+                    PresetSettingsRow {
+                        narrow: root.narrow;
+                        has-switch: true;
+                        checked: SettingsVm.session-lifetime-on;
+                        title: SettingsLabels.session-lifetime;
+                        presets: SettingsLabels.session-lifetime-presets;
+                        selected: SettingsVm.session-lifetime-index;
+                        value-text: SettingsVm.session-lifetime;
+                        placeholder: SettingsLabels.session-lifetime-placeholder;
+                        unit: SettingsLabels.unit-days;
+                        range-error: SettingsVm.numeric-error-field == 2;
+                        error-text: SettingsLabels.session-lifetime-error;
+                        toggled(next) => {
+                            SettingsVm.retention-toggled(2, next);
+                        }
+                        preset-clicked(index) => {
+                            SettingsVm.preset-clicked(2, index);
+                        }
+                        value-edited(text) => {
+                            SettingsVm.preset-edited(2, text);
+                        }
+                    }
+                }
+
+                // ---------- ホットキー ----------
+                // A captured chord is registered and written the moment it
+                // lands (task146); no save button.
+                g-keys := SettingsGroup {
+                    title: SettingsLabels.group-hotkey;
+                    description: SettingsLabels.group-hotkey-sub;
+
+                    SettingsRow {
+                        first: true;
+                        title: SettingsLabels.hotkey;
+
+                        HotkeyField {
+                            capturing: SettingsVm.armed == 1;
+                            keys: SettingsVm.marker-keys;
+                            alert: SettingsVm.marker-taken ? SettingsLabels.state-taken : "";
+                            clicked => {
+                                SettingsVm.hk-clicked(1);
+                            }
+                            captured(text, ctrl, alt, shift, meta) => {
+                                return SettingsVm.hk-key(1, text, ctrl, alt, shift, meta);
+                            }
+                            blurred => {
+                                SettingsVm.hk-blurred(1);
+                            }
+                            reset => {
+                                SettingsVm.hk-reset(1);
+                            }
+                        }
+                    }
+                }
+
+                // ---------- 一般 ----------
+                g-general := SettingsGroup {
+                    title: SettingsLabels.group-general;
+
+                    SettingsRow {
+                        first: true;
+                        title: SettingsLabels.theme;
+
+                        SegmentTabs {
+                            segments: SettingsLabels.theme-choices;
+                            selected: SettingsVm.theme-index;
+                            selected-changed(index) => {
+                                SettingsVm.theme-selected(index);
+                            }
+                        }
+                    }
+
+                    SettingsRow {
+                        title: SettingsLabels.language;
+
+                        SegmentTabs {
+                            segments: SettingsLabels.language-choices;
+                            selected: SettingsVm.language-index;
+                            selected-changed(index) => {
+                                SettingsVm.language-selected(index);
+                            }
+                        }
+                    }
+
+                    SettingsRow {
+                        title: SettingsLabels.auto-start;
+                        description: SettingsLabels.auto-start-sub;
+
+                        Switch {
+                            label: SettingsLabels.auto-start;
+                            checked: SettingsVm.auto-start;
+                            toggled => {
+                                SettingsVm.autostart-toggled(!SettingsVm.auto-start);
+                            }
+                        }
+                    }
+
+                    // task t260920-2be2. Which way this sits is asked once, by
+                    // the installer's last page; this is where it changes.
+                    SettingsRow {
+                        title: SettingsLabels.update-check;
+
+                        Switch {
+                            label: SettingsLabels.update-check;
+                            checked: SettingsVm.update-check-enabled;
+                            toggled => {
+                                SettingsVm.update-check-toggled(!SettingsVm.update-check-enabled);
+                            }
+                        }
+                    }
+
+                    // 更新… is only ever pressed for the version the line
+                    // beside it just named.
+                    SettingsRow {
+                        title: SettingsLabels.update-version;
+                        description: SettingsLabels.update-status;
+
+                        if SettingsVm.update-available: Btn {
+                            label: SettingsLabels.update-now;
+                            variant: BtnVariant.primary;
+                            size: ControlSize.sm;
+                            clicked => {
+                                SettingsVm.update-requested();
+                            }
+                        }
+                    }
+
+                    // task4140: absent on a machine where the installer's
+                    // registrations are all there. Nothing here is pressable
+                    // (the user, 2026-09-09).
+                    if SettingsLabels.install-unregistered != "": SettingsRow {
+                        title: SettingsLabels.install-unregistered;
+                        description: SettingsLabels.install-unregistered-reason;
+                    }
+                }
+            }
+        }
+    }
+
+    if root.device-menu-open: TouchArea {
+        clicked => {
+            root.device-menu-open = false;
+        }
+    }
+    ContextMenu {
+        x: Math.clamp(root.device-anchor-x - root.absolute-position.x,
+            Tokens.space-2, root.width - self.width - Tokens.space-2);
+        y: Math.clamp(root.device-anchor-y - root.absolute-position.y + Tokens.space-1,
+            Tokens.space-2, root.height - self.height - Tokens.space-2);
+        visible: root.device-menu-open;
+        entries: SettingsVm.audio-devices;
+        checked-index: SettingsVm.audio-device-index;
+        fit-content: true;
+        chosen(i) => {
+            root.device-menu-open = false;
+            SettingsVm.audio-device-chosen(i);
+        }
+    }
+
+    // The buffer root's confirmation lives in app.slint, over the whole
+    // window (t260928-7e9a F15): a scrim inside this pane left the rail and
+    // the title bar live, and leaving the pane hid a dialog that came back.
+}

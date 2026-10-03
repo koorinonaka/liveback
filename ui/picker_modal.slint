@@ -1,0 +1,728 @@
+// The target picker: a flyout off the rail's キャプチャ (round21 §2, task
+// t260913-ec28), in the design system's CaptureScreen / TargetTile shape since
+// t260927-711d.
+//
+// No header, no × and no scrim: a click outside the panel, Escape, キャプチャ
+// again or a pane switch are the ways out, and the layer behind the panel only
+// catches that outside click. Strings come from `ui_state::targets`; nothing
+// user-visible is spelled here.
+
+import { Tokens, Motion } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { AppMonogram, Badge, BadgeTone, Btn, BtnVariant, ControlSize, EmptyState, Tabs, AppScroll, SearchField, PressFocus } from "controls.slint";
+import { TargetTile, TileMedia } from "targets.slint";
+
+// One target as the DS TargetTile: the 16:9 picture is the tile, the title sits
+// on it over a dark gradient, and hover brings up the plate that says what a
+// press does. One press records, or stops the recording this tile is -- Rust
+// decides which from what is running, so the tile has one callback.
+component Tile inherits Rectangle {
+    in property <TargetTile> tile;
+    in property <string> rec-label;
+    in property <string> capture-label;
+    in property <string> stop-label;
+    // The entrance (DS: 24ms apart, at most 192ms, `duration-slow`,
+    // `easing-enter`). Set by the flyout for as long as it has just opened,
+    // so only the tiles built then come in. A fade only: the DS's 8px rise
+    // went 2026-09-28 (t260928-4ac5) -- nothing moves while the flyout opens.
+    in property <bool> entering;
+    in property <int> order;
+    callback clicked;
+
+    // Under the pointer or holding the key focus (t260928-d9b4, DS TargetTile
+    // README: the plate comes up for either).
+    out property <bool> lit: !root.tile.disabled && (touch.has-hover || keys.has-focus);
+    opacity: 0;
+    init => {
+        self.opacity = 1;
+    }
+    animate opacity {
+        duration: root.entering ? Tokens.duration-slow : 0ms;
+        // No stagger under reduce-motion either (t260928-08df): slint 1.18
+        // waits out a delay even at duration 0, so the tiles would pop in one
+        // by one.
+        delay: root.entering && !Tokens.reduce-motion ? (root.order * 24ms > 192ms ? 192ms : root.order * 24ms) : 0ms;
+        easing: Motion.easing-enter;
+    }
+
+    // The picture and everything drawn on it, clipped to the tile's corners.
+    // The edge is a sibling on top (KNOWLEDGE: `clip` cuts an element's own
+    // border).
+    face := Rectangle {
+        clip: true;
+        border-radius: Tokens.radius-md;
+        background: Tokens.stage;
+
+        // 1.04 under the pointer (DS `.lb-target:hover > .lb-scene`), on a
+        // Rectangle rather than the Image: `transform-scale` is proven there.
+        Rectangle {
+            transform-scale: root.lit ? 1.04 : 1;
+            transform-origin: { x: self.width / 2, y: self.height / 2 };
+            animate transform-scale {
+                duration: Tokens.duration-slow;
+                easing: Motion.easing-standard;
+            }
+
+            if root.tile.media == TileMedia.ready: Image {
+                width: 100%;
+                height: 100%;
+                image-fit: cover;
+                source: root.tile.thumbnail;
+            }
+        }
+
+        // Waiting for the first frame: a `fill` face and a small, still mark.
+        // Still on purpose -- a pulse keyed on `animation-tick()` asks for a
+        // frame for as long as it is evaluated (KNOWLEDGE).
+        // Only once the wait is slow (t260930-40e7, user ruling 2026-09-30): a
+        // picture that lands within 150ms goes straight onto the plain stage,
+        // since a face shown for 1-6 frames reads as a flicker. 150ms sits
+        // between the two measured clusters on the first open: the first
+        // window's grab lands 17-100ms in, the round-robin's next ones from
+        // ~295ms. A literal, not a `Tokens.duration-*`: those are 0 under
+        // reduce-motion, and this is a wait, not motion. slint holds a delay
+        // even at duration 0 (KNOWLEDGE), and rows are patched in place, so it
+        // runs from the moment the tile starts waiting.
+        if root.tile.media == TileMedia.loading: Rectangle {
+            background: Tokens.fill;
+            opacity: 0;
+            init => {
+                self.opacity = 1;
+            }
+            animate opacity {
+                delay: 150ms;
+                duration: 0ms;
+            }
+
+            AppIcon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                commands: Icons.loading;
+                stroke-color: Tokens.on-stage-muted;
+                size: 16px;
+            }
+        }
+
+        // No picture, and none coming: the kind's icon alone.
+        if root.tile.media == TileMedia.none: AppIcon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            commands: root.tile.screen ? Icons.monitor : Icons.window;
+            stroke-color: Tokens.on-stage-muted;
+            size: 24px;
+        }
+
+        // The shade the title reads on: clear to 40%, black 78% at the foot.
+        // slint's Text has no shadow, so this carries the legibility alone.
+        Rectangle {
+            background: @linear-gradient(180deg, #00000000 40%, #000000c7 100%);
+        }
+
+        // The hover darkening (DS: black 32% over the shade).
+        Rectangle {
+            background: #00000052;
+            opacity: root.lit ? 1 : 0;
+            animate opacity {
+                duration: Tokens.duration-fast;
+                easing: Motion.easing-standard;
+            }
+        }
+
+        // A target that cannot be picked: the picture sunk under black 60%,
+        // and the reason in the middle where the plate would be.
+        if root.tile.disabled: Rectangle {
+            background: #00000099;
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 6px;
+                padding-left: 10px;
+                padding-right: 10px;
+
+                AppIcon {
+                    y: (parent.height - self.height) / 2;
+                    commands: Icons.warning;
+                    stroke-color: Tokens.warning;
+                    size: 16px;
+                }
+
+                Text {
+                    text: root.tile.blocked-reason;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    font-size: 12px;
+                    font-weight: 500;
+                    color: Tokens.on-stage;
+                }
+            }
+        }
+
+        // REC, top-left (DS `.lb-thumb__live`). The CSS's 9.5 on the DS's
+        // nearest step, overline 11 (t260928-08df).
+        if root.tile.recording: Rectangle {
+            x: 6px;
+            y: 6px;
+            height: 16px;
+            width: rec-row.preferred-width;
+            border-radius: 3px;
+            background: Tokens.stage-veil;
+
+            rec-row := HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 5px;
+                spacing: 4px;
+
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 3px;
+                    background: Tokens.live;
+                }
+
+                Text {
+                    text: root.rec-label;
+                    vertical-alignment: center;
+                    font-family: Tokens.font-family-mono;
+                    font-size: Tokens.type-overline-size;
+                    font-weight: Tokens.type-overline-weight;
+                    letter-spacing: Tokens.type-overline-letter-spacing;
+                    color: Tokens.on-stage;
+                }
+            }
+        }
+
+        // 自動録画, top-left -- REC outranks it (DS TargetTile ほかの状態).
+        if !root.tile.recording && root.tile.auto-capture: Badge {
+            x: 6px;
+            y: 6px;
+            tone: BadgeTone.accent;
+            icon: Icons.bolt;
+            label: root.tile.auto-capture-label;
+        }
+
+        // A screen's resolution, top-right. 11px for the CSS's 10.5.
+        if root.tile.resolution != "": Rectangle {
+            x: parent.width - self.width - 6px;
+            y: 6px;
+            height: 18px;
+            width: res.preferred-width + 10px;
+            border-radius: 3px;
+            background: Tokens.stage-veil;
+
+            res := Text {
+                text: root.tile.resolution;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-family: Tokens.font-family-mono;
+                font-size: 11px;
+                font-weight: 500;
+                color: Tokens.on-stage-muted;
+            }
+        }
+
+        // The title on the picture: app icon 16, then the words, 10 in from
+        // the sides and 8 up from the foot.
+        HorizontalLayout {
+            x: 10px;
+            y: parent.height - 8px - self.height;
+            width: parent.width - 20px;
+            height: 18px;
+            spacing: 7px;
+
+            if root.tile.has-icon: Image {
+                y: (parent.height - self.height) / 2;
+                width: 16px;
+                height: 16px;
+                image-fit: contain;
+                source: root.tile.app-icon;
+            }
+
+            // A screen keeps its glyph; a window whose icon would not come
+            // takes the history's monogram (t260928-08df).
+            if !root.tile.has-icon && root.tile.screen: AppIcon {
+                y: (parent.height - self.height) / 2;
+                commands: Icons.monitor;
+                stroke-color: Tokens.on-stage-muted;
+                size: 16px;
+            }
+
+            if !root.tile.has-icon && !root.tile.screen: AppMonogram {
+                y: (parent.height - self.height) / 2;
+                letter: root.tile.app-letter;
+                hue: root.tile.app-hue;
+                size: 16px;
+            }
+
+            Text {
+                text: root.tile.title;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+                font-size: 13px;
+                font-weight: 600;
+                color: Tokens.on-stage;
+            }
+        }
+
+        // The plate (DS `.lb-target__plate`): 32 high, round, black 78% --
+        // the DS's 66% leans on a blur slint cannot draw. Always mounted and
+        // faded, never an `if` on hover: a hover-keyed subtree swapped under
+        // the pointer is task194-B's trap.
+        plate := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            height: 32px;
+            width: plate-row.preferred-width;
+            border-radius: 16px;
+            border-width: 1px;
+            // border white 50%: reads as an outline on dark thumbnails
+            // (2026-09-29 user feedback, t260929-ca5c).
+            border-color: #ffffff80;
+            background: #000000c7;
+            drop-shadow-blur: 18px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: #00000059;
+            opacity: root.lit ? 1 : 0;
+            transform-scale: root.lit ? 1 : 0.92;
+            transform-origin: { x: self.width / 2, y: self.height / 2 };
+            animate opacity, transform-scale {
+                duration: Tokens.duration-fast;
+                easing: Motion.easing-standard;
+            }
+
+            plate-row := HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 14px;
+                spacing: 8px;
+
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 10px;
+                    height: 10px;
+
+                    // The record dot and its 3px `live-soft` ring.
+                    if !root.tile.recording: Rectangle {
+                        x: -3px;
+                        y: -3px;
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 8px;
+                        background: Tokens.live-soft;
+                    }
+                    if !root.tile.recording: Rectangle {
+                        border-radius: 5px;
+                        background: Tokens.live;
+                    }
+                    // The stop square.
+                    if root.tile.recording: Rectangle {
+                        border-radius: 2px;
+                        background: #ffffff;
+                    }
+                }
+
+                // DS `.lb-target__label` `top: 1.5px`: the words sit on the
+                // optical centre, the dot and the square stay (t260928-08df).
+                Text {
+                    y: 1.5px;
+                    text: root.tile.recording ? root.stop-label : root.capture-label;
+                    vertical-alignment: center;
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: Tokens.on-stage;
+                }
+            }
+        }
+    }
+
+    // The edge: inset white 10% (30% under the pointer), or 2px `live` on the
+    // tile being recorded.
+    Rectangle {
+        border-radius: Tokens.radius-md;
+        border-width: root.tile.recording ? 2px : 1px;
+        border-color: root.tile.recording ? Tokens.live : root.lit ? #ffffff4d : #ffffff1a;
+        animate border-color {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: !root.tile.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // A Tab stop; Enter / Space presses the tile (t260928-d9b4).
+    keys := PressFocus {
+        enabled: !root.tile.disabled;
+        ring-radius: Tokens.radius-md;
+        pressed => {
+            root.clicked();
+        }
+    }
+}
+
+export component PickerModal inherits Rectangle {
+    in property <[TargetTile]> tiles;
+    in property <[string]> tab-labels;
+    // Each tab's count, whatever the search (DS Tabs `count`).
+    in property <[string]> tab-counts;
+    in property <int> tab;
+    // What stands where the grid would: 0 the grid, 1 the search matched
+    // nothing, 2 nothing can be recorded, 3 the list could not be read.
+    in property <int> empty-kind;
+    in property <string> empty-title;
+    in property <string> empty-sub;
+    in property <string> search-placeholder;
+    in property <string> clear-label;
+    in property <string> rec-label;
+    in property <string> capture-label;
+    in property <string> stop-label;
+    // The foot line: what a pick records, or the warning once three or more
+    // are running.
+    in property <string> foot-text;
+    in property <bool> foot-warning;
+    // False while the flyout plays its close (t260926-f9be): app.slint keeps it
+    // mounted for that long after `picker-open` drops. The catcher, the
+    // panel's own area and Escape stand down then.
+    in property <bool> open: true;
+    // Passed in, not computed here (t260917-099c): app.slint's title-bar hot
+    // zone steps around this panel with the same number.
+    in property <length> dialog-width;
+    // The rail's キャプチャ centre in this component's frame. The arrow points
+    // at it from 26px down the panel.
+    in property <length> anchor-y;
+
+    // Fired once per open: from the FocusScope's `init` when the flyout mounts,
+    // and from `changed open` when it is reopened mid-close. The one moment the
+    // sort order may change (design §5).
+    callback opened();
+    callback closed();
+    callback tab-changed(int);
+    callback search-changed(string);
+    callback tile-clicked(string);
+
+    background: transparent;
+
+    // ---------- the grid's arithmetic ----------
+    // `repeat(auto-fill, minmax(196px, 1fr))` with a 12px gap, resolved here:
+    // slint has no auto-fill grid. The width is the panel less its 20px sides;
+    // the scroll lane lives in the right-hand 20.
+    property <length> grid-width: root.dialog-width - 40px;
+    property <int> columns: Math.max(1, Math.floor((root.grid-width + 12px) / 208px));
+    property <length> tile-width: (root.grid-width - (root.columns - 1) * 12px) / root.columns;
+    property <length> tile-height: root.tile-width * 9 / 16;
+    property <int> rows: Math.ceil(root.tiles.length / root.columns);
+    property <length> grid-height: root.rows == 0
+        ? 0px
+        : root.rows * root.tile-height + (root.rows - 1) * 12px;
+    // What the grid's frame asks for: the rows and 16 above and below, or a
+    // height of its own for whichever nothing stands there instead.
+    property <length> frame-height: root.empty-kind == 0
+        ? root.grid-height + 32px
+        : root.empty-kind == 1 ? 160px : 220px;
+
+    // True for the first moments after the flyout mounts: the tiles built then
+    // stagger in, the ones built later (a tab switch, a window opening) come in
+    // flat. The last tile starts at 192ms and takes `duration-slow`.
+    property <bool> entering: true;
+    Timer {
+        interval: 192ms + Tokens.duration-slow + 16ms;
+        running: root.entering;
+        triggered => {
+            root.entering = false;
+        }
+    }
+
+    // ---------- open / close motion (t260926-f9be; DS timing t260927-711d) ----
+    // A fade only: `duration-base` / `easing-enter` in, `duration-fast` /
+    // `easing-exit` out. The 0.96 -> 1 scale went 2026-09-28 (t260928-4ac5):
+    // it slid the tab counts 4-6px between the first frame and the last.
+    // Assigned, not bound: a binding flipped in `init` never animated (an
+    // assignment animates from the value the property holds, which is also what
+    // makes a reopen mid-close start from where the close had got to). The
+    // opacity sits on the root -- a transparent catcher.
+    opacity: 0;
+    init => {
+        if (root.open) {
+            self.opacity = 1;
+        }
+    }
+    animate opacity {
+        duration: root.open ? Tokens.duration-base : Tokens.duration-fast;
+        easing: root.open ? Motion.easing-enter : Motion.easing-exit;
+    }
+
+    changed open => {
+        root.opacity = root.open ? 1 : 0;
+        if (root.open) {
+            keys.focus();
+            root.opened();
+        }
+    }
+
+    // Stops at the rail's right edge, so the rail stays live while the picker
+    // is open: a rail item switches the pane (and `show_pane` closes the picker
+    // on the way) instead of the click being spent on "close".
+    TouchArea {
+        enabled: root.open;
+        x: Tokens.size-rail;
+        width: parent.width - self.x;
+        clicked => {
+            root.closed();
+        }
+    }
+
+    property <color> ground: Tokens.overlay.with-alpha(0.94);
+
+    dialog := Rectangle {
+        // DS: 12 right of the rail, top 26 above the キャプチャ centre, as
+        // tall as its content and never closer than 24 to the page's foot.
+        x: Tokens.size-rail + Tokens.picker-rail-gap;
+        y: root.anchor-y - 26px;
+        width: root.dialog-width;
+        // A Rectangle takes no size from its children -- only layouts do -- so
+        // the height is written out; `box` then shrinks the one child that can
+        // give (the grid's frame, which scrolls) to fit.
+        height: Math.min(box.preferred-height, root.height - self.y - 24px);
+        border-radius: Tokens.radius-lg;
+        // `overlay` at 94% (the user, 2026-09-27): the DS's 84% leans on a
+        // 28px blur, and slint cannot blur what is behind it inside a window,
+        // so an unblurred 84% would let the page's words read through.
+        background: root.ground;
+        drop-shadow-blur: Tokens.shadow-overlay-blur;
+        drop-shadow-offset-y: Tokens.shadow-overlay-offset-y;
+        drop-shadow-color: Tokens.shadow-overlay-color;
+
+        // The sheen (white 7% at 135deg, gone by 55%) and the `line-strong`
+        // edge, one rounded element. Declared first, so the content draws over.
+        Rectangle {
+            border-radius: parent.border-radius;
+            border-width: 1px;
+            border-color: Tokens.line-strong;
+            background: @linear-gradient(135deg, #ffffff12 0%, #ffffff00 55%);
+        }
+
+        // Above the catcher's TouchArea, so a click inside the panel is not a
+        // click outside it.
+        TouchArea {
+            enabled: root.open;
+        }
+
+        // The arrow (DS 8x14 at left -7 / top 19): its tip at 26 points at the
+        // キャプチャ centre. The path runs 0.5 past the viewbox on the panel
+        // side so its fill covers the panel's own edge where they meet.
+        Path {
+            x: -7px;
+            y: 19px;
+            width: 8px;
+            height: 14px;
+            viewbox-width: 8;
+            viewbox-height: 14;
+            // Drawn 1:1 (t260928-08df): the default `contain` fits the path's
+            // stroked bounds into the box and shrank it to 0.875.
+            fit: preserve;
+            commands: "M8.5 0.5L1 7L8.5 13.5";
+            fill: root.ground;
+            stroke: Tokens.line-strong;
+            stroke-width: 1px;
+        }
+
+        keys := FocusScope {
+            enabled: root.open;
+            // Not a Tab stop (t260928-d9b4): it draws no ring; the tiles are.
+            focus-on-tab-navigation: false;
+
+            // Runs once per mount, and takes the key focus off whatever the
+            // pane behind had. A reopen mid-close is `changed open` above.
+            init => {
+                self.focus();
+                root.opened();
+            }
+
+            key-pressed(event) => {
+                if (root.open && event.text == Key.Escape) {
+                    root.closed();
+                    return EventResult.accept;
+                }
+                return EventResult.reject;
+            }
+
+            box := VerticalLayout {
+                // ---------- the head: tabs and the search on one row ----------
+                // 4 above, 20 at the sides, a 1px `line` under it. The tabs
+                // draw their own line under themselves, so the panel-wide one
+                // is drawn only either side of them -- two alpha lines stacked
+                // would read darker under the tabs.
+                Rectangle {
+                    height: 44px;
+
+                    tabs := Tabs {
+                        x: 20px;
+                        y: 4px;
+                        width: self.min-width;
+                        tabs: root.tab-labels;
+                        counts: root.tab-counts;
+                        selected: root.tab;
+                        selected-changed(index) => {
+                            root.tab-changed(index);
+                        }
+                    }
+
+                    // `id`ed and outside any `if`: the no-match state's
+                    // 検索をクリア reaches in from a sibling.
+                    search := SearchField {
+                        x: parent.width - 20px - self.width;
+                        y: 4px + (40px - self.height) / 2;
+                        width: 232px;
+                        size: ControlSize.sm;
+                        placeholder: root.search-placeholder;
+                        search-changed(text) => {
+                            root.search-changed(text);
+                        }
+                    }
+
+                    Rectangle {
+                        x: 0px;
+                        y: parent.height - 1px;
+                        width: tabs.x;
+                        height: 1px;
+                        background: Tokens.line;
+                    }
+
+                    Rectangle {
+                        x: tabs.x + tabs.width;
+                        y: parent.height - 1px;
+                        width: parent.width - self.x;
+                        height: 1px;
+                        background: Tokens.line;
+                    }
+                }
+
+                // ---------- the grid, or what stands in for it ----------
+                // As tall as its rows need and no taller than the panel leaves;
+                // only this frame gives when the panel is capped, so the head
+                // and the foot stay put while the grid scrolls.
+                Rectangle {
+                    preferred-height: root.frame-height;
+                    max-height: root.frame-height;
+                    min-height: 0px;
+                    vertical-stretch: 1;
+
+                    if root.empty-kind == 0: scroll := AppScroll {
+                        // The lane is the scroll's right 12px, laid in the
+                        // panel's right-hand 20 -- so the tiles' right edge
+                        // is 20 in, like everything else.
+                        x: 20px;
+                        width: parent.width - 28px;
+                        height: parent.height;
+                        viewport-width: scroll.visible-width;
+                        viewport-height: root.grid-height + 32px;
+
+                        for entry[index] in root.tiles: Tile {
+                            x: Math.mod(index, root.columns) * (root.tile-width + 12px);
+                            y: 16px + Math.floor(index / root.columns) * (root.tile-height + 12px);
+                            width: root.tile-width;
+                            height: root.tile-height;
+                            tile: entry;
+                            rec-label: root.rec-label;
+                            capture-label: root.capture-label;
+                            stop-label: root.stop-label;
+                            entering: root.entering;
+                            order: index;
+                            clicked => {
+                                // Both, always: a press starts a recording or
+                                // stops this one, and either way the flyout is
+                                // done (DS). Not while closing (t260926-f9be):
+                                // a second press must not start a second one.
+                                if (root.open) {
+                                    root.tile-clicked(entry.id);
+                                    root.closed();
+                                }
+                            }
+                        }
+                    }
+
+                    // The search matched nothing: the sentence and a ghost
+                    // 検索をクリア, where the grid would be.
+                    if root.empty-kind == 1: VerticalLayout {
+                        alignment: center;
+                        spacing: Tokens.space-3;
+                        padding: Tokens.space-6;
+
+                        Text {
+                            text: root.empty-title;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                            font-size: 13px;
+                            color: Tokens.ink-muted;
+                        }
+
+                        HorizontalLayout {
+                            alignment: center;
+
+                            Btn {
+                                variant: BtnVariant.ghost;
+                                size: ControlSize.sm;
+                                label: root.clear-label;
+                                clicked => {
+                                    search.text = "";
+                                    root.search-changed("");
+                                    search.focus-field();
+                                }
+                            }
+                        }
+                    }
+
+                    // Nothing to record, or no list at all. The first needs no
+                    // button: the list re-reads itself every second (task143).
+                    if root.empty-kind >= 2: EmptyState {
+                        width: 100%;
+                        height: 100%;
+                        icon: root.empty-kind == 3 ? Icons.error : Icons.window;
+                        label: root.empty-title;
+                        sub: root.empty-sub;
+                    }
+                }
+
+                // ---------- the foot: what gets recorded ----------
+                Rectangle {
+                    height: foot-row.preferred-height;
+
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        background: Tokens.line;
+                    }
+
+                    foot-row := HorizontalLayout {
+                        padding-top: 10px;
+                        padding-bottom: 12px;
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        spacing: Tokens.space-2;
+
+                        AppIcon {
+                            y: (parent.height - self.height) / 2;
+                            commands: root.foot-warning ? Icons.warning : Icons.info;
+                            stroke-color: root.foot-warning ? Tokens.warning : Tokens.ink-faint;
+                            size: 16px;
+                        }
+
+                        Text {
+                            text: root.foot-text;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            font-size: 12px;
+                            color: root.foot-warning ? Tokens.warning : Tokens.ink-muted;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

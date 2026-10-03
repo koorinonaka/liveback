@@ -1,0 +1,411 @@
+// The audio-track list both sides share (t261003-82d6): the review panel's
+// 音量 tab (DS VolumePanel) and the settings rows that open under an
+// auto-record or 音声 target (DS V28 AutoCaptureRow). Split out of
+// review_volume.slint so the two draw with the same parts and words rather
+// than a copy (DS: 「一覧は VolumePanel と同じ部品と語」).
+//
+// The parts read no global: the caller hands every value in and answers every
+// callback. What differs between the two callers is the DS's three points --
+// no volume step in settings (its rows carry no track, `track: -1`, so the
+// step never draws), 登録から外す before the Switch (`removable`), and the
+// device Menu's direction (the caller places it, from `device-clicked`).
+//
+// The track rows grew out of task1300's `MixerRow` (the transport's mute and
+// `VolumeRail`, so the two volume controls look like one kind of thing). Quiet
+// by rule (DS: 「そんなに主張しない位置に」): ink-muted parts, hairlines between
+// rows, no lamps or live colour -- the transport's LIVE frame says recording.
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { Btn, BtnVariant, IconBtn, VolumeRail, Switch, ControlSize, Overline } from "controls.slint";
+import { VolumeRowVm, VolumeCandidate } from "review_vm.slint";
+
+// A 20px badge: the app's own icon, or the DS mic on a `fill` plate.
+export component SourceIcon inherits Rectangle {
+    in property <int> kind;
+    in property <image> icon;
+    in property <bool> screen;
+    width: 20px;
+    height: 20px;
+    border-radius: Tokens.radius-sm;
+    background: root.kind == 2 ? Tokens.fill : transparent;
+
+    if root.kind == 2: AppIcon {
+        x: 2px;
+        y: 2px;
+        commands: Icons.mic;
+        stroke-color: Tokens.ink-muted;
+        size: 16px;
+    }
+    if root.kind != 2 && root.icon.width > 0: Image {
+        source: root.icon;
+        width: 20px;
+        height: 20px;
+        image-fit: contain;
+    }
+    // No icon to read (the whole screen, or a file that is gone).
+    if root.kind != 2 && root.icon.width == 0: AppIcon {
+        commands: root.screen ? Icons.monitor : Icons.window;
+        stroke-color: Tokens.ink-muted;
+        size: 20px;
+    }
+}
+
+export component VolumeTrackRow inherits Rectangle {
+    in property <VolumeRowVm> entry;
+    in property <bool> last;
+    // The added rows' Switches: the 音量 tab while recording, settings always.
+    in property <bool> live;
+    // 登録から外す (close, IconButton sm) before the Switch: settings only.
+    in property <bool> removable;
+    in property <string> remove-label;
+    in property <string> open-settings-label;
+    // (x, top, bottom) of the pressed device name in window coordinates: the
+    // 音量 tab opens its Menu upward, settings downward.
+    callback device-clicked(length, length, length);
+    // By registration index (`VolumeRowVm.extra`).
+    callback switch-toggled(int);
+    callback removed(int);
+    callback open-settings();
+    // By the session's track (`VolumeRowVm.track`).
+    callback mute-toggled(int);
+    callback volume-changed(int, float);
+
+    height: body.preferred-height;
+
+    if !root.last: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Tokens.line;
+    }
+
+    body := VerticalLayout {
+        padding-top: Tokens.space-2;
+        padding-bottom: Tokens.space-2;
+        spacing: Tokens.space-1;
+
+        HorizontalLayout {
+            spacing: 10px;
+
+            VerticalLayout {
+                alignment: start;
+                padding-top: 1px;
+
+                SourceIcon {
+                    kind: root.entry.kind;
+                    icon: root.entry.icon;
+                    screen: root.entry.screen;
+                }
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 2px;
+
+                Text {
+                    text: root.entry.name;
+                    overflow: elide;
+                    font-size: Tokens.type-label-size;
+                    font-weight: Tokens.type-label-weight;
+                    color: Tokens.ink;
+                }
+
+                // DS: the mic's device under its name; pressing it opens the
+                // device Menu. A recorded mic the registration no longer names
+                // shows its device too, without the Menu.
+                if root.entry.kind == 2 && root.entry.device != "": Rectangle {
+                    height: device.preferred-height;
+
+                    device := Text {
+                        x: 0;
+                        width: parent.width;
+                        text: root.entry.device;
+                        overflow: elide;
+                        font-size: Tokens.type-caption-size;
+                        color: device-touch.has-hover ? Tokens.ink : Tokens.ink-muted;
+                    }
+
+                    device-touch := TouchArea {
+                        enabled: root.entry.extra >= 0;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.device-clicked(self.absolute-position.x, self.absolute-position.y,
+                                self.absolute-position.y + self.height);
+                        }
+                    }
+                }
+
+                if root.entry.caption != "" && !root.entry.warning: Text {
+                    text: root.entry.caption;
+                    wrap: word-wrap;
+                    font-size: Tokens.type-caption-size;
+                    color: Tokens.ink-faint;
+                }
+
+            }
+
+            // The Switch: does the recording take this sound (and the next one
+            // start with it). 登録から外す sits before it in settings only
+            // (2026-10-03 ruling: the tab never removes).
+            if root.entry.extra >= 0 && root.live: HorizontalLayout {
+                horizontal-stretch: 0;
+                alignment: start;
+                // The × is 28 tall, the Switch 22: centred, not top-aligned.
+                cross-axis-alignment: center;
+                spacing: Tokens.space-2;
+
+                if root.removable: IconBtn {
+                    icon: Icons.close;
+                    label: root.remove-label;
+                    size: ControlSize.sm;
+                    clicked => {
+                        root.removed(root.entry.extra);
+                    }
+                }
+
+                Switch {
+                    checked: root.entry.on;
+                    disabled: root.entry.locked;
+                    label: root.entry.name;
+                    toggled => {
+                        root.switch-toggled(root.entry.extra);
+                    }
+                }
+            }
+        }
+
+        // DS `denied`: the warning sentence and 「設定を開く」 take the second
+        // step's place, full width under the name, instead of the volume
+        // (the microphone records silence until Windows allows it again).
+        if root.entry.warning: VerticalLayout {
+            padding-left: 30px;
+            spacing: 2px;
+            alignment: start;
+
+            Text {
+                text: root.entry.caption;
+                wrap: word-wrap;
+                font-size: Tokens.type-caption-size;
+                color: Tokens.warning;
+            }
+
+            HorizontalLayout {
+                alignment: start;
+
+                Btn {
+                    label: root.open-settings-label;
+                    icon: Icons.external;
+                    variant: BtnVariant.ghost;
+                    size: ControlSize.sm;
+                    clicked => {
+                        root.open-settings();
+                    }
+                }
+            }
+        }
+
+        // The second step: mute and volume, under the name. Absent for a sound
+        // this session never recorded (DS `not-in-session`), for every settings
+        // row (no track), and while the microphone is denied (the warning above
+        // stands in for it).
+        if root.entry.track >= 0 && !root.entry.warning: HorizontalLayout {
+            padding-left: 30px - 6px;
+            spacing: 6px;
+
+            IconBtn {
+                icon: root.entry.muted ? Icons.volume-muted : Icons.volume;
+                label: root.entry.name;
+                clicked => {
+                    root.mute-toggled(root.entry.track);
+                }
+            }
+
+            VolumeRail {
+                horizontal-stretch: 1;
+                height: Tokens.size-control-sm;
+                ratio: root.entry.volume-ratio;
+                muted: root.entry.muted;
+                ratio-changed(v) => {
+                    root.volume-changed(root.entry.track, v);
+                }
+            }
+
+            // 0-100 beside the rail (2026-10-03); wide enough for "100" so the
+            // rail does not shift as the value changes.
+            Text {
+                width: 26px;
+                text: Math.round(root.entry.volume-ratio * 100);
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                font-family: Tokens.font-family-mono;
+                font-size: Tokens.type-caption-size;
+                color: root.entry.muted ? Tokens.ink-faint : Tokens.ink-muted;
+            }
+        }
+    }
+}
+
+// One row of the add list: a running app, or the microphone.
+component CandidateRow inherits Rectangle {
+    in property <string> name;
+    in property <image> icon;
+    in property <int> kind: 1;
+    in property <string> trailing;
+    in property <bool> disabled;
+    callback clicked;
+
+    height: 32px;
+    border-radius: Tokens.radius-sm;
+    background: touch.has-hover && !root.disabled ? Tokens.fill-hover : transparent;
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Tokens.space-2;
+        padding-right: Tokens.space-2;
+        spacing: 10px;
+
+        SourceIcon {
+            y: (parent.height - self.height) / 2;
+            kind: root.kind;
+            icon: root.icon;
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.name;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: Tokens.type-label-size;
+            font-weight: Tokens.type-label-weight;
+            color: root.disabled ? Tokens.ink-faint : Tokens.ink;
+        }
+
+        if root.trailing != "": Text {
+            text: root.trailing;
+            vertical-alignment: center;
+            font-size: Tokens.type-caption-size;
+            color: Tokens.ink-faint;
+        }
+    }
+}
+
+// The heading row: as MarkerList's. 「トラックを追加」 only where adding is
+// open (the tab while recording; settings always).
+export component TrackListHead inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> add-label;
+    in property <bool> can-add;
+    callback add-clicked();
+
+    Overline {
+        horizontal-stretch: 1;
+        text: root.title;
+    }
+
+    if root.can-add: Btn {
+        label: root.add-label;
+        icon: Icons.plus;
+        variant: BtnVariant.ghost;
+        size: ControlSize.sm;
+        clicked => {
+            root.add-clicked();
+        }
+    }
+}
+
+// What 「トラックを追加」 opens. DS: a list in place, not a Menu -- running
+// apps can be more than the Menu's ten.
+export component AddTrackBox inherits Rectangle {
+    in property <string> running-label;
+    // Why apps cannot be added ("" when they can).
+    in property <string> blocked-text;
+    in property <[VolumeCandidate]> candidates;
+    in property <string> tray-note;
+    in property <string> mic-label;
+    in property <bool> mic-added;
+    in property <string> added-label;
+    callback add-app(int);
+    callback add-mic();
+
+    border-radius: Tokens.radius-md;
+    background: Tokens.sunken;
+
+    VerticalLayout {
+        padding: Tokens.space-2;
+        spacing: 2px;
+
+        Text {
+            text: root.running-label;
+            font-size: Tokens.type-caption-size;
+            color: Tokens.ink-muted;
+        }
+
+        // Why apps cannot be added, instead of the apps (DS: info 14).
+        if root.blocked-text != "": HorizontalLayout {
+            padding-top: Tokens.space-1;
+            padding-bottom: Tokens.space-1;
+            spacing: 6px;
+
+            VerticalLayout {
+                alignment: start;
+                padding-top: 1px;
+
+                AppIcon {
+                    commands: Icons.info;
+                    stroke-color: Tokens.ink-muted;
+                    size: 14px;
+                }
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.blocked-text;
+                wrap: word-wrap;
+                font-size: Tokens.type-caption-size;
+                color: Tokens.ink-muted;
+            }
+        }
+
+        if root.blocked-text == "": VerticalLayout {
+            spacing: 2px;
+
+            for candidate[index] in root.candidates: CandidateRow {
+                name: candidate.name;
+                icon: candidate.icon;
+                clicked => {
+                    root.add-app(index);
+                }
+            }
+
+            Text {
+                text: root.tray-note;
+                wrap: word-wrap;
+                font-size: Tokens.type-caption-size;
+                color: Tokens.ink-faint;
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: Tokens.line;
+        }
+
+        CandidateRow {
+            kind: 2;
+            name: root.mic-label;
+            trailing: root.mic-added ? root.added-label : "";
+            disabled: root.mic-added;
+            clicked => {
+                root.add-mic();
+            }
+        }
+    }
+}
