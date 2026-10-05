@@ -1,0 +1,2000 @@
+// The クリップ screen (task2980, rebuilt as a tile grid by task3020).
+//
+// Round18 §1-3 (user ruling, 2026-09-06) threw out the 56px row this file
+// opened with: a clip is a finished piece of video, so the thumbnail is the
+// thing and everything else rides on top of it. There are no length and size
+// columns any more -- neither told two clips apart at a glance -- and the
+// comment and the date moved into an overlay burned onto the picture.
+//
+// Which tiles exist, what every string on them says, and *where each one sits*
+// come from Rust (`clips::list` + `ui_state::clips`); this side only places
+// them. The placement in particular: a date heading spans the grid's full
+// width and pushes everything under it down, and neither running count a tile
+// needs for its y -- how many grid lines and how many headings are above it --
+// is something a slint `for` can carry.
+
+import { Dark, Motion, Tokens } from "tokens.slint";
+import { TileEntry } from "sessions_tile.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { EmptyState, ContextMenu, MenuEntry, AppScroll, InlineEdit, SearchField, SegmentTabs, ControlSize, Btn, IconBtn, IconBtnVariant, AppMonogram, SelectionBar } from "controls.slint";
+import { ClipVm } from "clip_vm.slint";
+import { ClipStage } from "clip_stage.slint";
+
+export struct ClipRow {
+    // The app the clip was saved from, as the DS `AppIcon` monogram: its
+    // letter and which of the eight hues (`sessions::monogram_*`), read off
+    // the file name's `{game}` (t260927-bb89). "" when the name says no app.
+    // The file name itself is not on the card at all (DS ClipCard).
+    app-letter: string,
+    app-hue: int,
+    // The creation time in the DS ClipCard's wording (t260928-6080 F1,
+    // `sessions::row_date_text`): `21:04` today, `昨日 23:41`, `9/13 22:05`,
+    // and `2025/9/13 22:05` once it is not this year's.
+    date: string,
+    // What was typed into 「クリップに保存」, read back out of the mp4 itself.
+    // Empty means none was written, and the overlay offers to add one.
+    comment: string,
+    // The clip's length (`0:14`), or empty while it is unknown -- then no
+    // badge (t260926-e49b).
+    duration: string,
+    thumbnail: image,
+    has-thumbnail: bool,
+    // The detail read is still out and was asked for under 150ms ago
+    // (t260930-cc68): bare stage rather than the glyph. Rust flips it on a
+    // timer.
+    thumbnail-held: bool,
+    // Grid placement, decided by `ui_state::clips::place`.
+    column: int,
+    line: int,
+    // How many date headings stand above this tile, its own included -- so it
+    // is 1 on the first group and never 0.
+    heading-offset: int,
+    // The group's heading, on the group's first tile only.
+    heading: string,
+    // How many columns and lines this tile covers (task3880, round20 §2-1
+    // B案). 1 for every tile but the expanded one.
+    span: int,
+    // In the selection (t260916-5568). Per tile rather than a list of indices
+    // on the pane, so a marquee step rewrites only the tiles it changed.
+    selected: bool,
+}
+
+// One clip: the DS ClipCard (t260927-bb89). The picture fills the 16:9 card
+// and carries everything -- the length top left, the comment and 「app ·
+// time」 on the shade along the bottom, the 「…」 top right on hover. No file
+// name and no size, on hover or otherwise (DS: カードは見返すための絵).
+component ClipTile inherits Rectangle {
+    in property <ClipRow> entry;
+    // The pointer is on the tile *or* on one of its own controls. One flag for
+    // all, because a control's TouchArea takes the hover away from the tile's
+    // -- the trap task184 hit on the history row.
+    in property <bool> hovered;
+    // The flat 16% shade alone (t260928-5a01): the one card-wide hover look,
+    // so it follows where the pointer really is and never stays on while the
+    // pointer is on the open menu, e.g. holding its delete. `hovered` keeps
+    // the latch for the add-comment row and the 「…」 (t260916-0a58).
+    in property <bool> shaded: root.hovered;
+    in property <bool> editing;
+    // "This is the tile you are acting on": the context menu or the comment
+    // editor is open over it (task3350). Drawn like `selected`.
+    in property <bool> highlighted;
+    // In the selection (t260916-5568): the 2px `accent` edge and nothing else
+    // (DS ClipCard: 塗りやチェックの丸は重ねない).
+    in property <bool> selected;
+    // The hover storyboard (task3540): the frame under the pointer over the
+    // thumbnail, and the 3px `accent` position line.
+    in property <bool> scrubbing;
+    in property <float> scrub-ratio;
+    in property <image> scrub-frame;
+    in property <bool> scrub-has-frame;
+    // Written by the add-comment row's own TouchArea rather than read off it:
+    // that row lives inside an `if`, and slint gives no name to an element in
+    // one from outside. The pane feeds this back in as `hovered`.
+    out property <bool> pen-hovered;
+    // The 「…」 takes the hover the same way; it is not in an `if`.
+    out property <bool> more-hovered: more.has-hover;
+    // Opening the editor destroys the row the pointer was on, and a destroyed
+    // element fires no `changed` -- without this the flag would stick true.
+    changed editing => {
+        root.pen-hovered = false;
+    }
+    callback edit-requested();
+    callback comment-committed(string);
+    callback edit-cancelled();
+    // The 「…」 was pressed: where the menu should grow from, in this tile's
+    // own coordinates.
+    callback more-requested(length, length);
+    // The entrance (t260925-f297), `SessionTile`'s own: only while the pane
+    // has just been entered, staggered by reading order. `rise` is added to
+    // this tile's `y` by the pane -- the tile's, never the cell's, whose
+    // `animate x, y` is the expansion's footprint (t260916-fa85) and would
+    // restart on it. The raised copy leaves `entering` false.
+    in property <bool> entering;
+    in property <int> enter-order;
+    out property <length> rise: 8px;
+    opacity: 0;
+    init => {
+        self.opacity = 1;
+        self.rise = 0;
+    }
+    animate opacity, rise {
+        duration: root.entering ? Tokens.duration-base : 0ms;
+        // No stagger under reduce-motion (t260928-6080, review 01 F5): the
+        // duration is already 0 there, the delay was not.
+        delay: (root.entering && !Tokens.reduce-motion) ? TileEntry.delay(root.enter-order) : 0ms;
+        easing: Motion.easing-reveal;
+    }
+
+    // 16:9, `radius-md`, on `stage` (DS `.lb-clip`).
+    border-radius: Tokens.radius-md;
+    background: Tokens.stage;
+    // So the picture takes the card's rounding.
+    clip: true;
+
+    // `cover` (DS: 絵は枠いっぱいに敷く、レターボックスの帯を出さない). The
+    // user's 2026-09-15 `contain` is superseded by the DS ClipCard: the
+    // recorded shapes (1920x1032, 1922x1112) lose a few percent top and
+    // bottom rather than showing bands. `ClipStage` still letterboxes the
+    // playing clip.
+    if root.entry.has-thumbnail: Image {
+        width: 100%;
+        height: 100%;
+        source: root.entry.thumbnail;
+        image-fit: cover;
+    }
+
+    // Until a frame has arrived the thumbnail stays (round20 §7 追記).
+    if root.scrubbing && root.scrub-has-frame: Image {
+        width: 100%;
+        height: 100%;
+        source: root.scrub-frame;
+        image-fit: cover;
+    }
+
+    // No thumbnail: the shell gave none, or the read is still out and past
+    // 150ms (t260930-cc68 -- under that the face stays bare stage, so a
+    // picture about to land never flashes this). The glyph says "a clip"
+    // rather than "an error".
+    if !root.entry.has-thumbnail && !root.entry.thumbnail-held: AppIcon {
+        commands: Icons.clips;
+        stroke-color: Dark.on-stage-muted;
+        size: 24px;
+    }
+
+    // The shade (DS `.lb-clip__shade`): black 30% at the top edge to 0 by
+    // 28%, clear to 46%, then down to black 80% at the bottom -- the length
+    // badge and the caption sit on its two ends. Hover adds a flat 16%.
+    Rectangle {
+        background: @linear-gradient(180deg, #0000004d 0%, #00000000 28%, #00000000 46%, #000000cc 100%);
+    }
+
+    Rectangle {
+        background: #00000029;
+        opacity: root.shaded && root.entry.span == 1 ? 1 : 0;
+        animate opacity {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+
+    // ---------- length, top left (DS `.lb-clip__dur`) ----------
+    // Not on the expanded tile: the player prints `0:08 / 0:14` there.
+    badge := Rectangle {
+        visible: root.entry.duration != "" && root.entry.span == 1;
+        x: 8px;
+        y: 8px;
+        width: badge-text.preferred-width + 10px;
+        height: 18px;
+        border-radius: 3px;
+        background: Dark.stage-veil;
+
+        badge-text := Text {
+            text: root.entry.duration;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            font-family: Tokens.font-family-mono;
+            font-size: Tokens.type-key-size;
+            font-weight: Tokens.type-tc-weight;
+            // On the picture, so the dark set in either theme.
+            color: Dark.on-stage;
+        }
+    }
+
+    // ---------- the caption (DS `.lb-clip__caption`) ----------
+    // 12 in from the sides and 10 off the bottom: the comment's 20px line,
+    // 1px, and the when line's 18px. Placed absolutely so the when line keeps
+    // its place whether or not a comment line stands over it.
+    property <length> when-y: root.height - 10px - 18px;
+    property <length> comment-y: root.when-y - 1px - 20px;
+
+    // 14px, not the DS's 13.5 -- the DS README does not use half sizes.
+    if !root.editing && root.entry.comment != "": Text {
+        x: 12px;
+        y: root.comment-y;
+        width: root.width - 24px;
+        height: 20px;
+        text: root.entry.comment;
+        overflow: elide;
+        vertical-alignment: center;
+        font-size: Tokens.type-body-strong-size;
+        font-weight: Tokens.type-body-strong-weight;
+        color: Dark.on-stage;
+    }
+
+    // 「✎ コメントを追加」: only with no comment, and only on hover (DS
+    // `.lb-clip__add`). Mounted and faded rather than put behind an `if
+    // hovered` (task184): an `if` on hover deletes the row the moment its own
+    // TouchArea takes the hover, and the click then falls through to the tile.
+    if !root.editing && root.entry.comment == "": Rectangle {
+        x: 8px;
+        y: root.comment-y;
+        width: add-row.preferred-width;
+        height: 20px;
+        border-radius: Tokens.radius-xs;
+        opacity: (root.hovered || pen.has-hover) && root.entry.span == 1 ? 1 : 0;
+        background: pen.has-hover ? #ffffff2e : transparent;
+
+        pen := TouchArea {
+            mouse-cursor: pointer;
+            changed has-hover => {
+                root.pen-hovered = self.has-hover;
+            }
+            clicked => {
+                root.edit-requested();
+            }
+        }
+
+        add-row := HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            spacing: 6px;
+
+            AppIcon {
+                y: (parent.height - self.height) / 2;
+                commands: Icons.pencil;
+                stroke-color: Dark.on-stage-muted;
+                size: 14px;
+            }
+
+            Text {
+                text: ClipLabels.add-comment;
+                vertical-alignment: center;
+                font-size: Tokens.type-label-size;
+                font-weight: Tokens.type-label-weight;
+                color: Dark.on-stage-muted;
+            }
+        }
+    }
+
+    // The history screen's editor: Enter commits, Esc or a blur discards
+    // (task3430). Empty is a legal commit -- it is how a comment is removed.
+    // Sits where the comment line does, its box pulled 8px in from the sides
+    // so `InlineEdit`'s 3px focus halo clears this card's `clip: true`
+    // rounding (task3850 / task3350's physics, unchanged).
+    if root.editing: InlineEdit {
+        x: 8px;
+        width: root.width - 16px;
+        y: root.when-y - 2px - self.height;
+        text: root.entry.comment;
+        hint: "Enter";
+        init => {
+            self.begin-edit();
+        }
+        committed(value) => {
+            root.comment-committed(value);
+        }
+        // Guarded on this tile's own edit state (task3430): the teardown that
+        // follows `editing` going false delivers a cancel, by which time the
+        // pane may have opened another tile's editor.
+        cancelled => {
+            if (root.editing) {
+                root.edit-cancelled();
+            }
+        }
+    }
+
+    // App and time (DS `.lb-clip__when`): the monogram off the file name, or
+    // the time alone for a name that says no app.
+    HorizontalLayout {
+        x: 12px;
+        y: root.when-y;
+        width: root.width - 24px;
+        height: 18px;
+        spacing: 6px;
+        alignment: start;
+
+        if root.entry.app-letter != "": AppMonogram {
+            y: (parent.height - self.height) / 2;
+            size: 14px;
+            letter: root.entry.app-letter;
+            hue: root.entry.app-hue;
+        }
+
+        Text {
+            text: root.entry.date;
+            vertical-alignment: center;
+            overflow: elide;
+            font-size: Tokens.type-caption-size;
+            color: Dark.on-stage-muted;
+        }
+    }
+
+    // The scrub position (round20 §7 追記, kept by the DS ClipCard): a 3px
+    // `accent` line on the bottom edge, following the pointer ahead of the
+    // frames.
+    if root.scrubbing: Rectangle {
+        x: 1px;
+        y: parent.height - 1px - self.height;
+        width: parent.width - 2px;
+        height: 3px;
+        border-bottom-left-radius: 7px;
+        border-bottom-right-radius: 7px;
+        background: #ffffff2e;
+        clip: true;
+
+        Rectangle {
+            x: 0;
+            width: parent.width * Math.clamp(root.scrub-ratio, 0, 1);
+            height: 100%;
+            background: Tokens.accent;
+        }
+    }
+
+    // The card's edge, drawn *over* its contents (task1330: a child paints
+    // over its parent's border). Inside 1px white 8%; selected -- or acted on
+    // by a menu or an editor -- inside 2px `accent`. Fill-less, so it takes
+    // no clicks.
+    Rectangle {
+        border-radius: Tokens.radius-md;
+        border-width: (root.highlighted || root.selected) ? 2px : 1px;
+        border-color: (root.highlighted || root.selected) ? Tokens.accent : #ffffff14;
+        animate border-color {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-reveal;
+        }
+    }
+
+    // The 「…」 (DS `.lb-clip__more`): top right 6 / 6, `IconBtn` sm `stage`,
+    // while hovered or while its menu is open. On a `stage-veil` plate, the
+    // history tile's fix (t260927-9a17): the bare `stage` glyph vanished on a
+    // bright picture. It fades in and out on `duration-fast` (t260928-6080
+    // F17), and `visible` follows the fade, so a card the pointer is not on
+    // has no invisible hit target in its corner (bb89's reason). Reading
+    // `opacity` in `visible` also keeps the animation read every frame.
+    Rectangle {
+        x: parent.width - self.width - 6px;
+        y: 6px;
+        width: more.width;
+        height: more.height;
+        border-radius: Tokens.radius-sm;
+        background: Dark.stage-veil;
+        opacity: root.entry.span == 1 && (root.hovered || root.highlighted || more.has-hover) ? 1 : 0;
+        animate opacity {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+        visible: self.opacity > 0.001;
+
+        more := IconBtn {
+            icon: Icons.more;
+            label: ClipLabels.more-actions;
+            variant: IconBtnVariant.stage;
+            // The card is the Tab stop; its menu is Shift+F10 (t260928-d9b4).
+            tab-stop: false;
+            clicked => {
+                root.more-requested(parent.x + self.width / 2, parent.y + self.height);
+            }
+        }
+    }
+}
+
+// The strings this pane needs that are not per-row. Pushed from Rust like
+// every other label global.
+export global ClipLabels {
+    in property <string> add-comment;
+    in property <string> week;
+    in property <string> month;
+    in property <string> search-placeholder;
+    // The empty folder's second line (DS ClipsScreen).
+    in property <string> empty-sub;
+    // The selection bar (t260927-bb89, the history's `SelectionBar`).
+    in property <string> clear-selection;
+    in property <string> hold-to-delete;
+    // 「N 件」, the bar's strong half (t260928-13e9); the rest is the pane's
+    // `selection-text`. Here so it needs no forwarding through `app.slint`.
+    in property <string> selection-count;
+    // The 「…」's accessible name (t260928-13e9).
+    in property <string> more-actions;
+    // The top row's button, and the empty state's action (t260928-6080 F20).
+    in property <string> open-folder;
+    // The folder would not read (t260928-6080 F9): `empty-text` is then
+    // 「一覧を取得できませんでした」 and `empty-sub` the reason. Here rather
+    // than on the pane so the flag needs no forwarding through `app.slint`.
+    in property <bool> list-failed;
+}
+
+export component ClipsPane inherits FocusScope {
+    in property <[ClipRow]> rows;
+    // The history pane's entrance window (t260925-f297): tiles built while it
+    // is up stagger in, tiles built after it (a search, a new clip) do not.
+    property <bool> entering: true;
+    // ponytail: wall clock from mount, as on the history pane.
+    Timer {
+        interval: TileEntry.window;
+        running: root.entering;
+        triggered => {
+            root.entering = false;
+        }
+    }
+    // Non-empty replaces the grid with the single 「クリップがありません」 wording
+    // (`ui_state::clips::empty`, task3030) -- the missing-folder sentence was
+    // dropped since `livia::clips::list` creates the folder itself.
+    in property <string> empty-text;
+    // The other nothing (task3820): there are clips, and the search box matches
+    // none of them. A separate property from `empty-text` on purpose -- the
+    // toolbar is gated on that one, so sharing it would take the search field
+    // off screen the moment a query stopped matching and leave the text that
+    // emptied the grid with no way to be cleared.
+    in property <string> filter-empty-text;
+    in property <[MenuEntry]> menu-entries;
+    in property <bool> menu-open;
+    // Which tile the menu belongs to, or -1 (task3350). `menu-open` alone says
+    // there is a menu but not what it is acting on, and Rust already holds the
+    // index (`Clips::menu`) -- so this is that answer coming back. The
+    // selection (t260916-5568) is a separate thing, carried per tile on
+    // `ClipRow.selected`.
+    in property <int> menu-row: -1;
+    // Which tile has its comment editor open, or -1. Same shape as the history
+    // pane's `editing-row`; there is only one editable field on a clip, so
+    // there is no companion "which field" flag.
+    in property <int> editing-row: -1;
+    // Whether the headings group by month rather than by week. Week is the
+    // default (§1-3), and this is not a setting -- it is which way you are
+    // looking at the folder right now.
+    in property <bool> month-grouping;
+    // ---- the in-grid expansion (task3880, round20 §2-1 B案) ----
+    //
+    // Which tile is drawn large, or -1. Task3490 held these three on the
+    // `ClipLabels` global to keep its own diff to three files; they belong on
+    // the pane, and `app.slint` forwards them like every other `clips-*`.
+    //
+    // Raised by a single click on a tile since task3890, and closed by the
+    // same click, by a click on another tile, or by Esc. A tile index, not an
+    // entry index: Rust maps its own `Clips::expanded` through the filter on
+    // the way out (`clips.rs::render`), so what arrives here is a row of the
+    // grid actually on screen.
+    in property <int> expanded-row: -1;
+    // How many grid lines the placement uses, footprint included
+    // (`ui_state::clips::line_count`). Pushed from Rust rather than derived
+    // from the last tile: with a footprint the last tile usually is not on the
+    // bottom line -- it fills a hole beside the expanded one -- and a
+    // `content-height` counted from it would refuse to scroll to the bottom.
+    in property <int> grid-lines: 0;
+    // ---- the selection (t260916-5568) ----
+    //
+    // Whether a marquee is being dragged. Rust decides it: a press on a tile
+    // becomes one only past `clips_ui::DRAG_THRESHOLD`, and below it the
+    // release is a click. Rust sees the press, every move and the release, so
+    // telling the two apart does not depend on the order slint fires
+    // `pointer-event(up)` and `clicked` in.
+    in property <bool> marquee-active;
+    // How many clips are selected: Esc clears a selection (after the menu and
+    // the expansion have had their turn), and Delete only speaks with one.
+    in property <int> selection-count;
+    // The selection bar (t260927-bb89): 「N 件を選択 · X」 and 「N 件を削除」.
+    in property <string> selection-text;
+    in property <string> delete-label;
+
+    // Tile index, straight from the `for` -- no hit test. The history screen
+    // needs one because a marquee drag has to resolve arbitrary coordinates to
+    // rows; a grid whose tiles each own their TouchArea already knows.
+    callback row-menu-requested(int);
+    callback row-edit-requested(int);
+    callback menu-selected(int);
+    callback menu-dismissed();
+    callback grouping-changed(bool);
+    // A press that should expand or collapse one tile (task3880). Raised by
+    // the tile's own click, by the raised copy's, and by Esc (task3890); the
+    // state transition behind it is `ui_state::clips::toggle_expanded`, which
+    // is why all three send a tile index rather than each deciding the new
+    // state for itself.
+    callback row-expand-toggled(int);
+    // Every keystroke: the filter runs in Rust over the list already in hand,
+    // so there is nothing to debounce (task3820).
+    callback search-changed(string);
+    // No row index: Rust already holds which file the editor was opened on and
+    // commits to *that*, because a re-scan can have moved the tile underneath
+    // (task2990). An index sent from here would only be a second, staler
+    // answer to a question already settled.
+    callback comment-committed(string);
+    callback edit-cancelled();
+    // (first row, count) for the tiles on screen, so the worker fetches a
+    // comment and a thumbnail for those and not for all of them (the same rule
+    // task188 set for session thumbnails).
+    callback visible-range-changed(int, int);
+    // The press, the drag and the release behind the selection
+    // (t260916-5568). Coordinates are the grid's own content space -- the one
+    // `ui_state::clips::tile_rects` builds its rectangles in -- and the cell
+    // size goes along because it is derived here, from the pane's width.
+    //   tile-pressed(tile, x, y, cell-width, cell-height, shift, ctrl)
+    //   ground-pressed(x, y, cell-width, cell-height, shift, ctrl)
+    callback tile-pressed(int, length, length, length, length, bool, bool);
+    callback ground-pressed(length, length, length, length, bool, bool);
+    callback pointer-moved(length, length);
+    callback pointer-released();
+    // A completed hold: the bar's delete, or Delete held down. No dialog
+    // follows (t260927-bb89, DS ClipsScreen).
+    callback delete-selected();
+    callback select-all();
+    callback selection-cleared();
+    callback open-folder();
+
+    // Delete held down: the selection bar's hold runs while it is (DS
+    // ClipsScreen). A property because the bar sits in an `if` the key scope
+    // cannot reach into.
+    property <bool> delete-held;
+
+    // Where the marquee started and where the pointer is now, in the grid's
+    // content space. Written by whichever TouchArea took the press.
+    property <length> marquee-x0;
+    property <length> marquee-y0;
+    property <length> marquee-x1;
+    property <length> marquee-y1;
+
+    // The content face in app.slint is this pane's ground (t260916-ebdb), so
+    // the pane paints none of its own -- which is what lets the pane itself
+    // be a `FocusScope` (t260928-d9b4): an ancestor of every control on it,
+    // so a key a focused control rejects still reaches the shortcuts below.
+    // Never a Tab stop and never focused by a click: `keys` is the pane's
+    // focus, this only hears what bubbles up.
+    focus-on-click: false;
+    focus-on-tab-navigation: false;
+
+    // §1-3: four columns, unchanged (the expansion is the user's 2026-09-27
+    // ruling). The DS ClipsScreen's 16 between cards, and 32 at the sides --
+    // `.lb-page__scroll`'s 24 plus `.lb-clipgroup`'s 8, which also lines the
+    // cards up with the top row's count. `ui_state::clips::GRID_*` mirrors
+    // these for the marquee's hit test.
+    property <int> columns: 4;
+    property <length> gap-x: 16px;
+    property <length> gap-y: 16px;
+    property <length> pad: 32px;
+    // Zero, because the air under the 週/月 bar now belongs to the *bar*: it
+    // was the grid's own top padding, which scrolls away with the grid -- so
+    // scrolling brought the first row up flush against a bar that does not
+    // move. The mock spells the same total out as 10px on `.cliptools` plus
+    // 2px on `.cliptiles`; this is 12px on the toolbar and none here, which
+    // keeps the toolbar's geometry identical to the history screen's.
+    property <length> pad-top: 0px;
+    // 24px under the last row (`.cliptiles`'s `padding: 2px 12px 24px`): a grid
+    // whose last line ends exactly at the panel's bottom edge reads as cut
+    // off (the footer that used to sit there left the pane in t260919-ee8c).
+    property <length> pad-bottom: 24px;
+    // The extra 12px is `AppScroll.lane`, which the scroll view reserves for
+    // its own track whether or not there is anything to scroll. Deriving the
+    // cell width from the pane's width without taking it off puts the fourth
+    // column's right edge exactly on the track (`sessions.slint:124` subtracts
+    // the same three twelves for the same reason).
+    property <length> cell-width:
+        (root.width - 2 * root.pad - 12px - (root.columns - 1) * root.gap-x) / root.columns;
+    property <length> cell-height: Math.max(0px, root.cell-width * 9 / 16);
+    property <length> row-pitch: root.cell-height + root.gap-y;
+    // A heading is a 16px line with 12 under it (DS `.lb-clipgroup__title`),
+    // and a group ends 24 under its last card (`.lb-clipgroup`'s bottom
+    // padding) where the grid's own gap is 16 -- so 8 more above the line.
+    property <length> heading-height: 16px;
+    property <length> heading-pitch: 8px + root.heading-height + 12px;
+
+    // The last tile carries the heading total: its heading-offset is how many
+    // groups there are, and it is in the last group whatever the footprint
+    // does to the lines.
+    property <int> last: Math.max(0, root.rows.length - 1);
+    // The line total is *not* read off it any more (task3880). It used to be
+    // `rows[last].line + 1`, which holds only while every tile is 1x1: with a
+    // footprint the last tile fills a hole beside the expanded one and sits
+    // above the bottom line, so that expression undercounts and the grid stops
+    // scrolling short of its own end. `line-count` now comes from Rust, where
+    // `ui_state::clips::line_count` takes the max of `line + span`.
+    property <int> line-count: root.grid-lines;
+    property <int> heading-count:
+        root.rows.length == 0 ? 0 : root.rows[root.last].heading-offset;
+    property <length> content-height: root.pad-top + root.pad-bottom
+        + root.line-count * root.row-pitch - (root.line-count > 0 ? root.gap-y : 0px)
+        + root.heading-count * root.heading-pitch;
+
+    // How long a cell takes to reach its new rectangle (task3880). 260ms is
+    // round20 §1's 0.26s; the animation itself is the whole of B案's motion,
+    // since `place` moves every neighbour and the cells simply follow.
+    //
+    // A property rather than a literal on each `animate`, because the duration
+    // has to be *zero* when nothing is expanding. A cell's x and width come off
+    // `root.cell-width`, which comes off the pane's width, so an unconditional
+    // tween would make the tiles slide on every window resize -- which snaps
+    // and must keep snapping. This is the trap task3490 recorded: it does not
+    // need an expansion to show up, so "the placement is identical" alone
+    // would not have caught it. The 週/月 switch used to snap too; since
+    // t260928-80e7 (user ruling 2026-09-28) it slides, through `regrouping`.
+    //
+    // `settling` is what keeps the *collapse* animated. On the frame
+    // `expanded-row` goes back to -1 the placement has already changed, so a
+    // gate reading `expanded-row >= 0` alone would evaluate 0ms and snap the
+    // tiles home while the raised copy was still fading -- round20 §1 asks for
+    // 「閉じるときは逆再生」. `settling` runs 1 -> 0 across the same 260ms, so
+    // it is still non-zero on that frame and 0 whenever nothing has been
+    // expanded at all.
+    property <float> settling: root.expanded-row >= 0 ? 1 : 0;
+    animate settling {
+        duration: Tokens.reduce-motion ? 0ms : 260ms;
+        easing: ease-in-out;
+    }
+    // `settling` is read *first* on purpose. With `expanded-row >= 0` in front,
+    // `||` short-circuits and nothing reads `settling` while a tile is open --
+    // and in that shape the collapse snapped on the real app (2026-09-13:
+    // 1091px -> 706px inside 36ms, while the expansion took the full 260ms),
+    // which is exactly what task3880 added `settling` to prevent. Reading it on
+    // every evaluation of `tween` fixes it (same measurement: ~280ms). The
+    // *why* is consistent with what t260916-fa85 pinned down for the raised
+    // copy below (KNOWLEDGE.md, "an animated property nobody reads"): an
+    // `animate`d binding that is not read when its input changes stays armed
+    // from that first change and skips every later one, so read for the first
+    // time on the collapse it compares against the value it last computed
+    // (still 0, from before the open), sees no change, and answers 0.
+    //
+    // Asymmetric since 2026-09-13 (user ruling「立ち上がり速く、終わり長く」):
+    // opening takes `expand-ms` and closing `collapse-ms`, because a collapse
+    // that takes as long as the expansion reads as the app being slow to let
+    // go. `settling` stays read first for the reason above -- the `||` is what
+    // keeps it evaluated on every frame, and the inner branch only picks the
+    // number.
+    property <duration> tween:
+        (root.settling > 0.001 || root.expanded-row >= 0)
+            ? (root.expanded-row >= 0 ? root.expand-ms : root.collapse-ms)
+            : (root.regrouping ? root.expand-ms : 0ms);
+    // True from a 週/月 press until its slide is over (t260928-80e7), so the
+    // tiles move to their new places on the expansion's own duration and
+    // curve. `expand-ms` is 0 under reduce-motion, so that still snaps. A
+    // resize inside the window slides too -- 300ms, accepted.
+    property <bool> regrouping;
+    regroup-timer := Timer {
+        interval: root.expand-ms + 60ms;
+        running: root.regrouping;
+        triggered => {
+            root.regrouping = false;
+        }
+    }
+    // The tile the last left press landed on and the rectangle it was drawn
+    // at that moment -- its cell's *animated* geometry, so a tile still on
+    // its way home from a neighbour's collapse opens from where it is seen
+    // (t260928-80e7). A click expands on the *release*, so the front copy
+    // below already sits here by then, and its expansion animates from it.
+    property <int> press-row: -1;
+    property <length> press-x;
+    property <length> press-y;
+    property <length> press-w;
+    property <length> press-h;
+    // Written only to make the press handler *read* the front copy's
+    // geometry. Nothing is drawn between a press and its release, so without
+    // the read the front copy's bindings would first be evaluated on the
+    // release's frame -- already with the expansion's tween, starting from
+    // whichever tile it showed last (measured: the opening tile flew in from
+    // the previous one's place). This is fa85's unread-`animate` trap.
+    property <length> front-probe;
+    // A tile pressed while another is open (t260929-7037). On the release that
+    // switches the expansion, the front copy is first put on the pressed
+    // tile's rectangle with a 0ms tween (`front-snap` true, read), then let go
+    // to the new expansion (false, read again) -- all inside the release
+    // handler, so no frame is drawn in between and the new tile grows from
+    // where it was seen, not from the old tile's expanded rectangle.
+    property <bool> front-snap;
+    property <int> release-from: -1;
+    // Zero under reduce-motion (DS ClipsScreen: 動きを減らす設定では、広がる・
+    // 並び直す動きを省いて切り替える), as are `settling` and both `raise`s.
+    property <duration> expand-ms: Tokens.reduce-motion ? 0ms : 300ms;
+    // Shorter than `settling`'s own 260ms on purpose: the gate has to outlast
+    // the motion it is gating, or `tween` would fall to 0ms mid-collapse and
+    // snap the tiles home.
+    property <duration> collapse-ms: Tokens.reduce-motion ? 0ms : 220ms;
+
+    // Which tile the pointer is over -- latched, rather than read straight off
+    // a TouchArea's `has-hover` (2026-09-13 report: the tile's name band blinks
+    // out when the tile is expanded, and again the instant it collapses).
+    //
+    // slint settles `has-hover` on pointer *movement*. An expansion swaps the
+    // tile the cursor is over for a different element (the raised copy below,
+    // and back again on the collapse) without the pointer moving a pixel, so on
+    // each swap the element that is now under the cursor reads false and the
+    // band disappears until the mouse is jogged. The latch survives the swap:
+    // an entry claims it, and a leave only clears it while nothing is moving --
+    // so the last thing the pointer actually moved onto keeps the band, and the
+    // next real movement corrects it.
+    //
+    // t260916-0a58 widened it from "the tiles moved" to "something was put
+    // under the pointer", because three things do that and all three read as a
+    // leave: the context menu (mounted with its corner *on* the press point),
+    // the comment editor (it replaces the pencil the pointer is on), and the
+    // pencil itself (a TouchArea above the tile's own). The release branch in
+    // each tile's `touch` below carries the terms. What that costs is a latch
+    // nothing can release: after a menu episode the tile's `has-hover` is
+    // false, so walking off the tile fires no `changed` at all -- hence the
+    // ground TouchArea inside the scroll view doubles as the "the pointer is on
+    // bare ground now" sensor, and is kept mounted while this latch holds.
+    property <int> hover-row: -1;
+    // The gate on that clearing: true from the press until the collapse has
+    // finished settling, which is exactly when a `has-hover` going false says
+    // "the tiles moved" rather than "the pointer left".
+    property <bool> tile-motion: root.settling > 0.001 || root.expanded-row >= 0;
+    // The curve every tile moves on is `Motion.easing-reveal`, read by the two
+    // `animate` blocks below (the third, `animate raise`, is `ease-in-out` and
+    // stays there). It lives in `tokens.slint` since t260914-f561: `easing` is
+    // a property type, at the cost of one build warning because it cannot be
+    // exposed as public API -- see the comment on the token.
+    //
+    // It is the mock's own curve, already carrying the titlebar slide
+    // (`app.slint`, round22 / task4370). `ease-in-out` (cubic-bezier(0.42, 0,
+    // 0.58, 1)) is what read as 「気持ちよくない」: it spends its first third
+    // barely moving, so the grid looks like it is deciding whether to answer
+    // the press. This one is off the mark at once and takes its time at the
+    // end instead.
+
+    // Where the right-click menu goes, in the pane's own coordinates. Written
+    // by the tile that was pressed, because only inside the scroll view are the
+    // two offsets that turn a tile-local press into pane coordinates in scope
+    // (task1400 learned this on the history screen).
+    property <length> menu-px;
+    property <length> menu-py;
+
+    // The keyboard's card (t260928-d9b4): which card the arrows are on, and
+    // whether its ring shows -- only once a key has put it there, never after
+    // a click (the DS's `:focus-visible`). `key-menu-ask` counts Shift+F10
+    // presses for `grid`, the one place `scroll` is in scope to place the
+    // menu; `menu-keyboard` hands the menu the focus when it came from there.
+    property <int> focus-row: 0;
+    property <bool> card-kb;
+    property <int> key-menu-ask;
+    property <bool> menu-keyboard;
+
+    // The menu closing takes its focus to the grave (slint hands it to
+    // nobody): claim it back, as the editor's close does.
+    property <bool> menu-up: root.menu-open;
+    changed menu-up => {
+        if (!self.menu-up) {
+            root.menu-keyboard = false;
+            keys.focus();
+        }
+    }
+
+    // Every key the pane answers to, whoever holds the focus on it: `keys`
+    // rejects them all and they bubble here, as does whatever a focused
+    // control does not take for itself (t260928-d9b4).
+    key-pressed(event) => {
+        // The menu first, as on the history screen: Esc is the one key
+        // every menu answers to. The order t260916-5568 needs is menu,
+        // editor, expansion, selection -- and the editor needs no branch
+        // here, because `InlineEdit` holds the focus and answers Esc
+        // itself.
+        if (event.text == Key.Escape && root.menu-open) {
+            root.menu-dismissed();
+            return EventResult.accept;
+        }
+        if (event.text == Key.Escape && root.expanded-row >= 0) {
+            root.row-expand-toggled(root.expanded-row);
+            return EventResult.accept;
+        }
+        if (event.text == Key.Escape && root.selection-count > 0) {
+            root.selection-cleared();
+            return EventResult.accept;
+        }
+        // Before the transport keys below, which have no use for either.
+        // Delete is the selection bar's delete held down (DS ClipsScreen):
+        // the fill runs while the key is down and completes at 1 s; let go
+        // early and the hint shows. `repeat` never arrives on Windows, so
+        // the press and the release are the pair (KNOWLEDGE
+        // 「`KeyEvent.repeat`」).
+        if (event.text == Key.Delete) {
+            if (root.selection-count > 0) {
+                root.delete-held = true;
+            }
+            return EventResult.accept;
+        }
+        // F2 writes the comment (t260928-6080 F3), as the menu's key
+        // column says: the expanded clip, else the focused card
+        // (t260928-d9b4), else the tile under the pointer, else -- Rust's answer to -1 -- the one selected clip.
+        if (event.text == Key.F2) {
+            root.row-edit-requested(root.expanded-row >= 0 ? root.expanded-row
+                : root.card-kb && keys.has-focus ? Math.clamp(root.focus-row, 0, root.last)
+                : root.hover-row);
+            return EventResult.accept;
+        }
+        // Every clip the search leaves on the grid.
+        if (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+            root.select-all();
+            return EventResult.accept;
+        }
+        // The focused card (t260928-d9b4, DS ClipCard `:focus-within`): with
+        // `keys` holding the focus and nothing expanded, the arrows walk the
+        // grid, Enter opens the card and plays it, Shift+F10 is its menu.
+        // Only while `keys` itself has the focus -- a control elsewhere on
+        // the pane keeps its arrows for the pane's other uses.
+        if (keys.has-focus && root.expanded-row < 0 && root.rows.length > 0) {
+            // ponytail: up / down step a whole row of four by index, so a
+            // month heading's short row lands on the nearest card rather
+            // than straight above; ask Rust for the neighbour if that grates.
+            if (event.text == Key.LeftArrow || event.text == Key.RightArrow
+                || event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                if (root.card-kb) {
+                    root.focus-row = Math.clamp(root.focus-row + (
+                        event.text == Key.LeftArrow ? -1
+                        : event.text == Key.RightArrow ? 1
+                        : event.text == Key.UpArrow ? -root.columns : root.columns),
+                        0, root.last);
+                } else {
+                    root.focus-row = Math.clamp(root.focus-row, 0, root.last);
+                }
+                root.card-kb = true;
+                return EventResult.accept;
+            }
+            if (root.card-kb && event.text == Key.Return) {
+                root.row-expand-toggled(Math.clamp(root.focus-row, 0, root.last));
+                return EventResult.accept;
+            }
+            if (root.card-kb && event.text == Key.F10 && event.modifiers.shift) {
+                root.focus-row = Math.clamp(root.focus-row, 0, root.last);
+                root.key-menu-ask += 1;
+                return EventResult.accept;
+            }
+        }
+        // Esc from a control on the pane with nothing left to close: the
+        // focus comes back to the pane (t260928-d9b4).
+        if (event.text == Key.Escape && !keys.has-focus) {
+            keys.focus();
+            return EventResult.accept;
+        }
+        // The transport keys, after Esc so closing the expansion keeps
+        // priority (t260916-956e). Rust answers false for a key it has no
+        // operation for, and that press stays rejected -- the gate on
+        // `ClipVm.open` is the engine's own, so nothing is asked while the
+        // grid is merely scrolled.
+        if (ClipVm.open && ClipVm.key-pressed-cb(event.text)) {
+            return EventResult.accept;
+        }
+        return EventResult.reject;
+    }
+    key-released(event) => {
+        if (event.text == Key.Delete) {
+            root.delete-held = false;
+            return EventResult.accept;
+        }
+        return EventResult.reject;
+    }
+
+    // Esc closes the expansion (round20 §3, task3890). A `FocusScope` because
+    // only a focusable element is handed key events and this pane had none.
+    //
+    // Declared first of all, so it sits under every other hit target: a
+    // `FocusScope` with `focus-on-click` *consumes* the press it focuses on,
+    // so mounted any later it would eat the ground TouchArea's menu dismiss
+    // below. Down here it takes the presses nothing else wanted, which is
+    // exactly when the key focus should come back to the pane.
+    //
+    // It writes nothing itself -- `expanded-row` is an `in` property -- so Esc
+    // leaves through the same `row-expand-toggled` a click does, and
+    // `ui_state::clips::toggle_expanded` collapses it because the row pressed
+    // equals the row already open. One scope for the pane, not one per
+    // purpose: task3520 needs Esc for the same expansion and extends this
+    // rather than adding a second.
+    //
+    // Since t260928-d9b4 the keys are answered on the pane root above, which
+    // is an ancestor of every control on the pane; this stays the pane's
+    // focus and the grid's one Tab stop, and rejects every key up to it.
+    keys := FocusScope {
+        width: 100%;
+        height: 100%;
+
+        // Tab arriving puts the ring on the card. A press on a tile or the
+        // ground takes it off (the pointer handlers below); the focus coming
+        // back after the editor or the menu closes leaves it as it was.
+        focus-gained(reason) => {
+            if (reason == FocusReason.tab-navigation) {
+                root.card-kb = true;
+            }
+        }
+
+        // Nothing else hands a fresh FocusScope the key focus, and the pane is
+        // instantiated on every entry to クリップ (`app.slint` gates it on
+        // `active-pane`), so without this Esc stays dead until the user
+        // happens to click the background.
+        init => {
+            self.focus();
+        }
+
+        // The comment editor takes the focus and slint hands it to nobody when
+        // the field tears down -- task4190 measured that exact hole on the
+        // review pane, where the shortcuts stayed dead until the stage was
+        // clicked. The false edge only: on the true edge this would take back
+        // the focus the field has just claimed and blur it in the same frame.
+        property <bool> editing: root.editing-row >= 0;
+        changed editing => {
+            if (!self.editing) {
+                self.focus();
+            }
+        }
+
+        // And claim it whenever something actually expands, because the search
+        // field keeps the focus once it has been typed in: a `TouchArea` takes
+        // none, so clicking a tile would leave the field holding it, and
+        // slint's `TextInput` swallows Esc rather than letting an ancestor see
+        // it (`controls.slint`'s task4130 note measured exactly that). True
+        // edge only -- on the collapse there is nothing left for Esc to close.
+        property <bool> expanded: root.expanded-row >= 0;
+        changed expanded => {
+            if (self.expanded) {
+                self.focus();
+            }
+        }
+
+        // Leaving the pane with the key down must not leave a hold running.
+        changed has-focus => {
+            if (!self.has-focus) {
+                root.delete-held = false;
+            }
+        }
+    }
+
+    // Declared under everything but the key scope above, so only the bare
+    // ground between the controls falls through to here and closes the menu -- and, since
+    // task3430, ends an open comment edit as well. Both on the same area
+    // because both are "the click landed somewhere that is not this popup /
+    // this field"; the gate carries both so no hit target sits here when
+    // neither is up.
+    //
+    // task3990: the `editing-row` half is kept because presses still reach it
+    // under `app.slint`'s overlay. The overlay's hole is the comment field's
+    // window rect; once the grid is scrolled (it scrolls under an open editor)
+    // part of that rect lies outside `scroll`, where the `Flickable` does not
+    // pass the press to the field, so it falls through to the toolbar's bare
+    // ground and lands here.
+    if root.menu-open || root.editing-row >= 0 || root.expanded-row >= 0: TouchArea {
+        width: 100%;
+        height: 100%;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                if (root.menu-open) {
+                    root.menu-dismissed();
+                }
+                if (root.editing-row >= 0) {
+                    root.edit-cancelled();
+                }
+                // The collapse only when the press was not already spoken for:
+                // a click that closes a menu or ends an edit has said what it
+                // came to say, and taking the expansion down with it would
+                // make one click do two things (user ruling 2026-09-13:
+                // 「領域外をクリックしたら拡大を戻す」).
+                if (!root.menu-open && root.editing-row < 0 && root.expanded-row >= 0) {
+                    root.row-expand-toggled(root.expanded-row);
+                }
+            }
+        }
+    }
+
+    VerticalLayout {
+        // ---------- top row (DS `.lb-page__head`) ----------
+        // 64 tall at least, 16 / 32 / 12 inside, as the history's. Search
+        // (comments) at the left edge, then 週 / 月 and 「フォルダを開く」 at
+        // the right (t260929-7037, user ruling 2026-09-29). No screen title:
+        // the rail already says where you are (DS ClipsScreen).
+        //
+        // Gated on `empty-text`, not on `filter-empty-text`: a folder with no
+        // clips has nothing to search, but a query that matched none of them
+        // has to keep the field that holds the query.
+        if root.empty-text == "": HorizontalLayout {
+            min-height: 64px;
+            padding-top: 16px;
+            padding-left: 32px;
+            padding-right: 32px;
+            padding-bottom: 12px;
+            spacing: Tokens.space-4;
+
+            // Still matches the file name too (task3820), though the card
+            // no longer shows it: a hint to search by, not to look at.
+            SearchField {
+                horizontal-stretch: 0;
+                width: 240px;
+                y: (parent.height - self.height) / 2;
+                placeholder: ClipLabels.search-placeholder;
+                search-changed(text) => {
+                    root.search-changed(text);
+                }
+            }
+
+            // Where the count stood until t260928-80e7; the stretch keeps
+            // the rest right-aligned.
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            HorizontalLayout {
+                spacing: Tokens.space-2;
+
+                // md 32, the history's top row (t260928-6080 F21; overrides
+                // bb89's decision 8, sm, by the user's ruling).
+                SegmentTabs {
+                    y: (parent.height - self.height) / 2;
+                    size: ControlSize.md;
+                    segments: [ClipLabels.week, ClipLabels.month];
+                    selected: root.month-grouping ? 1 : 0;
+                    selected-changed(index) => {
+                        // Before the callback: Rust answers it by re-placing
+                        // the rows, and `tween` has to read true by then.
+                        root.regrouping = true;
+                        regroup-timer.restart();
+                        root.grouping-changed(index == 1);
+                    }
+                }
+
+                Btn {
+                    y: (parent.height - self.height) / 2;
+                    size: ControlSize.md;
+                    label: ClipLabels.open-folder;
+                    icon: Icons.folder-open;
+                    clicked => {
+                        root.open-folder();
+                    }
+                }
+            }
+        }
+
+        // `.clipempty` (`mock/liveback-mock.html:719-724`, 1106-1109) is what
+        // `EmptyState` now draws for everyone (task3800), so there is nothing
+        // to opt into here any more -- task3330's `plain` flag is gone with
+        // the frame it used to turn off. One line and no `sub`: the mock's
+        // clips entry is a title alone.
+        //
+        // The top row goes with the clips, but 「フォルダを開く」 stays, as
+        // the empty state's action (t260928-6080 F20). A folder that would
+        // not read takes the error glyph, its reason as `sub` (F9).
+        if root.empty-text != "": EmptyState {
+            vertical-stretch: 1;
+            icon: ClipLabels.list-failed ? Icons.error : Icons.clips;
+            label: root.empty-text;
+            sub: ClipLabels.empty-sub;
+            action: ClipLabels.open-folder;
+            action-icon: Icons.folder-open;
+            action-clicked => {
+                root.open-folder();
+            }
+        }
+
+        // The search found nothing (task3820). Same `EmptyState` as above --
+        // task3800's whole point -- with the picker's own choice of glyph for
+        // this case (`empty-is-filter` in `picker_modal.slint`): the magnifier
+        // says "your query", where the clip glyph would say "your folder" and
+        // send the user to look for missing files. No `action` to clear it
+        // with, because unlike the picker's modal the field itself is still on
+        // screen right above this, with its own X on it.
+        if root.empty-text == "" && root.filter-empty-text != "": EmptyState {
+            vertical-stretch: 1;
+            icon: Icons.search;
+            label: root.filter-empty-text;
+        }
+
+        if root.empty-text == "" && root.filter-empty-text == "": scroll := AppScroll {
+            vertical-stretch: 1;
+            // Flush against the client's right edge -- see `settings.slint`
+            // (task4320). `cell-width` above keeps its bare 12px for the same
+            // reason the history grid does: the tiles stay where they are, and
+            // only the padding that trailed them narrows.
+            right-inset: Tokens.resize-band-inset;
+            viewport-width: scroll.visible-width;
+            viewport-height: Math.max(root.content-height, scroll.visible-height);
+            // Only for the nudge below (task3880), which is why it carries the
+            // same gate the cells do: at rest `tween` is 0ms, so the wheel
+            // still moves the view on the frame it is turned -- `AppScroll`'s
+            // own handler exists to keep that immediate, and an unconditional
+            // animation here would put slint's easing back on top of it.
+            //
+            // Handed to `AppScroll` rather than written here as an `animate
+            // viewport-y`, which is what this was until 2026-09-13 and never
+            // fired: `viewport-y` on this element is a two-way alias (`<=>`) of
+            // the inner Flickable's, and an `animate` on the alias is not the
+            // animation of the property it names. Measured: the heading was
+            // already at its final y 60ms after the press while the tile was a
+            // third of the way open.
+            scroll-tween: root.tween;
+
+            grid := Rectangle {
+                x: 0;
+                y: 0;
+                width: scroll.visible-width;
+                height: Math.max(root.content-height, scroll.visible-height);
+                background: transparent;
+                // The mock's `.cliptiles { overflow-x: hidden }` (design's
+                // 2026-09-08 note): nothing here is meant to reach past the
+                // grid's own width, and a tile that did on some rounding of
+                // `cell-width` would arm a horizontal scrollbar over a grid
+                // whose columns are fixed at four.
+                clip: true;
+
+                // The window, reported so the detail queue can follow it.
+                // `viewport-y` goes negative as the view scrolls down, hence
+                // the sign.
+                //
+                // Headings push tiles *down*, so dividing the scroll offset by
+                // the tile pitch alone overestimates which line is at the top
+                // and the queue would miss rows the user is looking at. The
+                // whole heading budget comes off first, which makes this a
+                // lower bound: it over-fetches by at most one screenful of
+                // groups, and never under-fetches.
+                property <int> first-line: Math.max(
+                    0,
+                    Math.floor(
+                        (-scroll.viewport-y - root.pad-top
+                            - root.heading-count * root.heading-pitch) / root.row-pitch),
+                );
+                property <int> first-visible: self.first-line * root.columns;
+                property <int> visible-count:
+                    (Math.ceil(scroll.visible-height / root.row-pitch) + 2) * root.columns;
+
+                // ---- scrolling an expansion into view (task3880) ----
+                //
+                // This arithmetic is in `.slint` rather than in
+                // `src/ui_state/`, which is where the README puts UI logic,
+                // and the exception is deliberate: every input is a pixel Rust
+                // does not have. `cell-height` is derived here from the pane's
+                // own width (see `cell-width` above), and Rust knows only
+                // `COLUMNS` -- so answering this in `ui_state` would mean
+                // pushing the pane's geometry out and the answer back, three
+                // hops for a sum. What Rust *can* be tested on is the
+                // placement, and it is (`ui_state::clips::place`).
+                //
+                // On `grid` rather than on `root`, because `scroll` lives
+                // inside an `if` and slint gives no name to an element in one
+                // from outside (task3800 measured the same wall). `expanded`
+                // is the pane's property mirrored here so `changed` can be
+                // declared where `scroll` is in scope.
+                property <int> expanded: root.expanded-row;
+                // Clamped so the model is never indexed out of range while
+                // nothing is expanded; the handler below is what gates on the
+                // real value.
+                property <int> expanded-row-safe: Math.clamp(root.expanded-row, 0, root.last);
+                property <length> expanded-top: root.pad-top
+                    + root.rows[grid.expanded-row-safe].line * root.row-pitch
+                    + root.rows[grid.expanded-row-safe].heading-offset * root.heading-pitch;
+                property <length> expanded-bottom: grid.expanded-top
+                    + root.rows[grid.expanded-row-safe].span * root.cell-height
+                    + (root.rows[grid.expanded-row-safe].span - 1) * root.gap-y;
+
+                changed expanded => {
+                    if (grid.expanded >= 0) {
+                        // Below the window: send the view down until the two
+                        // bottom edges meet. `viewport-y` goes negative as the
+                        // view scrolls down, hence the signs.
+                        if (grid.expanded-bottom > -scroll.viewport-y + scroll.visible-height) {
+                            scroll.viewport-y = Math.clamp(
+                                scroll.visible-height - grid.expanded-bottom,
+                                -scroll.overflow, 0px);
+                        }
+                        // Above the window: bring it back until the two top
+                        // edges meet. Second, so that a footprint taller than
+                        // the viewport ends up showing its head rather than
+                        // its feet -- after the send above, the only way to
+                        // still be over the top edge.
+                        if (grid.expanded-top < -scroll.viewport-y) {
+                            scroll.viewport-y = Math.clamp(
+                                -grid.expanded-top, -scroll.overflow, 0px);
+                        }
+                        // A tile already inside the window is not moved: no
+                        // assignment on either path leaves `viewport-y` alone.
+                    }
+                    // And neither is a *collapse* (`expanded` back to -1),
+                    // which is round20 §3's 「閉じたときグリッドのスクロール
+                    // 位置は保つ」.
+                }
+
+                // The keyboard's card, kept on screen as the arrows move it
+                // (t260928-d9b4); the same two edges as the expansion above.
+                property <int> key-card: root.card-kb && root.expanded-row < 0 ? root.focus-row : -1;
+                property <int> key-card-safe: Math.clamp(root.focus-row, 0, root.last);
+                property <length> key-card-top: root.pad-top
+                    + root.rows[grid.key-card-safe].line * root.row-pitch
+                    + root.rows[grid.key-card-safe].heading-offset * root.heading-pitch;
+                changed key-card => {
+                    if (grid.key-card >= 0) {
+                        if (grid.key-card-top + root.cell-height + 4px > -scroll.viewport-y + scroll.visible-height) {
+                            scroll.viewport-y = Math.clamp(
+                                scroll.visible-height - grid.key-card-top - root.cell-height - 4px,
+                                -scroll.overflow, 0px);
+                        }
+                        if (grid.key-card-top - 4px < -scroll.viewport-y) {
+                            scroll.viewport-y = Math.clamp(
+                                -grid.key-card-top + 4px, -scroll.overflow, 0px);
+                        }
+                    }
+                }
+                // Shift+F10: the card's menu, grown from its 「…」 corner.
+                property <int> key-menu-ask: root.key-menu-ask;
+                changed key-menu-ask => {
+                    root.menu-px = scroll.x + scroll.viewport-x + root.pad
+                        + root.rows[grid.key-card-safe].column * (root.cell-width + root.gap-x)
+                        + root.cell-width - 20px;
+                    root.menu-py = scroll.y + scroll.viewport-y + grid.key-card-top + 36px;
+                    root.menu-keyboard = true;
+                    root.row-menu-requested(grid.key-card-safe);
+                }
+
+                changed first-visible => {
+                    root.visible-range-changed(self.first-visible, self.visible-count);
+                }
+                changed visible-count => {
+                    root.visible-range-changed(self.first-visible, self.visible-count);
+                }
+
+                // The menu's second closer, inside the scroll view. The pane's
+                // own ground TouchArea (declared at the top of `root`) never
+                // sees these presses: `AppScroll` is a Flickable and swallows
+                // the pointer events over its own area, so only the chrome
+                // *outside* it reached that one. This covers the rest -- the
+                // grid's padding, the gaps between tiles, the date headings,
+                // and the empty space below the last row.
+                //
+                // Declared *before* the `for` below, so it sits underneath
+                // every tile: a press on a tile still goes to that tile's own
+                // `touch`, which keeps the left-down close and the right-down
+                // re-target working exactly as before.
+                //
+                // Gated on there being a menu to close or an edit to end, so no
+                // extra hit target sits over the grid the rest of the time
+                // (the `|| editing-row` half is task3430's). The
+                // `|| hover-row >= 0` half is t260916-0a58's: this area is also
+                // the hover sensor below, and the latch it corrects outlives
+                // every one of the three states above. It means the area is
+                // mounted whenever the pointer is over a tile, and that its own
+                // `changed has-hover` unmounts it when nothing else holds it --
+                // slint re-evaluates an `if` on the next update pass, not inside
+                // the callback, the same way choosing a `ContextMenu` row
+                // destroys the row's own TouchArea.
+                //
+                // Always mounted since t260916-5568: this is also where a
+                // marquee starts from empty space, and a press cannot land on
+                // an `if` that is not there. So the self-unmount described
+                // above no longer happens. Nothing depended on it: the `changed
+                // has-hover` sensor below reads the same whether the area was
+                // just mounted or has been there all along, and a bare-ground
+                // press with nothing open, which used to fall through to
+                // nothing, now clears the selection or starts a marquee.
+                ground := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    // "The pointer is on bare ground now" (t260916-0a58). A
+                    // tile cannot report its own leave once a menu or an editor
+                    // has taken its `has-hover`: the flag is already false, so
+                    // the pointer walking off fires no `changed` and the latch
+                    // would sit on a tile the pointer has left. This area is
+                    // under every tile and covers what is not one -- the grid's
+                    // padding, the gaps, the headings, the space below the last
+                    // row -- so its hover going *true* is that leave, reported
+                    // by the only element that can see it.
+                    //
+                    // Gated on `tile-motion` for the same reason the tiles' own
+                    // release is: while the grid animates, tiles slide out from
+                    // under a pointer that never moved, and the ground taking
+                    // the hover then says the tiles moved, not that the pointer
+                    // left (the 2026-09-13 latch this all belongs to).
+                    changed has-hover => {
+                        if (self.has-hover && !root.tile-motion) {
+                            root.hover-row = -1;
+                        }
+                    }
+                    // `pointer-event`, not `clicked`: `clicked` is left-button
+                    // only and fires on release, while the menu should go on
+                    // the press -- the same reasoning as the pane's ground
+                    // TouchArea and the `surface` one in `sessions.slint`.
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down) {
+                            if (root.menu-open) {
+                                root.menu-dismissed();
+                            }
+                            // No edit-cancel here (task3990): inside the grid
+                            // an open field's hole is the field's own
+                            // `TouchArea`, and outside it the `Flickable`
+                            // intercepts. The overlay ends the edit.
+                            // Same one-thing-per-click rule as the pane's own
+                            // ground area above. This is the copy that matters
+                            // for 「領域外をクリックしたら拡大を戻す」: the
+                            // Flickable swallows every press over the grid, so
+                            // the gaps, the headings and the space below the
+                            // last tile only ever reach *this* one.
+                            if (!root.menu-open && root.editing-row < 0 && root.expanded-row >= 0) {
+                                root.row-expand-toggled(root.expanded-row);
+                            }
+                        }
+                        // The selection (t260916-5568): a left press on bare
+                        // ground clears it -- unless Ctrl adds to it -- and
+                        // arms a marquee from this point.
+                        if (event.kind == PointerEventKind.down
+                            && event.button == PointerEventButton.left) {
+                            keys.focus();
+                            root.card-kb = false;
+                            root.marquee-x0 = ground.mouse-x;
+                            root.marquee-y0 = ground.mouse-y;
+                            root.marquee-x1 = ground.mouse-x;
+                            root.marquee-y1 = ground.mouse-y;
+                            root.ground-pressed(
+                                ground.mouse-x,
+                                ground.mouse-y,
+                                root.cell-width,
+                                root.cell-height,
+                                event.modifiers.shift,
+                                event.modifiers.control,
+                            );
+                        }
+                        if ((event.kind == PointerEventKind.up
+                                && event.button == PointerEventButton.left)
+                            || event.kind == PointerEventKind.cancel) {
+                            root.pointer-released();
+                        }
+                    }
+                    moved => {
+                        if (ground.pressed) {
+                            root.marquee-x1 = ground.mouse-x;
+                            root.marquee-y1 = ground.mouse-y;
+                            root.pointer-moved(ground.mouse-x, ground.mouse-y);
+                        }
+                    }
+                }
+
+                // ponytail: every tile is instantiated, unlike the history grid
+                // (task181), because a clip folder is a handful of finished
+                // files rather than the hundreds of sessions a ring buffer
+                // accumulates. Port the windowed `for` from `sessions.slint` if
+                // a folder ever gets big enough to feel it.
+                for entry[index] in root.rows: cell := Rectangle {
+                    // The two running counts Rust computed: grid lines above,
+                    // and headings above.
+                    property <length> top: root.pad-top
+                        + entry.line * root.row-pitch
+                        + entry.heading-offset * root.heading-pitch;
+
+                    x: root.pad + entry.column * (root.cell-width + root.gap-x);
+                    y: cell.top;
+                    // task3880: a footprint of `span` cells plus the gaps it
+                    // swallows, so an expanded tile lands exactly on the grid
+                    // it displaced. `span` is 1 on every tile but the expanded
+                    // one.
+                    width: entry.span * root.cell-width + (entry.span - 1) * root.gap-x;
+                    height: entry.span * root.cell-height + (entry.span - 1) * root.gap-y;
+                    animate x, y, width, height {
+                        duration: root.tween;
+                        easing: Motion.easing-reveal;
+                    }
+
+                    // z-order, task3490's trap. A `for` draws later cells over
+                    // earlier ones, so an expanded tile with a low index would
+                    // grow *underneath* the tiles after it. `z: index ==
+                    // root.expanded-row ? 1 : 0` is what this wants to be and
+                    // slint 1.17 refuses it (`'z' must be an number literal`),
+                    // so the raised copy in the second `for` below is what
+                    // actually draws the expanded tile. This one keeps the
+                    // geometry, the TouchArea and the heading.
+                    //
+                    // 1 while the expansion is on *and* for the 260ms of the
+                    // collapse, so the hand-back to this cell happens after the
+                    // motion rather than at its start -- a plain flag would
+                    // drop the shrinking tile back under its neighbours for the
+                    // whole way down.
+                    property <float> raise: index == root.expanded-row ? 1 : 0;
+                    animate raise {
+                        duration: Tokens.reduce-motion ? 0ms : 260ms;
+                        easing: ease-in-out;
+                    }
+
+                    // Declared *before* the tile, so it sits underneath it. A
+                    // TouchArea on top would swallow every click aimed at the
+                    // open comment editor and at the pencil. The layer is
+                    // unchanged by task3890; what changed is the second half of
+                    // the reason -- a press that leaked through used to open
+                    // the mp4 in an external player, whose handle was then what
+                    // the pending `write_comment` failed on (task3360), and
+                    // nothing on this tile opens a player any more. (Same
+                    // layering `sessions_tile.slint` uses.)
+                    touch := TouchArea {
+                        mouse-cursor: pointer;
+                        // Claims the latch on the way in; releases it on the way
+                        // out only when the pointer really left -- see
+                        // `hover-row` at the top of the pane. The three terms
+                        // past `tile-motion` are t260916-0a58's three thieves:
+                        // the menu mounted on the press point, the comment
+                        // editor, and the pencil above this area. Each takes
+                        // `has-hover` while the pointer stands still, and slint
+                        // settles it back on movement only -- so releasing here
+                        // would blank the name band and the pencil until the
+                        // mouse was jogged, which is exactly the 2026-09-16
+                        // report.
+                        // The storyboard's pointer (task3540). Not while
+                        // pressed (that is a click or a marquee) and never
+                        // while a tile is expanded -- raised copy and cell
+                        // would both claim the hover.
+                        changed mouse-x => {
+                            if (self.has-hover && !self.pressed && root.expanded-row < 0
+                                    && !root.tile-motion) {
+                                ClipVm.scrub-moved(index, self.mouse-x, self.width);
+                            }
+                        }
+                        changed has-hover => {
+                            if (!self.has-hover) {
+                                ClipVm.scrub-left(index);
+                            }
+                            if (self.has-hover) {
+                                root.hover-row = index;
+                            } else if (!root.tile-motion && !root.menu-open
+                                    && root.editing-row < 0 && !tile.pen-hovered
+                                    && !tile.more-hovered && root.hover-row == index) {
+                                root.hover-row = -1;
+                            }
+                        }
+                        // A single click expands the tile -- which *is*
+                        // playing it: in B案 the expanded tile is the playback
+                        // surface (task3520 puts the stage in it). Round20
+                        // design response §6, user ruling 2026-09-08:
+                        // 「シングルクリックで再生に変えてよい」, with no
+                        // second meaning (no selection) on the same click --
+                        // which t260916-5568 keeps for the *plain* click.
+                        // Ctrl and Shift select instead, and a press that
+                        // travels past the drag threshold is a marquee.
+                        //
+                        // No `clicked` any more: it fires on any press and
+                        // release inside the area however far the pointer went
+                        // in between, so a marquee that began and ended on this
+                        // tile would also have expanded it. Rust sees the
+                        // press, every move and the release, and decides which
+                        // of the three it was. The right button still opens the
+                        // menu on its press, below.
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down
+                                && event.button == PointerEventButton.left
+                                && root.menu-open) {
+                                root.menu-dismissed();
+                            }
+                            if (event.kind == PointerEventKind.down
+                                && event.button == PointerEventButton.right) {
+                                // Before the callback, not after: Rust answers
+                                // it by setting `menu-open`, which is what
+                                // instantiates the menu that reads these.
+                                keys.focus();
+                                root.menu-px = scroll.x + scroll.viewport-x + cell.x + touch.mouse-x;
+                                root.menu-py = scroll.y + scroll.viewport-y + cell.y + touch.mouse-y;
+                                root.row-menu-requested(index);
+                            }
+                            if (event.kind == PointerEventKind.down
+                                && event.button == PointerEventButton.left) {
+                                keys.focus();
+                                root.card-kb = false;
+                                root.press-row = index;
+                                root.press-x = cell.x;
+                                root.press-y = cell.y;
+                                root.press-w = cell.width;
+                                root.press-h = cell.height;
+                                root.front-probe = front.x + front.y + front.width + front.height;
+                                root.marquee-x0 = cell.x + touch.mouse-x;
+                                root.marquee-y0 = cell.y + touch.mouse-y;
+                                root.marquee-x1 = root.marquee-x0;
+                                root.marquee-y1 = root.marquee-y0;
+                                root.tile-pressed(
+                                    index,
+                                    root.marquee-x0,
+                                    root.marquee-y0,
+                                    root.cell-width,
+                                    root.cell-height,
+                                    event.modifiers.shift,
+                                    event.modifiers.control,
+                                );
+                            }
+                            if ((event.kind == PointerEventKind.up
+                                    && event.button == PointerEventButton.left)
+                                || event.kind == PointerEventKind.cancel) {
+                                root.release-from = root.expanded-row;
+                                root.pointer-released();
+                                // Rust answered synchronously: an open tile
+                                // switched to this one grows from its cell.
+                                if (root.release-from >= 0 && root.expanded-row >= 0
+                                    && root.expanded-row != root.release-from) {
+                                    root.front-snap = true;
+                                    root.front-probe = front.x + front.y + front.width + front.height;
+                                    root.front-snap = false;
+                                    root.front-probe = front.x + front.y + front.width + front.height;
+                                }
+                            }
+                        }
+                        // A pressed TouchArea keeps the pointer: moves keep
+                        // arriving after it leaves the tile, with `mouse-x/y`
+                        // outside the tile's own bounds -- which `cell.x/y`
+                        // turn back into grid coordinates.
+                        moved => {
+                            if (touch.pressed) {
+                                root.marquee-x1 = cell.x + touch.mouse-x;
+                                root.marquee-y1 = cell.y + touch.mouse-y;
+                                root.pointer-moved(root.marquee-x1, root.marquee-y1);
+                            }
+                        }
+                    }
+
+                    // The keyboard's card (t260928-d9b4): the DS focus ring,
+                    // 2px off the card's `radius-md`.
+                    if root.card-kb && keys.has-focus && root.focus-row == index
+                        && root.expanded-row < 0: Rectangle {
+                        x: -4px;
+                        y: -4px;
+                        width: parent.width + 8px;
+                        height: parent.height + 8px;
+                        border-radius: Tokens.radius-md + 4px;
+                        border-width: 2px;
+                        border-color: Tokens.focus;
+                    }
+
+                    tile := ClipTile {
+                        y: tile.rise;
+                        width: 100%;
+                        height: 100%;
+                        entering: root.entering;
+                        enter-order: index;
+                        // Handed over to the front copy for as long as the
+                        // expansion lasts and to the raised copy for its
+                        // collapse (task3880, t260928-80e7). All three are
+                        // bound to the same geometry, so the swap is
+                        // invisible. `expanded-row` hides it on the opening
+                        // frame, before `raise` has left 0; `raise` is read
+                        // first so its animation keeps being read.
+                        visible: cell.raise < 0.001 && index != root.expanded-row;
+                        entry: entry;
+                        // While a menu is open the latch holds for the menu's own
+                        // tile only (t260928-5a01): the pointer reaches the
+                        // menu across whatever card lies under it, and that
+                        // card, latched on the way, kept its hover look --
+                        // shade, 「…」 and pencil -- for as long as the menu
+                        // stayed up (bb89's `menu-delete-hold-500ms.png`: the
+                        // card under the delete row, not the menu's own).
+                        hovered: touch.has-hover || tile.pen-hovered || tile.more-hovered
+                            || (root.card-kb && keys.has-focus && root.focus-row == index && root.expanded-row < 0)
+                            || (root.hover-row == index
+                                && (!root.menu-open || root.menu-row == index));
+                        // The shade drops the latch for every tile while a menu
+                        // is open, the menu's own included: the pointer is then
+                        // on the menu, not the card. After it closes the latch
+                        // brings the shade back under a pointer that stood still.
+                        shaded: touch.has-hover || tile.pen-hovered || tile.more-hovered
+                            || (root.hover-row == index && !root.menu-open);
+                        // Never while this tile is the one expanded: the
+                        // playback surface draws the comment band then, with the
+                        // same `InlineEdit` in it (task3520). `visible: false`
+                        // does not stop an element from being *built*, so two
+                        // fields would mount, both call `begin-edit()`, and both
+                        // push their rect into `InlineEditVm` -- which is what
+                        // the window overlay (task3640) cuts its hole from. The
+                        // handover is clean at the edges: on the collapse
+                        // `expanded-row` is already -1 while `ClipVm.open` has
+                        // gone false, so exactly one of the two is ever mounted.
+                        editing: root.editing-row == index && index != root.expanded-row;
+                        highlighted: root.menu-row == index || root.editing-row == index;
+                        selected: entry.selected;
+                        scrubbing: ClipVm.scrub-row == index && root.expanded-row < 0;
+                        scrub-ratio: touch.mouse-x / Math.max(1px, touch.width);
+                        scrub-frame: ClipVm.scrub-frame;
+                        scrub-has-frame: ClipVm.scrub-has-frame;
+                        edit-requested => {
+                            root.row-edit-requested(index);
+                        }
+                        comment-committed(value) => {
+                            root.comment-committed(value);
+                        }
+                        edit-cancelled => {
+                            root.edit-cancelled();
+                        }
+                        // The 「…」 opens the right-click menu under itself
+                        // (DS ClipCard), in pane coordinates as the right
+                        // press does.
+                        more-requested(mx, my) => {
+                            keys.focus();
+                            root.menu-px = scroll.x + scroll.viewport-x + cell.x + mx;
+                            root.menu-py = scroll.y + scroll.viewport-y + cell.y + tile.y + my;
+                            root.row-menu-requested(index);
+                        }
+                    }
+
+                    // The pencil claims the latch too (t260916-0a58). It is a
+                    // TouchArea above `touch`, so reaching it takes the body's
+                    // `has-hover` away, and clicking it then destroys the pencil
+                    // and resets `pen-hovered` (`ClipTile`'s `changed editing`,
+                    // which has to, or the flag would stick true forever) --
+                    // leaving `hovered` with nothing true and the band gone for
+                    // the whole edit and after it. Latched here instead, the
+                    // tile the pencil belongs to keeps it through the editor's
+                    // mount and unmount.
+                    //
+                    // Mirrored into a property of `cell` because `changed` is
+                    // declared on the element that owns the property, and
+                    // `pen-hovered` is the child's. Claim only, no release: a
+                    // pen exit always lands the pointer on something that owns
+                    // the latch -- this tile's body, another tile, or the ground
+                    // sensor above -- and `!tile.pen-hovered` in `touch`'s
+                    // release is what makes the body-to-pencil crossing
+                    // independent of which of the two `changed has-hover`
+                    // handlers slint happens to run first.
+                    // The 「…」 (t260927-bb89) is a second such control.
+                    property <bool> pen-hover: tile.pen-hovered || tile.more-hovered;
+                    changed pen-hover => {
+                        if (cell.pen-hover) {
+                            root.hover-row = index;
+                        }
+                    }
+
+                    // The group's date heading, drawn in the gap this tile's
+                    // own `heading-offset` opened above it (DS
+                    // `.lb-clipgroup__title`: 11px 600, 0.06em, `ink-muted`,
+                    // no rule), 12 above the cards.
+                    if entry.heading != "": Text {
+                        x: 0;
+                        y: -root.heading-height - 12px;
+                        width: grid.width - 2 * root.pad;
+                        height: root.heading-height;
+                        text: entry.heading;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        font-size: Tokens.type-overline-size;
+                        font-weight: Tokens.type-overline-weight;
+                        letter-spacing: 0.66px;
+                        color: Tokens.ink-muted;
+                    }
+                }
+
+                // The raised copy (task3880, from task3490's prototype). A
+                // second `for` over the same model, declared after the first,
+                // so *every* one of its cells draws over *every* cell of the
+                // grid -- which is the whole point, and the only ordering
+                // slint gives without the dynamic `z` it refuses. Only a
+                // collapsing row is ever visible in it (see the last paragraph).
+                //
+                // `visible`-gated rather than `if`-gated on purpose: an `if`
+                // would instantiate the element at its final geometry and the
+                // tile would appear at full size with no animation at all.
+                // Mounted, it animates the same four numbers the cell below it
+                // does, from the collapsed rectangle to the expanded one.
+                //
+                // The gate sits on `body`, *inside* this element, and never on
+                // this element itself (t260916-fa85). A `visible: false`
+                // element is lowered to a zero-size clip whose children the
+                // renderer never visits, so nothing reads their geometry --
+                // and an `animate`d property nobody reads does not follow its
+                // input: it stays armed from the first unread change, with that
+                // change's timestamp, and ignores every later one. Opening tile
+                // 2 moves tile 3's hidden copy; opening tile 3 seconds later
+                // read it for the first time, found its 300ms long over, and
+                // drew it at full size at once (or sliding in from wherever it
+                // was last drawn) -- the 2026-09-16 report. This element has no
+                // fill, so the renderer reads its x/y/width/height every frame
+                // it draws and the copy tracks its tile while hidden, the way
+                // the cell below it does. Measured in the standalone harness
+                // under `.agents/tasks/evidence/t260916-fa85-expand-from-tile/`.
+                //
+                // Since t260928-80e7 this draws *collapsing* tiles only. The
+                // open one is the front copy after it: among these copies the
+                // order is the index, so a low-index tile opened while a
+                // high-index one was still closing grew underneath it.
+                for entry[index] in root.rows: raised := Rectangle {
+                    property <float> raise: index == root.expanded-row ? 1 : 0;
+                    animate raise {
+                        duration: Tokens.reduce-motion ? 0ms : 260ms;
+                        easing: ease-in-out;
+                    }
+
+                    property <length> top: root.pad-top
+                        + entry.line * root.row-pitch
+                        + entry.heading-offset * root.heading-pitch;
+
+                    x: root.pad + entry.column * (root.cell-width + root.gap-x);
+                    y: raised.top;
+                    width: entry.span * root.cell-width + (entry.span - 1) * root.gap-x;
+                    height: entry.span * root.cell-height + (entry.span - 1) * root.gap-y;
+                    animate x, y, width, height {
+                        duration: root.tween;
+                        easing: Motion.easing-reveal;
+                    }
+
+                    // Everything the copy draws or hit-tests, behind the gate
+                    // the comment above the `for` explains.
+                    body := Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        // `raise` first, for the reason `tween` reads
+                        // `settling` first.
+                        visible: raised.raise >= 0.001 && index != root.expanded-row;
+
+                        // Its own, because the cell underneath is covered while
+                        // this is up -- so this is the TouchArea a press on a
+                        // *collapsing* tile reaches. The expanded tile's is the
+                        // front copy's `ftouch` since t260928-80e7 (task3890).
+                        //
+                        // It used to collapse on `clicked`. Task3520 took that off:
+                        // the expanded tile **is** the playback surface, so a click
+                        // on it is play/pause and the three ways out are Esc, the
+                        // click outside, and the ✕ on the surface itself (round20
+                        // §2-3). What stays is the hover latch -- `ClipTile.hovered`
+                        // below reads it, and it is what keeps the name band up
+                        // while the tiles are moving.
+                        rtouch := TouchArea {
+                            mouse-cursor: pointer;
+                            // The same latch as the cell's below it: this copy is
+                            // what the pointer is really over while the tile is
+                            // open.
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    root.hover-row = index;
+                                } else if (!root.tile-motion && root.hover-row == index) {
+                                    root.hover-row = -1;
+                                }
+                            }
+                        }
+
+                        ClipTile {
+                            width: 100%;
+                            height: 100%;
+                            entry: entry;
+                            // `expanded-row` and not only `rtouch.has-hover`
+                            // (2026-09-13 report: 「アニメーション中、左上のタイトルが
+                            // 隠れる、マウスを少しでも動かすとまた現れる」). The press
+                            // lands on the *cell's* TouchArea, this copy is a
+                            // different element, and slint settles `has-hover` on
+                            // pointer movement -- so through the whole expansion
+                            // this one reads false under a cursor that never left
+                            // the tile, and the name band blinks out and back. The
+                            // expanded tile simply keeps its name up.
+                            hovered: rtouch.has-hover || index == root.expanded-row
+                                || root.hover-row == index;
+                            editing: false;
+                            highlighted: false;
+                        }
+
+                    }
+                }
+
+                // The front copy (t260928-80e7): the open tile and only it,
+                // declared after every other tile layer so it draws over all
+                // of them -- a raised copy still collapsing included, whatever
+                // the two indices. One element rather than a `for`, so it
+                // points at a different row per opening. While nothing is open
+                // it sits, with a 0ms tween, where the pressed tile is drawn
+                // (`press-x` and the rest), so by the release that expands the
+                // tile the expansion animates from there, not from the last
+                // row it showed (t260916-fa85's condition).
+                // Fill-less and always visible outside, `fbody` gated inside
+                // -- fa85 again, so the geometry is read every frame.
+                front := Rectangle {
+                    property <int> shown: root.expanded-row >= 0 ? root.expanded-row : root.press-row;
+                    property <ClipRow> entry: root.rows[Math.clamp(front.shown, 0, root.last)];
+
+                    x: root.expanded-row < 0 || root.front-snap ? root.press-x
+                        : root.pad + front.entry.column * (root.cell-width + root.gap-x);
+                    y: root.expanded-row < 0 || root.front-snap ? root.press-y
+                        : root.pad-top
+                            + front.entry.line * root.row-pitch
+                            + front.entry.heading-offset * root.heading-pitch;
+                    width: root.expanded-row < 0 || root.front-snap ? root.press-w
+                        : front.entry.span * root.cell-width + (front.entry.span - 1) * root.gap-x;
+                    height: root.expanded-row < 0 || root.front-snap ? root.press-h
+                        : front.entry.span * root.cell-height + (front.entry.span - 1) * root.gap-y;
+                    animate x, y, width, height {
+                        duration: root.expanded-row >= 0 && !root.front-snap ? root.tween : 0ms;
+                        easing: Motion.easing-reveal;
+                    }
+
+                    // Not `raise`-gated: visible on the opening's first frame,
+                    // gone on the collapse's first, where the raised copy of
+                    // the same row takes over at the same rectangle.
+                    fbody := Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        visible: root.expanded-row >= 0;
+
+                        // The raised copy's `rtouch`, moved up with the tile.
+                        ftouch := TouchArea {
+                            mouse-cursor: pointer;
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    root.hover-row = front.shown;
+                                } else if (!root.tile-motion && root.hover-row == front.shown) {
+                                    root.hover-row = -1;
+                                }
+                            }
+                        }
+
+                        ClipTile {
+                            width: 100%;
+                            height: 100%;
+                            entry: front.entry;
+                            // The expanded tile keeps its name up (the raised
+                            // copy's 2026-09-13 note).
+                            hovered: true;
+                            editing: false;
+                            highlighted: false;
+                        }
+
+                        // The playback surface (task3520), over the tile rather
+                        // than instead of it. Two things fall out of that order:
+                        // the thumbnail is what the expansion animates until the
+                        // first decoded frame arrives (`ClipStage` is transparent
+                        // until then), and the 220ms *collapse* -- during which
+                        // `ClipVm.open` is already false and this is gone -- shrinks
+                        // the tile, not a dead black rectangle.
+                        //
+                        // `ClipVm.row` is a tile index on the filtered grid, the
+                        // same number `expanded-row` and `front.shown` are; the
+                        // entry index behind it never leaves Rust
+                        // (`Clips::expanded`).
+                        //
+                        // An `if`, not a `visible:` gate, unlike this copy's
+                        // body: exactly one of these may exist, or it would ring
+                        // `stage-size-changed` twice and the engine would be
+                        // resampling to whichever answered last. (It lived in
+                        // the raised copy's `for` until t260928-80e7.)
+                        //
+                        // `!ClipVm.fullscreen` is the other half of that invariant
+                        // since t260916-8c14: full screen mounts a second copy at
+                        // the pane's root (below the `VerticalLayout`), and the two
+                        // gates are complementary on the same flag so exactly one
+                        // is ever up. `set_clip_fullscreen` writes the window and
+                        // the flag in one call, so the swap happens in one frame.
+                        if ClipVm.open && ClipVm.row == front.shown && !ClipVm.fullscreen: ClipStage {
+                            width: 100%;
+                            height: 100%;
+                            comment: front.entry.comment;
+                            add-comment: ClipLabels.add-comment;
+                            editing: root.editing-row == front.shown;
+                            edit-requested => {
+                                root.row-edit-requested(front.shown);
+                            }
+                            comment-committed(value) => {
+                                root.comment-committed(value);
+                            }
+                            edit-cancelled => {
+                                root.edit-cancelled();
+                            }
+                        }
+                    }
+                }
+
+                // ---------- marquee band (t260916-5568) ----------
+                // The history screen's band (`sessions.slint`, round7 §2-12):
+                // primary at 0.08 with a 1px edge at 0.55. After the raised
+                // copy so it draws over every tile, and with no TouchArea so it
+                // cannot take the drag it is drawing.
+                if root.marquee-active: Rectangle {
+                    x: Math.min(root.marquee-x0, root.marquee-x1);
+                    y: Math.min(root.marquee-y0, root.marquee-y1);
+                    width: Math.abs(root.marquee-x1 - root.marquee-x0);
+                    height: Math.abs(root.marquee-y1 - root.marquee-y0);
+                    background: Tokens.accent.with-alpha(0.08);
+                    border-width: 1px;
+                    border-color: Tokens.accent.with-alpha(0.55);
+                }
+            }
+        }
+
+        // ---------- the selection bar (DS `.lb-page__foot`) ----------
+        // Only while something is selected (DS ClipsScreen), the history's
+        // own bar and frame: 60 tall at least, 10 / 32 inside, a 1px `line`
+        // on top, `surface`.
+        if root.empty-text == "" && root.selection-count > 0: Rectangle {
+            min-height: 60px;
+            background: Tokens.surface;
+
+            // t260928-ce76: where the toast has to stay above while this bar
+            // (whose hold-to-delete is at the right end) is up.
+            property <length> abs-top: self.absolute-position.y;
+            init => {
+                ClipVm.foot-top = self.abs-top;
+            }
+            changed abs-top => {
+                ClipVm.foot-top = self.abs-top;
+            }
+
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Tokens.line;
+            }
+
+            HorizontalLayout {
+                padding-top: 10px;
+                padding-bottom: 10px;
+                padding-left: 32px;
+                padding-right: 32px;
+
+                SelectionBar {
+                    count: ClipLabels.selection-count;
+                    text: root.selection-text;
+                    clear-label: ClipLabels.clear-selection;
+                    discard-label: root.delete-label;
+                    hold-hint: ClipLabels.hold-to-delete;
+                    key-held: root.delete-held;
+                    clear => {
+                        root.selection-cleared();
+                    }
+                    discard => {
+                        root.delete-held = false;
+                        root.delete-selected();
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- the full screen playback surface (t260916-8c14) ----------
+    //
+    // Full screen takes the rail and the title bar with it (`app.slint`'s
+    // `any-fullscreen`) but nothing in `app.slint` reaches inside a pane, so
+    // until this existed the picture stayed the 3-column tile it was in the
+    // grid -- other tiles to its left and ~300px of nothing under it
+    // (root/3520's `Verification` item 11). The user's 2026-09-16 ruling was
+    // (b): full screen fills the pane.
+    //
+    // Mounted **here**, at the pane's root, rather than anywhere inside the
+    // grid: the tile lives under `scroll := AppScroll` -> `grid := Rectangle`,
+    // and no size given to it there can cover the search row. (The count line
+    // left the pane for `app.slint` in t260919-ee8c.) Declaration order is the only z-order slint gives without the
+    // dynamic `z` it refuses, so this sits after the `VerticalLayout` (over the
+    // toolbar and the grid) and after the ground `TouchArea` at the
+    // top of this component -- which would otherwise eat the stage's presses
+    // and collapse the expansion.
+    //
+    // The grid keeps laying itself out underneath, untouched: leaving full
+    // screen re-mounts the in-grid copy at the tile it was already animating
+    // to, so the scroll position and the expansion survive.
+    //
+    // The row data comes from `root.rows[...]` rather than `ClipVm`, for both
+    // mounts: the in-grid copy gets it from the `for`'s `entry`, and this one
+    // indexes `root.rows` by hand. `ClipVm` carried `comment` / `date` /
+    // `editing` ports for a while and never grew a writer on the Rust side, so
+    // t260916-8c14 deleted them -- `clip_stage.slint`'s own header argues
+    // against making the global a second answer to "what is this clip's
+    // comment". `ClipVm.row` is an index on the filtered grid, the same space
+    // `root.rows` is in. The `>= 0` is not redundant with the clamp: without it
+    // a stale `-1` would read row 0's comment.
+    if ClipVm.open && ClipVm.fullscreen && ClipVm.row >= 0: ClipStage {
+        property <int> row-safe: Math.clamp(ClipVm.row, 0, root.last);
+
+        width: 100%;
+        height: 100%;
+        // Both overridden because both exist for the in-grid mount only. The
+        // radius is the tile's corner, and it would leave the pane's four
+        // corners showing `chrome-content`. The background is `ClipStage`'s
+        // own `Tokens.stage` (t260916-ebdb; it used to be transparent until the
+        // first frame) and is restated here so this mount never depends on it:
+        // there is no tile underneath -- only the grid, which the acceptance
+        // criterion says must not be visible.
+        border-radius: 0px;
+        background: Tokens.stage;
+        comment: root.rows[self.row-safe].comment;
+        add-comment: ClipLabels.add-comment;
+        editing: root.editing-row == ClipVm.row;
+        edit-requested => {
+            root.row-edit-requested(ClipVm.row);
+        }
+        comment-committed(value) => {
+            root.comment-committed(value);
+        }
+        edit-cancelled => {
+            root.edit-cancelled();
+        }
+    }
+
+    if root.menu-open: ContextMenu {
+        x: Math.clamp(root.menu-px, 4px, root.width - self.width - 4px);
+        y: Math.clamp(root.menu-py, 4px, root.height - self.height - 4px);
+        entries: root.menu-entries;
+        // 削除 is a hold entry (DS ClipCard): no dialog follows it.
+        hold-danger: true;
+        keyboard: root.menu-keyboard;
+        chosen(index) => {
+            root.menu-selected(index);
+        }
+    }
+
+}

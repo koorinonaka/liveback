@@ -1,0 +1,74 @@
+// The review panel's 音量 tab (t261003-83d3, DS VolumePanel, Version 23).
+//
+// The parts (rows, heading, add list) live in audio_tracks.slint since
+// t261003-82d6: the settings rows open the same list. This file hands them
+// the tab's values from `ReviewVm`.
+
+import { Tokens } from "tokens.slint";
+import { ReviewVm } from "review_vm.slint";
+import { AddTrackBox, TrackListHead, VolumeTrackRow } from "audio_tracks.slint";
+
+export component VolumePanel inherits VerticalLayout {
+    // (the mic's registration index, x, y of the pressed device name in
+    // window coordinates).
+    callback device-clicked(int, length, length);
+
+    spacing: Tokens.space-3;
+
+    TrackListHead {
+        title: ReviewVm.volume-overline;
+        add-label: ReviewVm.volume-add-label;
+        can-add: ReviewVm.volume-live;
+        add-clicked => {
+            ReviewVm.volume-adding = !ReviewVm.volume-adding;
+            if (ReviewVm.volume-adding) {
+                ReviewVm.volume-add-opened();
+            }
+        }
+    }
+
+    if ReviewVm.volume-adding && ReviewVm.volume-live: AddTrackBox {
+        running-label: ReviewVm.volume-running-label;
+        blocked-text: ReviewVm.volume-blocked-text;
+        candidates: ReviewVm.volume-candidates;
+        tray-note: ReviewVm.volume-tray-note;
+        mic-label: ReviewVm.volume-mic-label;
+        mic-added: ReviewVm.volume-mic-added;
+        added-label: ReviewVm.volume-added-label;
+        add-app(index) => {
+            ReviewVm.volume-add-app(index);
+        }
+        add-mic => {
+            ReviewVm.volume-add-mic();
+        }
+    }
+
+    VerticalLayout {
+        for row[index] in ReviewVm.volume-rows: VolumeTrackRow {
+            entry: row;
+            last: index == ReviewVm.volume-rows.length - 1;
+            // The Switches while recording only: a finished session lists
+            // what it recorded (2026-10-03 ruling). No 外す here -- the
+            // registration is edited in settings.
+            live: ReviewVm.volume-live;
+            open-settings-label: ReviewVm.volume-open-settings-label;
+            // The Menu opens upward from the name's top (DS: the mic is the
+            // last row, the panel's floor right under it).
+            device-clicked(x, top, bottom) => {
+                root.device-clicked(row.extra, x, top);
+            }
+            switch-toggled(extra) => {
+                ReviewVm.volume-switch-toggled(extra);
+            }
+            open-settings => {
+                ReviewVm.volume-open-settings();
+            }
+            mute-toggled(track) => {
+                ReviewVm.track-mute-toggled(track);
+            }
+            volume-changed(track, value) => {
+                ReviewVm.track-volume-changed(track, value);
+            }
+        }
+    }
+}

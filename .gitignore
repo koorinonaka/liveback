@@ -1,0 +1,31 @@
+# Logs
+logs
+*.log
+# evidence の un-ignore は .agents/.gitignore にある (task t260920-cfc0)。
+
+/target
+/target-*
+/binaries
+# run-release.bat's copy of the release exe, kept out of target\ (t260913-5937).
+/local-release
+# Installer output (task131).
+/installer/out
+recordings
+exports
+.claude/worktrees/
+*.mp4
+*.mkv
+*.webm
+*.wav
+*.local
+
+# Editor directories and files
+.vscode/*
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+skills-lock.json

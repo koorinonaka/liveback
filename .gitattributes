@@ -1,0 +1,7 @@
+# 公開スナップショットは `git archive` で作る (task t260920-7c98)。
+# ここに書いた行はそのツリーから落ちる -- `git clone` には効かない。
+.agents/ export-ignore
+.claude/ export-ignore
+.vscode/ export-ignore
+.github/ export-ignore
+CLAUDE.md export-ignore

@@ -1,0 +1,223 @@
+// What the window shows while a file is held over it (task870, round7 §2-13;
+// the DS's DropOverlay since t260928-1217).
+//
+// The drop itself has worked since task600, but nothing said so while the file
+// was still in the air: the window looked as inert as any other. This is the
+// missing half -- accept and refuse, told apart at a glance.
+//
+// Window-wide, like the drop it announces: a `.lvb` may land anywhere, so
+// restricting the mark to the review pane would only invite a miss.
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+
+// Set from `accept_dropped_sessions` in the bin; `active` false means no file
+// is over the window. Strings come from `ui_state::shell` -- nothing
+// user-visible is spelled here.
+export global DropVm {
+    in property <bool> active;
+    in property <bool> accepted;
+    // The dragged file's name, and only for one we can open (see `drop_hint`).
+    in property <string> name;
+    in property <string> accept-title;
+    in property <string> reject-title;
+    in property <string> reject-detail;
+}
+
+// A dashed rounded rectangle, written out as its dashes: slint's `Path` has no
+// dash array (so a dashed ring has to be spelled out as arcs), and this frame
+// follows the window's size, so a fixed path could not
+// have been stretched to fit either. The straight runs are dashed; each corner
+// is one solid quarter arc, about a dash and a half long at `radius-lg`.
+component DashedFrame {
+    in property <color> color;
+    property <length> thickness: 2px;
+    // Drawn on a 12-unit viewbox, so this is `radius-lg` exactly.
+    property <length> r: Tokens.radius-lg;
+    // 7 on 5 at 2px thick, which is about what a browser draws for
+    // `border: 2px dashed`.
+    property <length> dash: 7px;
+    property <length> period: 12px;
+    property <length> run-w: root.width - 2 * root.r;
+    property <length> run-h: root.height - 2 * root.r;
+
+    // The last dash of a run is clipped rather than dropped, so the frame keeps
+    // its full length whatever the window is sized to. Every edge spells out
+    // both coordinates: slint centres a child that names neither, which turns a
+    // missing `y: 0` into a dashed line across the middle of the window.
+    for i in Math.ceil(root.run-w / root.period): Rectangle {
+        x: root.r + i * root.period;
+        y: 0;
+        width: Math.min(root.dash, root.run-w - i * root.period);
+        height: root.thickness;
+        background: root.color;
+    }
+    for i in Math.ceil(root.run-w / root.period): Rectangle {
+        x: root.r + i * root.period;
+        y: root.height - root.thickness;
+        width: Math.min(root.dash, root.run-w - i * root.period);
+        height: root.thickness;
+        background: root.color;
+    }
+    for i in Math.ceil(root.run-h / root.period): Rectangle {
+        x: 0;
+        y: root.r + i * root.period;
+        width: root.thickness;
+        height: Math.min(root.dash, root.run-h - i * root.period);
+        background: root.color;
+    }
+    for i in Math.ceil(root.run-h / root.period): Rectangle {
+        x: root.width - root.thickness;
+        y: root.r + i * root.period;
+        width: root.thickness;
+        height: Math.min(root.dash, root.run-h - i * root.period);
+        background: root.color;
+    }
+
+    // The corners: radius 11 on the stroke's centre line, so the 2px stroke
+    // spans 10..12 and its outer edge meets the straight runs' outer edge.
+    Path {
+        x: 0;
+        y: 0;
+        width: root.r;
+        height: root.r;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: root.color;
+        stroke-width: root.thickness;
+        commands: "M 1 12 A 11 11 0 0 1 12 1";
+    }
+    Path {
+        x: root.width - root.r;
+        y: 0;
+        width: root.r;
+        height: root.r;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: root.color;
+        stroke-width: root.thickness;
+        commands: "M 0 1 A 11 11 0 0 1 11 12";
+    }
+    Path {
+        x: root.width - root.r;
+        y: root.height - root.r;
+        width: root.r;
+        height: root.r;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: root.color;
+        stroke-width: root.thickness;
+        commands: "M 11 0 A 11 11 0 0 1 0 11";
+    }
+    Path {
+        x: 0;
+        y: root.height - root.r;
+        width: root.r;
+        height: root.r;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: root.color;
+        stroke-width: root.thickness;
+        commands: "M 12 11 A 11 11 0 0 1 1 0";
+    }
+}
+
+export component DropOverlay inherits Rectangle {
+    // Both states dim the window; the frame and the card tell them apart.
+    background: Tokens.scrim;
+
+    // DS: in and out are `duration-fast` on opacity alone. Always mounted in
+    // app.slint (t260928-ce76), so both directions are the same binding
+    // changing. Hidden once faded out, and from the first frame of a fade in
+    // (`active` rather than opacity, which is still 0 at that instant): an
+    // invisible item takes no pointer input, though there is no TouchArea
+    // here to take it anyway (below).
+    opacity: DropVm.active ? 1 : 0;
+    visible: DropVm.active || self.opacity > 0;
+    animate opacity {
+        duration: Tokens.duration-fast;
+    }
+
+    // No TouchArea: nothing here is aimed at, and a scrim that swallowed clicks
+    // would take the window with it if a `HoveredFileCancelled` ever went
+    // missing.
+    DashedFrame {
+        x: 12px;
+        y: 12px;
+        width: parent.width - 24px;
+        height: parent.height - 24px;
+        // Never the accent for a refusal: telling the two apart before the
+        // drop is the whole job.
+        color: DropVm.accepted ? Tokens.accent : Tokens.danger;
+    }
+
+    // The words sit on an overlay card, never on the scrim itself: on the
+    // light scrim they would not read.
+    VerticalLayout {
+        alignment: center;
+
+        HorizontalLayout {
+            alignment: center;
+
+            Rectangle {
+                background: Tokens.overlay;
+                border-radius: Tokens.radius-lg;
+                border-width: 1px;
+                border-color: Tokens.line-strong;
+                drop-shadow-offset-y: Tokens.shadow-overlay-offset-y;
+                drop-shadow-blur: Tokens.shadow-overlay-blur;
+                drop-shadow-color: Tokens.shadow-overlay-color;
+
+                VerticalLayout {
+                    padding-top: 20px;
+                    padding-bottom: 20px;
+                    padding-left: 28px;
+                    padding-right: 28px;
+                    spacing: 8px;
+
+                    // A row of its own: a fixed-width child of a
+                    // VerticalLayout sits at its left edge.
+                    HorizontalLayout {
+                        alignment: center;
+
+                        AppIcon {
+                            commands: DropVm.accepted ? Icons.import : Icons.error;
+                            stroke-color: DropVm.accepted ? Tokens.accent-text : Tokens.danger;
+                            size: 32px;
+                        }
+                    }
+
+                    Text {
+                        horizontal-alignment: center;
+                        text: DropVm.accepted ? DropVm.accept-title : DropVm.reject-title;
+                        font-size: Tokens.type-title-3-size;
+                        font-weight: Tokens.type-title-3-weight;
+                        color: Tokens.ink;
+                    }
+
+                    // The name only while it is one we can open: a refusal is
+                    // about the file kind, so it says that instead. A long name
+                    // loses its head, not its tail (the DS's `direction: rtl`,
+                    // done the way `TailText` does it: the run keeps its full
+                    // width and slides left inside a clip).
+                    Rectangle {
+                        clip: true;
+                        min-width: Math.min(line.preferred-width, 300px);
+                        max-width: 300px;
+                        height: line.preferred-height;
+
+                        line := Text {
+                            width: Math.max(self.preferred-width, parent.width);
+                            x: Math.min(0px, parent.width - self.width);
+                            horizontal-alignment: center;
+                            text: DropVm.accepted ? DropVm.name : DropVm.reject-detail;
+                            font-family: DropVm.accepted ? Tokens.font-family-mono : Tokens.font-family;
+                            font-size: 12px;
+                            color: Tokens.ink-muted;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

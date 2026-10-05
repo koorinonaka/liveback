@@ -1,0 +1,6 @@
+[toolchain]
+# 具体バージョンに固定。`stable` のままだと stable が動いた日にコード変更ゼロで
+# CI の clippy が赤くなる(実際に起きた)。上げたいときはこの1行を変えるだけ。
+channel = "1.97.1"
+targets = ["x86_64-pc-windows-msvc"]
+components = ["rustfmt", "clippy"]
