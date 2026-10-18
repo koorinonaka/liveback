@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<script>
+/* Decide the language before the body is parsed, so an English desk never paints Japanese:
+   style.css hides [data-l] by html[lang]. A choice made with JA / EN wins over the browser. */
+(function () {
+  var l = null;
+  try { l = localStorage.getItem('lp-lang'); } catch (e) {}
+  if (l !== 'ja' && l !== 'en') l = /^ja/i.test(navigator.language || 'ja') ? 'ja' : 'en';
+  document.documentElement.lang = l;
+})();
+</script>
+<title>Liveback | いまを録りながら、さっきを見返す</title>
+<meta name="description" content="ゲームやアプリを登録しておけば、起動と同時に録画が始まる。録画を止めずに見返して、気に入った範囲だけを MP4 に書き出せる。Windows 11 向けの無料・オープンソースの録画アプリ。">
+<link rel="canonical" href="https://koorinonaka.github.io/liveback/">
+<meta name="theme-color" content="#0d0e11">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Liveback">
+<meta property="og:title" content="Liveback | いまを録りながら、さっきを見返す">
+<meta property="og:description" content="ゲームやアプリを登録しておけば、起動と同時に録画が始まる。録画を止めずに見返して、気に入った範囲だけを MP4 に書き出せる。">
+<meta property="og:url" content="https://koorinonaka.github.io/liveback/">
+<meta property="og:image" content="https://koorinonaka.github.io/liveback/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:locale" content="ja_JP">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Liveback | いまを録りながら、さっきを見返す">
+<meta name="twitter:image" content="https://koorinonaka.github.io/liveback/assets/og.png">
+<link rel="icon" type="image/svg+xml" href="assets/liveback-mark-small.svg">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+JP:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+<script src="main.js" defer></script>
+</head>
+<body>
+<div class="lp-page">
+<header class="lp-header" id="top">
+  <div class="lp-wrap lp-header__in">
+    <a class="lp-brand" href="./"><img src="assets/logo-dark.png" alt="Liveback" width="151" height="44"></a>
+    <div class="lp-header__end">
+      <div class="lp-lang" role="group" aria-label="Language / 言語">
+        <button type="button" data-lang-btn="ja" aria-pressed="true">JA</button>
+        <button type="button" data-lang-btn="en" aria-pressed="false">EN</button>
+      </div>
+      <a class="lp-ghlink" href="https://github.com/koorinonaka/liveback">GitHub <svg class="lp-icon lp-icon--16" viewBox="0 0 20 20" aria-hidden="true"><path d="M11.5 3.5h5v5"/><path d="M16.5 3.5l-7 7"/><path d="M14.25 11.5v3.25c0 .97-.78 1.75-1.75 1.75h-7.5c-.97 0-1.75-.78-1.75-1.75v-7.5c0-.97.78-1.75 1.75-1.75h3.25"/></svg></a>
+    </div>
+  </div>
+</header>
+<main class="lp-wrap">
+<div class="lp-tl">
+<div class="lp-rail" aria-hidden="true">
+  <span class="lp-rail__line"></span><span class="lp-rail__ticks"></span><span class="lp-rail__ticks--major"></span>
+  <span class="lp-rail__rew"></span>
+  <span class="lp-rail__live"></span><span class="lp-rail__livelab">LIVE</span>
+  <span class="lp-rail__head"><span class="lp-rail__knob"></span><span class="lp-rail__tc">−0:00.0</span></span>
+</div>
+<section class="lp-hero">
+  <div class="lp-reel" data-sound="off">
+    <video class="lp-reel__media" poster="assets/poster.jpg" width="960" height="540" muted autoplay loop playsinline preload="auto" aria-label="Liveback showreel"></video><script>/* One reel per visit: phones get the 640x360 30fps cut, English gets its own captions. The <video> has no src or <source> of its own, because Chrome starts fetching a <source> as soon as it is parsed. Without JS the poster stays. */window.lpReel=function(l){return "assets/showreel-"+(l==="en"?"en":"ja")+(matchMedia("(max-width: 767px)").matches?"-sm":"")+".mp4"};document.currentScript.previousElementSibling.src=lpReel(document.documentElement.lang);</script>
+    <script>
+    /* Runs while the page is parsed, before autoplay can start: reduced motion keeps the poster,
+       and an English page asks for the English reel straight away (main.js falls back on error). */
+    (function () {
+      var v = document.currentScript.previousElementSibling, r = v.parentElement;
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        v.removeAttribute('autoplay'); v.autoplay = false; v.preload = 'metadata';
+        r.setAttribute('data-motion', 'reduced');
+      }
+      if (document.documentElement.lang === 'en') v.src = v.getAttribute('data-src-en');
+    })();
+    </script>
+    <button type="button" class="lp-reel__btn" data-reel-sound aria-pressed="false"><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.25 8v4c0 .41.34.75.75.75h2.5L10 16V4L6.5 7.25H4c-.41 0-.75.34-.75.75z"/><path d="m13.25 8 3.75 4M17 8l-3.75 4"/></svg><span class="lp-reel__label"><span data-l="ja" lang="ja">音を出す</span><span data-l="en" lang="en">Sound on</span></span></button>
+    <button type="button" class="lp-reel__play" data-reel-play><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 4.75v10.5l8.75-5.25z"/></svg><span data-l="ja" lang="ja">再生</span><span data-l="en" lang="en">Play</span></button>
+  </div>
+  <div class="lp-hero__words">
+    <h1 class="lp-hero__title"><span data-l="ja" lang="ja">いまを録りながら、<wbr>さっきを見返す</span><span data-l="en" lang="en">Record now. Rewind to a moment ago.</span></h1>
+    <p class="lp-hero__sub"><span data-l="ja" lang="ja">ゲームやアプリを登録しておけば、起動と同時に録画が始まる。録画を止めずに見返して、気に入った範囲だけを MP4 に書き出せる。</span><span data-l="en" lang="en">Register a game or an app, and recording starts the moment it launches. Look back without stopping, and export just the part you like as an MP4.</span></p>
+    <div class="lp-hero__cta"><a class="lp-dl" href="https://github.com/koorinonaka/liveback/releases/latest" data-dl-state="fallback"><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5v8.75"/><path d="M6.75 9 10 12.25 13.25 9"/><path d="M3.75 11.5v3c0 1.1.9 2 2 2h8.5c1.1 0 2-.9 2-2v-3"/></svg><span class="lp-dl__text"><span class="lp-dl__label"><span data-l="ja" lang="ja">ダウンロード</span><span data-l="en" lang="en">Download</span></span><span class="lp-dl__meta">Windows 11 · x64</span></span></a><p class="lp-dl-info"><span data-l="ja" lang="ja"><a href="https://github.com/koorinonaka/liveback/releases/latest">すべてのリリース</a></span><span data-l="en" lang="en"><a href="https://github.com/koorinonaka/liveback/releases/latest">All releases</a></span></p></div>
+  </div>
+</section>
+<section class="lp-feat">
+  <div class="lp-headrow">
+    <span class="lp-mark" aria-hidden="true"><span class="lp-mark__pin"></span><span class="lp-mark__line"></span><span class="lp-mark__tc" data-tc></span></span>
+    <span class="lp-section__tc" data-tc aria-hidden="true"></span>
+    <h2 class="lp-feat__head"><span data-l="ja" lang="ja">主な機能</span><span data-l="en" lang="en">Features</span></h2>
+  </div>
+  <figure class="lp-fig"><img data-l="ja" src="assets/shots/review-ja.png" width="1680" height="940" alt="確認画面：録画をタイムラインで見返す" loading="lazy"><img data-l="en" src="assets/shots/review-en.png" width="1680" height="940" alt="Review: look back along the timeline" loading="lazy"></figure>
+  <p class="lp-fig__cap"><span data-l="ja" lang="ja">確認画面：録画をタイムラインで見返す</span><span data-l="en" lang="en">Review: look back along the timeline</span></p>
+  <ul class="lp-feat__list">
+    <li class="lp-feat__item"><span class="lp-mark" aria-hidden="true"><span class="lp-mark__pin"></span><span class="lp-mark__line"></span><span class="lp-mark__tc" data-tc></span></span><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6L3.5 7.3"/><path d="M3.5 3.5v3.8h3.8"/><path d="M10 6.5V10l3 1.75"/></svg><h3 class="lp-feat__title"><span data-l="ja" lang="ja">録画中でも見返せる</span><span data-l="en" lang="en">Look back while recording</span> <span class="lp-feat__tc" data-tc></span></h3><p class="lp-feat__body"><span data-l="ja" lang="ja">録画を止めずにタイムラインを巻き戻して、さっきの場面を確認できる。気になった瞬間は <kbd class="lp-kbd">Ctrl</kbd>+<kbd class="lp-kbd">Shift</kbd>+<kbd class="lp-kbd">R</kbd> でマーカーを付けておける。</span><span data-l="en" lang="en">Rewind the timeline without stopping the recording. Add a marker with <kbd class="lp-kbd">Ctrl</kbd>+<kbd class="lp-kbd">Shift</kbd>+<kbd class="lp-kbd">R</kbd>.</span></p></li>
+    <li class="lp-feat__item"><span class="lp-mark" aria-hidden="true"><span class="lp-mark__pin"></span><span class="lp-mark__line"></span><span class="lp-mark__tc" data-tc></span></span><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M11.1 2.75 4.9 10.6a.5.5 0 0 0 .4.8h4.2l-.6 5.85 6.2-7.85a.5.5 0 0 0-.4-.8h-4.2z"/></svg><h3 class="lp-feat__title"><span data-l="ja" lang="ja">あとは自動で録画</span><span data-l="en" lang="en">Auto-record</span> <span class="lp-feat__tc" data-tc></span></h3><p class="lp-feat__body"><span data-l="ja" lang="ja">登録したゲームやアプリが起動すると、同時に録画が始まる。ログイン時の起動とトレイ常駐で、録り忘れがない。</span><span data-l="en" lang="en">Recording starts when a registered game or app launches. Start at sign-in and stay in the tray, and nothing goes unrecorded.</span></p></li>
+    <li class="lp-feat__item"><span class="lp-mark" aria-hidden="true"><span class="lp-mark__pin"></span><span class="lp-mark__line"></span><span class="lp-mark__tc" data-tc></span></span><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 14a6.5 6.5 0 1 1 13 0"/><path d="M10 14l3.25-4.25"/><circle cx="10" cy="14" r="1.25" fill="currentColor" stroke="none"/></svg><h3 class="lp-feat__title"><span data-l="ja" lang="ja">軽量動作</span><span data-l="en" lang="en">Light on your PC</span> <span class="lp-feat__tc" data-tc></span></h3><p class="lp-feat__body"><span data-l="ja" lang="ja">GPU のハードウェアエンコーダで録画するので、ゲームや作業への負荷がほとんどかからない。</span><span data-l="en" lang="en">Records with your GPU’s hardware encoder, so your game or work barely feels it.</span></p></li>
+    <li class="lp-feat__item"><span class="lp-mark" aria-hidden="true"><span class="lp-mark__pin"></span><span class="lp-mark__line"></span><span class="lp-mark__tc" data-tc></span></span><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 12.25V3.5"/><path d="M6.75 6.75 10 3.5l3.25 3.25"/><path d="M3.75 11.5v3c0 1.1.9 2 2 2h8.5c1.1 0 2-.9 2-2v-3"/></svg><h3 class="lp-feat__title"><span data-l="ja" lang="ja">すぐ書き出す</span><span data-l="en" lang="en">Export right away</span> <span class="lp-feat__tc" data-tc></span></h3><p class="lp-feat__body"><span data-l="ja" lang="ja">見返して範囲を選べば、その部分だけを MP4 として書き出せる。</span><span data-l="en" lang="en">Select a range and export just that part as an MP4.</span></p></li>
+    <li class="lp-feat__item"><span class="lp-mark" aria-hidden="true"><span class="lp-mark__pin"></span><span class="lp-mark__line"></span><span class="lp-mark__tc" data-tc></span></span><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="3" fill="currentColor" stroke="none"/></svg><h3 class="lp-feat__title"><span data-l="ja" lang="ja">録画対象と残し方</span><span data-l="en" lang="en">What to record, how long to keep</span> <span class="lp-feat__tc" data-tc></span></h3><p class="lp-feat__body"><span data-l="ja" lang="ja">アプリ単位で録画できる（画面全体も可）。直近だけを残すリングバッファと、無制限録画を切り替えられる。</span><span data-l="en" lang="en">Record one app (or the entire screen). Switch between a ring buffer that keeps only the last stretch and unlimited recording.</span></p></li>
+    <li class="lp-feat__item"><span class="lp-mark" aria-hidden="true"><span class="lp-mark__pin"></span><span class="lp-mark__line"></span><span class="lp-mark__tc" data-tc></span></span><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.25 8v4c0 .41.34.75.75.75h2.5L10 16V4L6.5 7.25H4c-.41 0-.75.34-.75.75z"/><path d="M13 7.5a3.5 3.5 0 0 1 0 5"/><path d="M15.25 5.25a6.75 6.75 0 0 1 0 9.5"/></svg><h3 class="lp-feat__title"><span data-l="ja" lang="ja">録る音を選べる</span><span data-l="en" lang="en">Pick the sounds you record</span> <span class="lp-feat__tc" data-tc></span></h3><p class="lp-feat__body"><span data-l="ja" lang="ja">対象アプリの音に、選んだほかのアプリやマイクの音を足して録れる。全アプリの音にも切り替えられる。フレームレートは 30 / 60 / 120 fps から選べる。</span><span data-l="en" lang="en">Record the app’s sound and add other apps or your mic, or switch to every app. 30 / 60 / 120 fps.</span></p></li>
+  </ul>
+</section>
+<section class="lp-req">
+  <div class="lp-headrow"><span class="lp-mark" aria-hidden="true"><span class="lp-mark__pin"></span><span class="lp-mark__line"></span><span class="lp-mark__tc" data-tc></span></span><span class="lp-section__tc" data-tc aria-hidden="true"></span><h2 class="lp-req__head"><span data-l="ja" lang="ja">動作環境</span><span data-l="en" lang="en">Requirements</span></h2></div>
+  <dl class="lp-req__list">
+    <dt>OS</dt><dd><span data-l="ja" lang="ja">Windows 11 <span class="lp-num">22H2</span> 以降（x64）</span><span data-l="en" lang="en">Windows 11 <span class="lp-num">22H2</span> or later (x64)</span></dd>
+    <dt>GPU</dt><dd><span data-l="ja" lang="ja">ハードウェア H.264 エンコーダを持つ GPU（NVIDIA / AMD / Intel）</span><span data-l="en" lang="en">A GPU with a hardware H.264 encoder (NVIDIA / AMD / Intel)</span></dd>
+    <dt><span data-l="ja" lang="ja">ストレージ</span><span data-l="en" lang="en">Storage</span></dt><dd><span data-l="ja" lang="ja">録画先ドライブに <span class="lp-num">10 GiB</span> 以上の空き</span><span data-l="en" lang="en"><span class="lp-num">10 GiB</span> or more free on the recording drive</span></dd>
+    <dt><span data-l="ja" lang="ja">そのほか</span><span data-l="en" lang="en">Also</span></dt><dd><span data-l="ja" lang="ja">履歴の検索・コメント・保護、日本語 / English UI</span><span data-l="en" lang="en">Search, comments and protection in History; Japanese / English UI</span></dd>
+  </dl>
+</section>
+<div class="lp-golive"><a class="lp-golive__btn" href="#top" data-golive><svg class="lp-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 10h8.5"/><path d="M8.75 6.5 12.25 10l-3.5 3.5"/><path d="M16 4.5v11"/></svg><span data-l="ja" lang="ja">ライブへ戻る</span><span data-l="en" lang="en">Go live</span></a></div>
+</div>
+</main>
+<footer class="lp-footer">
+  <div class="lp-wrap lp-footer__in">
+    <span class="lp-footer__brand"><img src="assets/liveback-mark-small.svg" alt="" width="20" height="20">Liveback</span>
+    <ul class="lp-footer__links">
+      <li><a href="https://github.com/koorinonaka/liveback">GitHub <svg class="lp-icon lp-icon--16" viewBox="0 0 20 20" aria-hidden="true"><path d="M11.5 3.5h5v5"/><path d="M16.5 3.5l-7 7"/><path d="M14.25 11.5v3.25c0 .97-.78 1.75-1.75 1.75h-7.5c-.97 0-1.75-.78-1.75-1.75v-7.5c0-.97.78-1.75 1.75-1.75h3.25"/></svg></a></li>
+      <li><a href="https://github.com/koorinonaka/liveback/blob/main/LICENSE"><span data-l="ja" lang="ja">MIT ライセンス</span><span data-l="en" lang="en">MIT License</span></a></li>
+    </ul>
+    <p class="lp-footer__credit"><a href="https://slint.dev/">Made with Slint</a></p>
+  </div>
+</footer>
+</div>
+</body>
+</html>
