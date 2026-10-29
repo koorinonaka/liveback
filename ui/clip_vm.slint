@@ -1,0 +1,268 @@
+// The clip player's view-model global (task3510), a separate file for the same
+// reason `review_vm.slint` is one: the pane and the pieces it is built from can
+// both reference it without a circular import.
+//
+// Why not reuse `ReviewVm` (task-create's exploration, 2026-09-07): the review
+// engine survives leaving the pane -- it only pauses (`offscreen_transport`) and
+// keeps that session's state in `ReviewVm`. A clip writing to
+// `ReviewVm.stage-frame` would collide with the picture the review comes back
+// to. So the clip player gets its own global with the transport half copied and
+// nothing else.
+//
+// Everything time-valued stays in Rust, exactly as on the review side: 100ns
+// ticks do not fit slint's 32-bit int, so this carries percents, ratios and
+// pre-formatted strings, and the callbacks hand back ratios.
+import { MenuEntry } from "controls.slint";
+
+// One tile of the grid; here rather than in `clips.slint` so `ClipVm.rows`
+// can name it without a circular import (t261025-1aec).
+export struct ClipRow {
+    // The app the clip was saved from, as the DS `AppIcon` monogram: its
+    // letter and which of the eight hues (`sessions::monogram_*`), read off
+    // the file name's `{game}` (t260927-bb89). "" when the name says no app.
+    // The file name itself is not on the card at all (DS ClipCard).
+    app-letter: string,
+    app-hue: int,
+    // The exe's own icon, when the clip carries its executable's path
+    // (`livia::clips::write_app_path`). Takes the monogram's place.
+    app-icon: image,
+    has-app-icon: bool,
+    // The creation time in the DS ClipCard's wording (t260928-6080 F1,
+    // `sessions::row_date_text`): `21:04` today, `昨日 23:41`, `9/13 22:05`,
+    // and `2025/9/13 22:05` once it is not this year's.
+    date: string,
+    // What was typed into 「クリップに保存」, read back out of the mp4 itself.
+    // Empty means none was written, and the overlay offers to add one.
+    comment: string,
+    // The clip's length (`0:14`), or empty while it is unknown -- then no
+    // badge (t260926-e49b).
+    duration: string,
+    thumbnail: image,
+    has-thumbnail: bool,
+    // The detail read is still out and was asked for under 150ms ago
+    // (t260930-cc68): bare stage rather than the glyph. Rust flips it on a
+    // timer.
+    thumbnail-held: bool,
+    // Grid placement, decided by `ui_state::clips::place`.
+    column: int,
+    line: int,
+    // How many date headings stand above this tile, its own included -- so it
+    // is 1 on the first group and never 0.
+    heading-offset: int,
+    // The group's heading, on the group's first tile only.
+    heading: string,
+    // How many columns and lines this tile covers (task3880, round20 §2-1
+    // B案). 1 for every tile but the expanded one.
+    span: int,
+    // In the selection (t260916-5568). Per tile rather than a list of indices
+    // on the pane, so a marquee step rewrites only the tiles it changed.
+    selected: bool,
+}
+
+export global ClipVm {
+    // ---------- which clip, and whether the player is mounted ----------
+    // `open` is the *engine's* state -- a clip is decoded and this global's
+    // stage/transport fields describe it. It is not the grid's layout state:
+    // the in-grid expansion (round20 §2-1 B案) is `expanded-row` (task3880,
+    // with the grid's ports below since t261025-1aec), and the two can
+    // disagree while the collapse animation
+    // runs. `row` indexes the same clip model the grid draws from.
+    in-out property <bool> open;
+    in-out property <int> row: -1;
+    // A案 (an overlay that scales up from the pressed tile) wanted
+    // `origin-x/y/width/height` here for the animation's start rectangle. B案
+    // was chosen instead (2026-09-08) and the grid animates its own footprint,
+    // so those four ports are not declared -- nothing would ever read them.
+
+    // ---------- video stage ----------
+    in-out property <image> stage-frame;
+    in-out property <bool> stage-has-frame;
+    // The clip's shape, so the surface can hold what it was recorded in. 16:9
+    // until a frame says otherwise, like the review stage.
+    in-out property <float> stage-aspect: 1.7777778;
+    // How big the picture is actually being drawn, in logical pixels: Rust
+    // turns it into physical pixels and resamples each frame to it (task990's
+    // rule, same reason).
+    callback stage-size-changed(length, length);
+    // Same as `ReviewVm.stage-rescaled` (t260918-b743).
+    callback stage-rescaled();
+    // The engine thread rings this through the event loop; the bin-side handler
+    // pulls the frame mailbox and updates the scalars.
+    callback frame-ready();
+    // ---------- hover storyboard (task3540, round20 §7 H2) ----------
+    // The tile being scrubbed once the dwell has passed, -1 otherwise.
+    in-out property <int> scrub-row: -1;
+    in-out property <image> scrub-frame;
+    in-out property <bool> scrub-has-frame;
+    // The pointer over a tile: (tile, x, tile width). Rust owns the dwell.
+    callback scrub-moved(int, length, length);
+    callback scrub-left(int);
+    // The storyboard thread rings this after each frame lands in its mailbox.
+    callback storyboard-ready();
+    // task3520. The picture's own box inside the surface, and a press in it --
+    // `ReviewStage`'s pair, with the same contract: coordinates are relative to
+    // the video box's top-left, so `ui_state::playback::stage_hit` can reject
+    // the letterbox without knowing anything about the grid.
+    callback stage-pressed(length, length, length, length);
+    callback stage-released();
+    // Any pointer sign of life over the surface (the review stage's `activity`).
+    // It is what resets the 3-second hide, decided in Rust.
+    callback activity();
+    // What the ±N second hover bands say (`review::push_seek_labels`).
+    in-out property <string> zone-seconds;
+
+    // ---------- transport ----------
+    // round20 §2-2 fixed what the in-place controls carry: play/pause, the seek
+    // bar, the clock, mute + volume, and full screen. Repeat was added on top of
+    // that list by the user's own 2026-09-16 request (t260916-0ee4); range jump
+    // and the panel toggle are still out, so there is no port for those here.
+    in-out property <bool> playing;
+    in-out property <string> position-text;
+    in-out property <string> total-text;
+    in-out property <float> played-percent;
+    in-out property <float> volume-ratio;
+    in-out property <bool> muted;
+    in-out property <bool> fullscreen;
+    // Repeat, and deliberately not `ReviewVm.repeat-enabled`: the user's
+    // 2026-09-16 ruling is 「クリップ専用・保存しない」 (t260916-0ee4). It is
+    // held in `Clips` for as long as the app runs, so it survives opening
+    // another clip, and it is never written to `settings.json` -- a restart
+    // comes up off.
+    in-out property <bool> repeat-enabled;
+    // The 3-second auto-hide, decided in Rust
+    // (`ui_state::clip_player::controls_visible`) rather than by a timer in the
+    // `.slint`, so the rule has a test.
+    in-out property <bool> controls-visible;
+    // The other half of that rule's inputs: whatever the user is in the middle
+    // of on this side -- the pointer resting on the bar, a seek drag. Written
+    // here and read by the pump, because none of it is knowable in Rust
+    // (`controls_visible`'s `pinned`). The pane's own reasons to pin -- an open
+    // comment editor, an open menu -- are folded in on the Rust side.
+    in-out property <bool> controls-pinned;
+
+    // ---------- callbacks ----------
+    callback play-toggled();
+    callback seek(float);
+    callback volume-changed(float);
+    callback mute-toggled();
+    callback repeat-toggled();
+    callback fullscreen-toggled();
+    callback close-requested();
+    // The expanded player's 「フォルダで表示」 (t260928-6080 F2): the playing
+    // clip, selected in Explorer.
+    callback reveal-requested();
+    // Their words (the close's tooltip, the reveal's accessible name), pushed
+    // once from Rust. Here rather than on `ClipLabels`, which lives in
+    // `clips.slint` and would be a circular import from `clip_stage.slint`.
+    in property <string> close-label;
+    in property <string> reveal-label;
+    // The comment editor's ✓ (its tooltip and accessible name).
+    in property <string> save-label;
+    // The transport's accessible names (t260928-13e9): the review's
+    // `transport_tips` list, read by the same indices (1 play, 2 pause,
+    // 4 repeat, 9 mute, 10 unmute, 12 full screen, 13 leave full screen).
+    in property <[string]> transport-tips;
+    // (key text) -> handled. One argument, not the review's three: the clip
+    // player has no shift-modified or key-repeat transport step to tell apart.
+    callback key-pressed-cb(string) -> bool;
+
+    // ---------- the grid's ports, here since t261025-1aec ----------
+    // They used to be `AppWindow`'s `clips-*`, forwarded to `ClipsPane` one
+    // by one. The five the shell also reads (`clips-editing-row`,
+    // `clips-menu-open`, `clips-menu-dismissed`, `clips-edit-cancelled`,
+    // `clips-selection-count`) stay there.
+    in-out property <[ClipRow]> rows;
+    // Non-empty replaces the grid with the single 「クリップがありません」 wording
+    // (`ui_state::clips::empty`, task3030) -- the missing-folder sentence was
+    // dropped since `livia::clips::list` creates the folder itself.
+    in-out property <string> empty-text;
+    // The other nothing (task3820): there are clips, and the search box matches
+    // none of them. A separate property from `empty-text` on purpose -- the
+    // toolbar is gated on that one, so sharing it would take the search field
+    // off screen the moment a query stopped matching and leave the text that
+    // emptied the grid with no way to be cleared.
+    in-out property <string> filter-empty-text;
+    in-out property <[MenuEntry]> menu-entries;
+    // Which tile the menu belongs to, or -1 (task3350). The menu's being up alone says
+    // there is a menu but not what it is acting on, and Rust already holds the
+    // index (`Clips::menu`) -- so this is that answer coming back. The
+    // selection (t260916-5568) is a separate thing, carried per tile on
+    // `ClipRow.selected`.
+    in-out property <int> menu-row: -1;
+    // Whether the headings group by month rather than by week. Week is the
+    // default (§1-3), and this is not a setting -- it is which way you are
+    // looking at the folder right now.
+    in-out property <bool> month-grouping;
+    // ---- the in-grid expansion (task3880, round20 §2-1 B案) ----
+    //
+    // Which tile is drawn large, or -1. Task3490 held these three on the
+    // `ClipLabels` global to keep its own diff to three files; they belong on
+    // the grid, and since t261025-1aec they are here rather than forwarded
+    // through `app.slint` as `clips-*`.
+    //
+    // Raised by a single click on a tile since task3890, and closed by the
+    // same click, by a click on another tile, or by Esc. A tile index, not an
+    // entry index: Rust maps its own `Clips::expanded` through the filter on
+    // the way out (`clips.rs::render`), so what arrives here is a row of the
+    // grid actually on screen.
+    in-out property <int> expanded-row: -1;
+    // How many grid lines the placement uses, footprint included
+    // (`ui_state::clips::line_count`). Pushed from Rust rather than derived
+    // from the last tile: with a footprint the last tile usually is not on the
+    // bottom line -- it fills a hole beside the expanded one -- and a
+    // `content-height` counted from it would refuse to scroll to the bottom.
+    in-out property <int> grid-lines: 0;
+    // ---- the selection (t260916-5568) ----
+    //
+    // Whether a marquee is being dragged. Rust decides it: a press on a tile
+    // becomes one only past `clips_ui::DRAG_THRESHOLD`, and below it the
+    // release is a click. Rust sees the press, every move and the release, so
+    // telling the two apart does not depend on the order slint fires
+    // `pointer-event(up)` and `clicked` in.
+    in-out property <bool> marquee-active;
+    // The selection bar (t260927-bb89): 「N 件を選択 · X」 and 「N 件を削除」.
+    in-out property <string> selection-text;
+    in-out property <string> delete-label;
+
+    // Tile index, straight from the `for` -- no hit test. The history screen
+    // needs one because a marquee drag has to resolve arbitrary coordinates to
+    // rows; a grid whose tiles each own their TouchArea already knows.
+    callback row-menu-requested(int);
+    callback row-edit-requested(int);
+    callback menu-selected(int);
+    callback grouping-changed(bool);
+    // A press that should expand or collapse one tile (task3880). Raised by
+    // the tile's own click, by the raised copy's, and by Esc (task3890); the
+    // state transition behind it is `ui_state::clips::toggle_expanded`, which
+    // is why all three send a tile index rather than each deciding the new
+    // state for itself.
+    callback row-expand-toggled(int);
+    // Every keystroke: the filter runs in Rust over the list already in hand,
+    // so there is nothing to debounce (task3820).
+    callback search-changed(string);
+    // No row index: Rust already holds which file the editor was opened on and
+    // commits to *that*, because a re-scan can have moved the tile underneath
+    // (task2990). An index sent from here would only be a second, staler
+    // answer to a question already settled.
+    callback comment-committed(string);
+    // (first row, count) for the tiles on screen, so the worker fetches a
+    // comment and a thumbnail for those and not for all of them (the same rule
+    // task188 set for session thumbnails).
+    callback visible-range-changed(int, int);
+    // The press, the drag and the release behind the selection
+    // (t260916-5568). Coordinates are the grid's own content space -- the one
+    // `ui_state::clips::tile_rects` builds its rectangles in -- and the cell
+    // size goes along because it is derived here, from the pane's width.
+    //   tile-pressed(tile, x, y, cell-width, cell-height, shift, ctrl)
+    //   ground-pressed(x, y, cell-width, cell-height, shift, ctrl)
+    callback tile-pressed(int, length, length, length, length, bool, bool);
+    callback ground-pressed(length, length, length, length, bool, bool);
+    callback pointer-moved(length, length);
+    callback pointer-released();
+    // A completed hold: the bar's delete, or Delete held down. No dialog
+    // follows (t260927-bb89, DS ClipsScreen).
+    callback delete-selected();
+    callback select-all();
+    callback selection-cleared();
+    callback open-folder();
+}

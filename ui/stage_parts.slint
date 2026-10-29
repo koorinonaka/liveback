@@ -1,0 +1,244 @@
+// The video stage's own controls (t261025-19a4: moved out of `controls.slint`
+// unchanged): the transport's icon button and the volume rail and slider. Only
+// the review and clip stages and the 音量 tab draw them.
+
+import { Dark, Tokens, Motion } from "tokens.slint";
+import { AppIcon } from "icons.slint";
+import { ControlSize, FocusRing, Pressable } from "controls.slint";
+
+// ---------- transport pieces (task3510) ----------
+// Moved here from `review.slint` so the clip player (task3520) can draw the
+// same transport without a second copy. Both read `Dark` directly rather than
+// the themed set: everything drawn on a video stage stays dark while the rest
+// of the screen follows the theme (round16 §2), and that holds wherever the
+// stage is.
+
+// The transport's icon button: the DS IconButton `stage` on the dark island --
+// `on-stage` glyph, white 14% under the pointer, `fill-pressed` pressed, and a
+// toggle that is on takes `accent-soft` / `accent-text` (the IconButton's
+// `pressed`). On the IconButton's steps (t260928-5f3b F14): `size` sm 28 /
+// md 32 (default) / lg 40, a 16px glyph on sm and 20px above.
+export component TransportBtn inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> filled;
+    // The volume toggle carries state in its tint (round 4 §2-B2): muted drops
+    // to the variant colour. Everything else keeps the default.
+    in property <color> tint: Dark.on-stage;
+    in property <ControlSize> size: ControlSize.md;
+    // Toggles that are *on* (round5 §4-C).
+    in property <bool> on;
+    // A button whose target is not there to be toggled (task1030). Greyed and
+    // inert rather than hidden: the row keeps its shape across the transition.
+    in property <bool> disabled;
+    callback clicked;
+    // The key focus is on it, as `IconBtn` (the expanded clip's bar pins
+    // itself on it, t260929-fcc6).
+    out property <bool> key-focused: touch.key-focused;
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: !root.disabled;
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.clicked();
+        }
+    }
+
+    property <length> box: root.size == ControlSize.sm
+        ? Tokens.size-control-sm
+        : root.size == ControlSize.lg ? Tokens.size-control-lg : Tokens.size-control-md;
+    property <length> icon-size: root.size == ControlSize.sm ? Tokens.size-icon-sm : Tokens.size-icon;
+
+    width: root.box;
+    height: root.box;
+    border-radius: root.size == ControlSize.lg ? Tokens.radius-md : Tokens.radius-sm;
+    opacity: root.disabled ? 0.38 : 1.0;
+    background: root.on
+        ? Dark.accent-soft
+        : touch.pressed
+            ? Dark.fill-pressed
+            : touch.has-hover ? #ffffff24 : transparent;
+    animate background {
+        duration: touch.pressed ? Tokens.duration-instant : Tokens.duration-fast;
+        easing: Motion.easing-standard;
+    }
+
+    // A Tab stop (t260928-d9b4).
+    touch := Pressable {
+        enabled: !root.disabled;
+        ring-radius: root.border-radius;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    AppIcon {
+        commands: root.icon;
+        active: touch.has-hover || touch.key-focused;
+        stroke-color: root.filled ? transparent : (root.on ? Dark.accent-text : root.tint);
+        fill-color: root.filled ? (root.on ? Dark.accent-text : root.tint) : transparent;
+        animate stroke-color, fill-color {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+        size: root.icon-size;
+    }
+}
+
+// The volume rail itself: groove, fill, knob and hit area (task3980). The
+// transport's `VolumeSlider` and the 音量 tab's track rows (`review_volume.slint`) both sit on it, so the
+// two can no longer drift apart one fix at a time. Colours come in rather than
+// being read here: the transport draws on the stage's dark island and passes
+// `Dark.*`, the mixer follows the theme and passes `Tokens.*` (tokens.slint).
+// No `width` / `height` of its own -- a fixed size would stop it stretching
+// inside the mixer's `HorizontalLayout`; the caller sizes it.
+//
+// The DS Slider (t260928-ac18, review 06 F12): a 4px `line-strong` groove,
+// the fill `ink-muted` at rest and `accent` under the pointer, a 12px `ink`
+// knob ringed 2px in `surface`. `dock` is the review band's crossover, as on
+// `IconBtn`: 1 the theme, 0 on-stage over the floating band's black.
+export component VolumeRail inherits Rectangle {
+    in property <float> ratio;
+    in property <bool> muted;
+    in property <float> dock: 1;
+    in property <brush> rail: Tokens.line-strong.mix(#ffffff33, root.dock);
+    in property <brush> fill: Tokens.ink-muted.mix(Dark.on-stage-muted, root.dock);
+    in property <brush> fill-hover: Tokens.accent.mix(Dark.accent, root.dock);
+    in property <brush> knob: Tokens.ink.mix(Dark.on-stage, root.dock);
+    in property <brush> ring: Tokens.surface.mix(#000000, root.dock);
+    // Every step of a gesture, so the knob follows the pointer.
+    callback ratio-changed(float);
+    // Once per gesture -- the drag's release, a wheel notch, an arrow key --
+    // so a caller saves here and not on every move (t261025-ea25).
+    callback ratio-committed(float);
+
+    Rectangle {
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: root.rail;
+    }
+
+    // Muted drains the fill and hides the knob; the ratio itself is untouched,
+    // so unmuting comes back to the same volume (round5 §4-C).
+    if !root.muted: Rectangle {
+        x: 0;
+        y: (parent.height - 4px) / 2;
+        width: parent.width * root.ratio;
+        height: 4px;
+        border-radius: 2px;
+        background: rail-touch.has-hover || rail-touch.pressed ? root.fill-hover : root.fill;
+        animate background {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+
+    if !root.muted: Rectangle {
+        x: parent.width * root.ratio - 8px;
+        y: (parent.height - 16px) / 2;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: root.ring;
+
+        Rectangle {
+            x: 2px;
+            y: 2px;
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: root.knob;
+        }
+    }
+
+    rail-touch := TouchArea {
+        // Same as the seek track: the whole bar is a click target, so pointer,
+        // not a resize glyph.
+        mouse-cursor: pointer;
+        pointer-event(event) => {
+            if ((event.kind == PointerEventKind.down && event.button == PointerEventButton.left)
+                || (event.kind == PointerEventKind.move && self.pressed)) {
+                root.ratio-changed(max(0.0, min(1.0, self.mouse-x / root.width)));
+            } else if ((event.kind == PointerEventKind.up && event.button == PointerEventButton.left)
+                || event.kind == PointerEventKind.cancel) {
+                root.ratio-committed(root.ratio);
+            }
+        }
+        // Wheel over the slider, ±5% (task151). One notch is a whole gesture.
+        scroll-event(event) => {
+            let v = max(0.0, min(1.0, root.ratio + (event.delta-y > 0 ? 0.05 : -0.05)));
+            root.ratio-changed(v);
+            root.ratio-committed(v);
+            return accept;
+        }
+    }
+
+    // A Tab stop on every caller -- the clip band, the review band and the
+    // mixer (t260929-9dc3, t260929-475e). `PressFocus`'s manners (keys only,
+    // its ring), with the arrows at the wheel's ±5% (task151). All four are
+    // taken, so ↑ ↓ on a mixer row never reach the review pane's master
+    // volume; every other key goes on to the pane (Space still plays /
+    // pauses). Held keys repeat, as a volume should. Muted still moves the
+    // ratio, as the wheel does.
+    out property <bool> key-focused: fs.has-focus;
+
+    fs := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.RightArrow || event.text == Key.UpArrow) {
+                let v = max(0.0, min(1.0, root.ratio + 0.05));
+                root.ratio-changed(v);
+                root.ratio-committed(v);
+                return accept;
+            }
+            if (event.text == Key.LeftArrow || event.text == Key.DownArrow) {
+                let v = max(0.0, min(1.0, root.ratio - 0.05));
+                root.ratio-changed(v);
+                root.ratio-committed(v);
+                return accept;
+            }
+            reject
+        }
+
+        if fs.has-focus: FocusRing {
+            ring-radius: Tokens.radius-sm;
+        }
+    }
+}
+
+// The transport's volume bar, lifted out of `review.slint` verbatim (task3510).
+// `ratio` and `muted` come in, and every gesture leaves as `ratio-changed` --
+// the component holds no state of its own, so the caller's model stays the one
+// place a volume lives.
+//
+// Not `changed`: that word opens slint's property-observer statement
+// (`changed ratio => {}`), so a callback cannot take it.
+export component VolumeSlider inherits Rectangle {
+    in property <float> ratio;
+    in property <bool> muted;
+    callback ratio-changed(float);
+    // The expanded clip's bar pins itself on it (t260929-9dc3); the keys
+    // themselves live on `VolumeRail` (t260929-475e).
+    out property <bool> key-focused: rail.key-focused;
+
+    width: 84px;
+    // Follows the transport row's 30px so the groove and knob, which centre on
+    // `parent.height`, land on the row's centre whichever way the layout aligns
+    // a shorter child (task2300).
+    height: 30px;
+
+    rail := VolumeRail {
+        width: 100%;
+        height: 100%;
+        ratio: root.ratio;
+        muted: root.muted;
+        // Dark island: the transport stays dark in either theme (tokens.slint).
+        rail: Dark.line-strong;
+        fill: Dark.accent;
+        ratio-changed(v) => {
+            root.ratio-changed(v);
+        }
+    }
+}
