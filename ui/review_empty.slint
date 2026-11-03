@@ -1,0 +1,266 @@
+// The review screen's empty state, split from review.slint (t261101-2c2f).
+// review.slint re-exports it, so app.slint keeps importing it from there.
+
+import { Tokens } from "tokens.slint";
+import { Icons } from "icons.slint";
+import { Btn, BtnVariant, EmptyState, ControlSize } from "controls.slint";
+import { ReviewVm } from "review_vm.slint";
+
+// ---------- empty state (DS EmptyReviewScreen, t260927-9865) ----------
+// Before the first recording: the DS EmptyState with its primary
+// 「対象を選ぶ」, which opens the same capture flyout as the rail's キャプチャ
+// (`ReviewVm.pick-target`), and under it the drifting scene (DS `TimeDrift`):
+// frames are born at the edge of now and drift left into the past on two
+// belts, a ruler travelling with the front one, the dot at the edge pulsing.
+//
+// Nothing here reads `animation-tick()` (KNOWLEDGE「`animation-tick()` は評価
+// されたときだけ present を要求する」): the three phases are written from a
+// 60/s timer in `shell.rs` that stops while the screen is hidden, the window
+// is minimized or in the tray, or motion is reduced -- and then this is a
+// still picture.
+export component ReviewEmpty inherits Rectangle {
+    // No ground of its own: the panel's `surface` shows through, and the
+    // band's left fade is drawn in that same token. The review pane mounted
+    // underneath is covered by `SessionEntry`'s veil in app.slint, not by this
+    // (t261102-eb66).
+    background: transparent;
+    clip: true;
+
+    // A low pane (720x480 at the smallest) tightens the EmptyState's
+    // vertical padding from the DS's 40 to 16 so the block and the band fit.
+    property <length> pad: root.height < 560px ? 16px : 40px;
+
+    // The DS's belts, `[left, width]` (and a tint hue at the front) on one
+    // 1600px lap that repeats. Frames are 16:9, so their height follows.
+    property <[{x: length, w: length}]> back-frames: [
+        { x: 40px, w: 80px }, { x: 270px, w: 100px }, { x: 530px, w: 90px },
+        { x: 780px, w: 80px }, { x: 1020px, w: 100px }, { x: 1280px, w: 90px },
+        { x: 1490px, w: 80px },
+    ];
+    property <[{x: length, w: length, hue: float}]> front-frames: [
+        { x: 0px, w: 156px, hue: 206 }, { x: 290px, w: 136px, hue: 262 },
+        { x: 560px, w: 176px, hue: 32 }, { x: 890px, w: 144px, hue: 150 },
+        { x: 1160px, w: 168px, hue: 190 }, { x: 1430px, w: 136px, hue: 262 },
+    ];
+
+    // The EmptyState, 24 of air, then the 160px band: one block, centred, so
+    // a low pane squeezes neither.
+    VerticalLayout {
+        alignment: center;
+        spacing: 24px;
+
+        VerticalLayout {
+            padding-top: root.pad;
+            padding-bottom: root.pad;
+
+            EmptyState {
+                icon: Icons.capture;
+                label: ReviewVm.empty-title;
+                sub: ReviewVm.empty-body;
+            }
+
+            // The DS's primary lg, 24 below the description (gap 8 + margin
+            // 16, t260928-ac18). Its own Btn rather than `EmptyState`'s
+            // action, which is md.
+            HorizontalLayout {
+                alignment: center;
+                padding-top: 24px;
+
+                Btn {
+                    label: ReviewVm.empty-action;
+                    icon: Icons.capture;
+                    variant: BtnVariant.primary;
+                    size: ControlSize.lg;
+                    clicked => {
+                        ReviewVm.pick-target();
+                    }
+                }
+            }
+        }
+
+        band := Rectangle {
+            height: 160px;
+
+            // Up to the edge of now, 18% in from the right.
+            track := Rectangle {
+                x: 0;
+                width: parent.width * 0.82;
+                clip: true;
+                // Enough laps that the belt never runs out, even on a pane
+                // wider than one lap (a 4K desk).
+                property <int> laps: Math.ceil(self.width / 1600px) + 1;
+
+                // Back: small, faint, slow (80s a lap), bottom 46 up.
+                Rectangle {
+                    x: -ReviewVm.drift-back * 1600px;
+                    width: parent.laps * 1600px;
+                    height: parent.height - 46px;
+                    y: 0;
+                    opacity: 0.55;
+
+                    for lap in track.laps: Rectangle {
+                        x: lap * 1600px;
+                        width: 1600px;
+
+                        for f in root.back-frames: Rectangle {
+                            x: f.x;
+                            width: f.w;
+                            height: f.w * 9 / 16;
+                            y: parent.height - self.height;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Tokens.line;
+                            background: Tokens.fill;
+                        }
+                    }
+                }
+
+                // Front: tinted frames, faster (44s a lap), bottom 28 up,
+                // every other one flagged; the ruler rides along.
+                Rectangle {
+                    x: -ReviewVm.drift-front * 1600px;
+                    width: parent.laps * 1600px;
+
+                    for lap in track.laps: Rectangle {
+                        x: lap * 1600px;
+                        width: 1600px;
+
+                        for f[i] in root.front-frames: Rectangle {
+                            x: f.x;
+                            width: f.w;
+                            height: f.w * 9 / 16;
+                            y: parent.height - 28px - self.height;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Tokens.line;
+                            // No picture: the DS's pictures are stand-ins for
+                            // the preview, and nothing has been recorded yet.
+                            // HSL(hue, 60%, 55%) is HSV(hue, 0.66, 0.82).
+                            background: @linear-gradient(160deg, hsv(f.hue, 0.66, 0.82).mix(Tokens.raised, 0.18) 0%, Tokens.fill 100%);
+                            drop-shadow-offset-y: 6px;
+                            drop-shadow-blur: 16px;
+                            drop-shadow-color: #0000001f;
+
+                            if Math.mod(i, 2) == 0: Rectangle {
+                                x: 0;
+                                y: 0;
+                                width: 0;
+                                height: 0;
+
+                                Rectangle {
+                                    x: 12px;
+                                    y: -14px;
+                                    width: 2px;
+                                    height: 14px;
+                                    border-radius: 1px;
+                                    background: Tokens.marker;
+                                }
+
+                                Path {
+                                    x: 14px;
+                                    y: -14px;
+                                    width: 9px;
+                                    height: 7px;
+                                    viewbox-width: 9;
+                                    viewbox-height: 7;
+                                    commands: "M0 0 L9 3.5 L0 7 Z";
+                                    fill: Tokens.marker;
+                                    stroke-width: 0;
+                                }
+                            }
+                        }
+
+                        // The ruler: one path per lap for each tick length
+                        // (14 every 100px, 7 every 20px), not 96 rectangles.
+                        Path {
+                            y: parent.height - 16px;
+                            width: 1600px;
+                            height: 16px;
+                            viewbox-width: 1600;
+                            viewbox-height: 16;
+                            // The box is the viewbox: the default `contain`
+                            // shrank the lap to 15/16 and left ~100px of it
+                            // bare (t260928-ac18, review 08 F1).
+                            fit: preserve;
+                            commands: "M20.5 9 V16 M40.5 9 V16 M60.5 9 V16 M80.5 9 V16 M120.5 9 V16 M140.5 9 V16 M160.5 9 V16 M180.5 9 V16 M220.5 9 V16 M240.5 9 V16 M260.5 9 V16 M280.5 9 V16 M320.5 9 V16 M340.5 9 V16 M360.5 9 V16 M380.5 9 V16 M420.5 9 V16 M440.5 9 V16 M460.5 9 V16 M480.5 9 V16 M520.5 9 V16 M540.5 9 V16 M560.5 9 V16 M580.5 9 V16 M620.5 9 V16 M640.5 9 V16 M660.5 9 V16 M680.5 9 V16 M720.5 9 V16 M740.5 9 V16 M760.5 9 V16 M780.5 9 V16 M820.5 9 V16 M840.5 9 V16 M860.5 9 V16 M880.5 9 V16 M920.5 9 V16 M940.5 9 V16 M960.5 9 V16 M980.5 9 V16 M1020.5 9 V16 M1040.5 9 V16 M1060.5 9 V16 M1080.5 9 V16 M1120.5 9 V16 M1140.5 9 V16 M1160.5 9 V16 M1180.5 9 V16 M1220.5 9 V16 M1240.5 9 V16 M1260.5 9 V16 M1280.5 9 V16 M1320.5 9 V16 M1340.5 9 V16 M1360.5 9 V16 M1380.5 9 V16 M1420.5 9 V16 M1440.5 9 V16 M1460.5 9 V16 M1480.5 9 V16 M1520.5 9 V16 M1540.5 9 V16 M1560.5 9 V16 M1580.5 9 V16";
+                            stroke: Tokens.line;
+                            stroke-width: 1px;
+                            fill: transparent;
+                        }
+
+                        Path {
+                            y: parent.height - 16px;
+                            width: 1600px;
+                            height: 16px;
+                            viewbox-width: 1600;
+                            viewbox-height: 16;
+                            fit: preserve;
+                            commands: "M0.5 2 V16 M100.5 2 V16 M200.5 2 V16 M300.5 2 V16 M400.5 2 V16 M500.5 2 V16 M600.5 2 V16 M700.5 2 V16 M800.5 2 V16 M900.5 2 V16 M1000.5 2 V16 M1100.5 2 V16 M1200.5 2 V16 M1300.5 2 V16 M1400.5 2 V16 M1500.5 2 V16";
+                            stroke: Tokens.line-strong;
+                            stroke-width: 1px;
+                            fill: transparent;
+                        }
+                    }
+                }
+
+                // The ruler's foot, still.
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Tokens.line;
+                }
+
+                // The past dissolves: slint has no mask, so the ground is laid
+                // over the left 40%, opaque at the far left.
+                Rectangle {
+                    x: 0;
+                    width: parent.width * 0.4;
+                    background: @linear-gradient(90deg, Tokens.surface 0%, Tokens.surface.transparentize(1) 100%);
+                }
+            }
+
+            // The edge of now. `accent`, never `live`: nothing is recording.
+            property <length> edge-x: self.width * 0.82;
+
+            // The glow at its foot (the DS's 200x170 closest-side ellipse; a
+            // circle here, fading out at the square's inscribed radius).
+            Rectangle {
+                x: parent.edge-x - 85px;
+                y: parent.height + 80px - 170px;
+                width: 170px;
+                height: 170px;
+                background: @radial-gradient(circle, Tokens.accent-soft 0%, Tokens.accent-soft.transparentize(1) 70.7%);
+            }
+
+            Rectangle {
+                x: parent.edge-x - 1px;
+                y: 4px;
+                width: 2px;
+                height: parent.height - 4px;
+                border-radius: 1px;
+                background: @linear-gradient(180deg, Tokens.accent.transparentize(1) 0%, Tokens.accent 50%);
+            }
+
+            // The dot, and its ring swelling from 4px `accent-soft` out to 9px
+            // and gone, and back (2.4s each way).
+            property <length> ring: 10px + 2 * (4px + 5px * ReviewVm.drift-pulse);
+            Rectangle {
+                x: parent.edge-x - self.width / 2;
+                y: parent.height - 1px - self.height / 2;
+                width: parent.ring;
+                height: parent.ring;
+                border-radius: self.width / 2;
+                background: Tokens.accent-soft.transparentize(ReviewVm.drift-pulse);
+            }
+
+            Rectangle {
+                x: parent.edge-x - 5px;
+                y: parent.height + 4px - 10px;
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: Tokens.accent;
+            }
+        }
+    }
+}
