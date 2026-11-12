@@ -1,0 +1,372 @@
+// The panel the notification-area icon opens on a right-click (t261108-224b,
+// DS TrayMenu, Version 42). It replaces the Windows menu `tray.slint` used to
+// carry: the app draws it, so it can show what is recording and stop one
+// capture at a time.
+//
+// A top-level window of its own, not part of `AppWindow`: it has to appear
+// while the main window sits hidden in the tray. That also means it does not
+// share globals with `AppWindow` -- `Tokens.light` and `Tokens.reduce-motion`
+// are pushed into this window's own `Tokens` from Rust, and so are the words.
+// Placement, the tool-window style, focus and dismissal are Win32 and live in
+// `src/bin/liveback/tray_panel.rs`; this only draws and reports.
+//
+// Layout (DS TrayMenu README, 並び): the status block -- a heading, one row per
+// capture, 「すべての録画を止める」 under two or more -- then a rule and the
+// three actions, 「録画を開始…」, 「Liveback を開く」, a rule and 「終了」. The
+// actions keep their places in every state.
+import "../assets/fonts/IBMPlexSansJP-Regular.ttf";
+import "../assets/fonts/IBMPlexSansJP-Medium.ttf";
+import "../assets/fonts/IBMPlexSansJP-SemiBold.ttf";
+import "../assets/fonts/IBMPlexMono-Regular.ttf";
+import "../assets/fonts/IBMPlexMono-Medium.ttf";
+import "../assets/fonts/IBMPlexMono-SemiBold.ttf";
+import { Tokens, Motion } from "tokens.slint";
+import { Icons } from "icons.slint";
+import { AppMark, IconBtn, MenuRow, Tooltip } from "controls.slint";
+import { TallyApp, TallyLamp, TallyState } from "status_parts.slint";
+
+// One running capture's row.
+export struct TrayTarget {
+    session: string,
+    name: string,
+    app: TallyApp,
+    // `1:24:07`, written by Rust once a second while the panel is open.
+    elapsed: string,
+}
+
+// A DS rule: 1px `line`, 4px above and below, 6px in from each side.
+component Rule inherits Rectangle {
+    height: 9px;
+
+    Rectangle {
+        x: 6px;
+        y: 4px;
+        width: parent.width - 12px;
+        height: 1px;
+        background: Tokens.line;
+    }
+}
+
+// One capture: its app mark, name, elapsed time and a stop button. 36 tall
+// (the stop button is `size-control-sm`, 28), 8px left and 2px right, 10px
+// between the parts, `radius-sm`; lit `fill-hover` under the pointer or the
+// keyboard cursor.
+component TargetRow inherits Rectangle {
+    in property <TrayTarget> target;
+    in property <string> stop-label;
+    in property <bool> key-current;
+    in property <bool> key-on-stop;
+    callback stop();
+    // The pointer is on a row whose name is cut short (or left it): the panel
+    // shows the whole name above it (DS TrayMenu 見た目, t261108-c264). The
+    // tip lives in the panel, not here, so it can draw over the other rows.
+    callback name-tip(bool, length);
+
+    property <bool> wants-tip: hover.has-hover && name.preferred-width > name.width;
+    changed wants-tip => {
+        root.name-tip(self.wants-tip, self.absolute-position.y);
+    }
+
+    height: 36px;
+    border-radius: Tokens.radius-sm;
+    background: (hover.has-hover || root.key-current) ? Tokens.fill-hover : transparent;
+
+    accessible-role: list-item;
+    accessible-label: root.target.name;
+
+    hover := TouchArea { }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 2px;
+        spacing: 10px;
+        alignment: stretch;
+
+        AppMark {
+            y: (parent.height - self.height) / 2;
+            icon: root.target.app.icon;
+            letter: root.target.app.letter;
+            hue: root.target.app.hue;
+            monitor: root.target.app.monitor;
+            size: 16px;
+        }
+
+        name := Text {
+            // Plex sits high in its box: 13px labels drop 1.5px (DS 光学中心).
+            y: 1.5px;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            text: root.target.name;
+            overflow: elide;
+            font-size: Tokens.type-label-size;
+            font-weight: Tokens.type-label-weight;
+            color: Tokens.ink;
+        }
+
+        Text {
+            y: 1px;
+            vertical-alignment: center;
+            text: root.target.elapsed;
+            font-family: Tokens.font-family-mono;
+            font-size: 12px;
+            font-weight: 500;
+            color: Tokens.ink-muted;
+        }
+
+        IconBtn {
+            y: (parent.height - self.height) / 2;
+            icon: Icons.stop;
+            label: root.stop-label;
+            tab-stop: false;
+            force-hover: root.key-on-stop;
+            clicked => {
+                root.stop();
+            }
+        }
+    }
+}
+
+export component TrayPanel inherits Window {
+    // The status block.
+    in property <TallyState> state: TallyState.off;
+    in property <string> heading;
+    in property <[TrayTarget]> targets;
+    // The words, pushed from Rust in the language in force.
+    in property <string> stop-label;
+    in property <string> stop-all-label;
+    in property <string> start-label;
+    in property <string> open-label;
+    in property <string> quit-label;
+    // Bumped by Rust each time the panel opens: puts the keyboard cursor back
+    // on the first action.
+    in property <int> opened;
+    // True while the panel is on screen. Rust drops it as it hides the window
+    // and raises it right after showing it, so every opening fades in.
+    in property <bool> shown;
+
+    callback stop(string);
+    callback stop-all();
+    callback start();
+    callback open-window();
+    callback quit();
+    // Esc. Rust hides the window.
+    callback dismiss();
+    // The content's height moved (a capture came or went). The window grows
+    // from its top edge, so Rust places it again to stay clear of the taskbar.
+    callback relayout();
+
+    // What Rust sizes and places the window by, before it is shown.
+    out property <length> panel-height: frame.preferred-height;
+
+    title: "Liveback";
+    no-frame: true;
+    always-on-top: true;
+    width: 272px;
+    height: root.panel-height;
+    background: Tokens.overlay;
+    default-font-family: Tokens.font-family;
+    default-font-size: Tokens.type-body-size;
+
+    // The whole-name tip (t261108-c264): which row asked, and where it is.
+    property <bool> tip-on;
+    property <string> tip-text;
+    property <length> tip-row-y;
+
+    property <int> count: root.targets.length;
+    property <bool> has-stop-all: root.count >= 2;
+    // The keyboard cursor runs over the rows top to bottom: the captures, the
+    // stop-all row when there is one, then the three actions.
+    property <int> first-action: root.count + (root.has-stop-all ? 1 : 0);
+    property <int> last: root.first-action + 2;
+    property <int> cursor: root.first-action;
+    property <bool> on-stop;
+    changed opened => {
+        root.cursor = root.first-action;
+        root.on-stop = false;
+        keys.focus();
+    }
+    changed panel-height => {
+        root.relayout();
+    }
+    // A capture stopping under the cursor must not leave it past the end.
+    changed last => {
+        if (root.cursor > root.last) {
+            root.cursor = root.last;
+        }
+        root.on-stop = false;
+    }
+
+    function activate(index: int) {
+        if (index < root.count) {
+            if (root.on-stop) {
+                root.stop(root.targets[index].session);
+            }
+        } else if (root.has-stop-all && index == root.count) {
+            root.stop-all();
+        } else if (index == root.first-action) {
+            root.start();
+        } else if (index == root.first-action + 1) {
+            root.open-window();
+        } else if (index == root.first-action + 2) {
+            root.quit();
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.dismiss();
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.cursor = root.cursor >= root.last ? 0 : root.cursor + 1;
+                root.on-stop = false;
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.cursor = root.cursor <= 0 ? root.last : root.cursor - 1;
+                root.on-stop = false;
+                return accept;
+            }
+            if (event.text == Key.RightArrow && root.cursor < root.count) {
+                root.on-stop = true;
+                return accept;
+            }
+            if (event.text == Key.LeftArrow) {
+                root.on-stop = false;
+                return accept;
+            }
+            if (event.text == Key.Return || event.text == " ") {
+                root.activate(root.cursor);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // The window is the panel: `overlay`, the 1px `line-strong` edge and the
+    // `radius-md` corner DWM also rounds (`tray_panel.rs`). The DS grow is not
+    // drawn: like the in-window menus (t260928-5f3b F13) the panel only fades.
+    Rectangle {
+        border-radius: Tokens.radius-md;
+        border-width: 1px;
+        border-color: Tokens.line-strong;
+    }
+
+    frame := VerticalLayout {
+        padding: Tokens.space-1;
+        opacity: root.shown ? 1 : 0;
+        animate opacity {
+            duration: Tokens.reduce-motion ? 0ms : Tokens.duration-base;
+            easing: Motion.easing-enter;
+        }
+
+        // The heading: the lamp and the words, 28 tall, 10px left and 8px
+        // right, 8px between them, 12px semibold. Red words only while live.
+        HorizontalLayout {
+            height: 28px;
+            padding-left: 10px;
+            padding-right: 8px;
+            spacing: 8px;
+
+            TallyLamp {
+                y: (parent.height - self.height) / 2;
+                state: root.state;
+            }
+
+            Text {
+                y: 1px;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                text: root.heading;
+                font-size: 12px;
+                font-weight: 600;
+                color: root.state == TallyState.live ? Tokens.live-text : Tokens.ink-muted;
+                overflow: elide;
+            }
+        }
+
+        for target[index] in root.targets: TargetRow {
+            target: target;
+            stop-label: root.stop-label;
+            key-current: keys.has-focus && root.cursor == index;
+            key-on-stop: keys.has-focus && root.cursor == index && root.on-stop;
+            stop => {
+                root.stop(target.session);
+            }
+            name-tip(on, at) => {
+                // Moving straight from one cut row to the next fires both
+                // rows' `changed`, in no promised order: a row letting go
+                // only clears the tip if the tip is still its own.
+                if (on) {
+                    root.tip-text = target.name;
+                    root.tip-row-y = at;
+                    root.tip-on = true;
+                } else if (root.tip-text == target.name && root.tip-row-y == at) {
+                    root.tip-on = false;
+                }
+            }
+        }
+
+        if root.has-stop-all: MenuRow {
+            entry: {
+                label: root.stop-all-label,
+                icon: Icons.stop,
+            };
+            key-current: keys.has-focus && root.cursor == root.count;
+            chosen => {
+                root.stop-all();
+            }
+        }
+
+        Rule { }
+
+        MenuRow {
+            entry: {
+                label: root.start-label,
+                icon: Icons.capture,
+            };
+            key-current: keys.has-focus && root.cursor == root.first-action;
+            chosen => {
+                root.start();
+            }
+        }
+
+        MenuRow {
+            entry: {
+                label: root.open-label,
+                icon: Icons.window,
+            };
+            key-current: keys.has-focus && root.cursor == root.first-action + 1;
+            chosen => {
+                root.open-window();
+            }
+        }
+
+        Rule { }
+
+        MenuRow {
+            entry: {
+                label: root.quit-label,
+                icon: Icons.power,
+            };
+            key-current: keys.has-focus && root.cursor == root.first-action + 2;
+            chosen => {
+                root.quit();
+            }
+        }
+    }
+
+    // Last, so it draws over the rows. Above the row when it fits, else
+    // under it; centred, never wider than the panel less 4px a side, the name
+    // wrapping inside (the window cannot be drawn outside of).
+    Tooltip {
+        x: (root.width - self.width) / 2;
+        y: root.tip-row-y - self.height - 4px >= 4px
+            ? root.tip-row-y - self.height - 4px
+            : root.tip-row-y + 36px + 4px;
+        armed: root.tip-on && root.shown;
+        label: root.tip-text;
+        wrap-width: root.width - 8px;
+    }
+}

@@ -1,0 +1,347 @@
+// One clip tile of the クリップ screen and the pane's label global, split from
+// clips.slint (t261101-2c2f). clips.slint re-exports `ClipLabels`, so app.slint
+// keeps importing it from there.
+
+import { Dark, Motion, Tokens } from "tokens.slint";
+import { TileRise } from "sessions_tile.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { InlineEdit, AppMark, StagePlate } from "controls.slint";
+import { ClipRow } from "clip_vm.slint";
+
+// One clip: the DS ClipCard (t260927-bb89). The picture fills the 16:9 card
+// and carries everything -- the length top left, the comment and 「app ·
+// time」 on the shade along the bottom, the 「…」 top right on hover. No file
+// name and no size, on hover or otherwise (DS: カードは見返すための絵).
+export component ClipTile inherits TileRise {
+    in property <ClipRow> entry;
+    // The pointer is on the tile *or* on one of its own controls. One flag for
+    // all, because a control's TouchArea takes the hover away from the tile's
+    // -- the trap task184 hit on the history row.
+    in property <bool> hovered;
+    // The flat 16% shade alone (t260928-5a01): the one card-wide hover look,
+    // so it follows where the pointer really is and never stays on while the
+    // pointer is on the open menu, e.g. holding its delete. `hovered` keeps
+    // the latch for the add-comment row and the 「…」 (t260916-0a58).
+    in property <bool> shaded: root.hovered;
+    in property <bool> editing;
+    // "This is the tile you are acting on": the context menu or the comment
+    // editor is open over it (task3350). Drawn like `selected`.
+    in property <bool> highlighted;
+    // In the selection (t260916-5568): the 2px `accent` edge and nothing else
+    // (DS ClipCard: 塗りやチェックの丸は重ねない).
+    in property <bool> selected;
+    // The hover storyboard (task3540): the frame under the pointer over the
+    // thumbnail, and the 3px `accent` position line.
+    in property <bool> scrubbing;
+    in property <float> scrub-ratio;
+    in property <image> scrub-frame;
+    in property <bool> scrub-has-frame;
+    // Written by the add-comment row's own TouchArea rather than read off it:
+    // that row lives inside an `if`, and slint gives no name to an element in
+    // one from outside. The pane feeds this back in as `hovered`.
+    out property <bool> pen-hovered;
+    // The 「…」 takes the hover the same way; it is not in an `if`.
+    out property <bool> more-hovered: more.has-hover;
+    // Opening the editor destroys the row the pointer was on, and a destroyed
+    // element fires no `changed` -- without this the flag would stick true.
+    changed editing => {
+        root.pen-hovered = false;
+    }
+    callback edit-requested();
+    callback comment-committed(string);
+    callback edit-cancelled();
+    // The 「…」 was pressed: where the menu should grow from, in this tile's
+    // own coordinates.
+    callback more-requested(length, length);
+    // The entrance (t260925-f297), `SessionTile`'s own (`TileRise`): only
+    // while the pane has just been entered, staggered by reading order
+    // (`order`). The rise moves this tile's `y` -- the tile's, never the
+    // cell's, whose `animate x, y` is the expansion's footprint (t260916-fa85)
+    // and would restart on it. The raised and front copies leave `entering`
+    // false, so theirs is a 0ms snap in `init`.
+    enter-duration: Tokens.duration-base;
+    enter-easing: Motion.easing-reveal;
+
+    // 16:9, `radius-md`, on `stage` (DS `.lb-clip`).
+    border-radius: Tokens.radius-md;
+    background: Tokens.stage;
+    // So the picture takes the card's rounding.
+    clip: true;
+
+    // `cover` (DS: 絵は枠いっぱいに敷く、レターボックスの帯を出さない). The
+    // user's 2026-09-15 `contain` is superseded by the DS ClipCard: the
+    // recorded shapes (1920x1032, 1922x1112) lose a few percent top and
+    // bottom rather than showing bands. `ClipStage` still letterboxes the
+    // playing clip.
+    if root.entry.has-thumbnail: Image {
+        width: 100%;
+        height: 100%;
+        source: root.entry.thumbnail;
+        image-fit: cover;
+    }
+
+    // Until a frame has arrived the thumbnail stays (round20 §7 追記).
+    if root.scrubbing && root.scrub-has-frame: Image {
+        width: 100%;
+        height: 100%;
+        source: root.scrub-frame;
+        image-fit: cover;
+    }
+
+    // No thumbnail: the shell gave none, or the read is still out and past
+    // 150ms (t260930-cc68 -- under that the face stays bare stage, so a
+    // picture about to land never flashes this). The glyph says "a clip"
+    // rather than "an error".
+    if !root.entry.has-thumbnail && !root.entry.thumbnail-held: AppIcon {
+        commands: Icons.clips;
+        stroke-color: Dark.on-stage-muted;
+        size: 24px;
+    }
+
+    // The shade (DS `.lb-clip__shade`): black 30% at the top edge to 0 by
+    // 28%, clear to 46%, then down to black 80% at the bottom -- the length
+    // badge and the caption sit on its two ends. Hover adds a flat 16%.
+    Rectangle {
+        background: @linear-gradient(180deg, #0000004d 0%, #00000000 28%, #00000000 46%, #000000cc 100%);
+    }
+
+    Rectangle {
+        background: #00000029;
+        opacity: root.shaded && root.entry.span == 1 ? 1 : 0;
+        animate opacity {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-standard;
+        }
+    }
+
+    // ---------- length, top left (DS `.lb-clip__dur`) ----------
+    // Not on the expanded tile: the player prints `0:08 / 0:14` there.
+    // Not `ThumbTag`: in it the glyphs of the first two rows sat 1px higher
+    // on the GPU renderer, wherever its text was placed (t261025-c184).
+    badge := Rectangle {
+        visible: root.entry.duration != "" && root.entry.span == 1;
+        x: 8px;
+        y: 8px;
+        width: badge-text.preferred-width + 10px;
+        height: 18px;
+        border-radius: 3px;
+        background: Dark.stage-veil;
+
+        badge-text := Text {
+            text: root.entry.duration;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            font-family: Tokens.font-family-mono;
+            font-size: Tokens.type-key-size;
+            font-weight: Tokens.type-tc-weight;
+            // On the picture, so the dark set in either theme.
+            color: Dark.on-stage;
+        }
+    }
+
+    // ---------- the caption (DS `.lb-clip__caption`) ----------
+    // 12 in from the sides and 10 off the bottom: the comment's 20px line,
+    // 1px, and the when line's 18px. Placed absolutely so the when line keeps
+    // its place whether or not a comment line stands over it.
+    property <length> when-y: root.height - 10px - 18px;
+    property <length> comment-y: root.when-y - 1px - 20px;
+
+    // 14px, not the DS's 13.5 -- the DS README does not use half sizes.
+    if !root.editing && root.entry.comment != "": Text {
+        x: 12px;
+        y: root.comment-y;
+        width: root.width - 24px;
+        height: 20px;
+        text: root.entry.comment;
+        overflow: elide;
+        vertical-alignment: center;
+        font-size: Tokens.type-body-strong-size;
+        font-weight: Tokens.type-body-strong-weight;
+        color: Dark.on-stage;
+    }
+
+    // 「✎ コメントを追加」: only with no comment, and only on hover (DS
+    // `.lb-clip__add`). Mounted and faded rather than put behind an `if
+    // hovered` (task184): an `if` on hover deletes the row the moment its own
+    // TouchArea takes the hover, and the click then falls through to the tile.
+    if !root.editing && root.entry.comment == "": Rectangle {
+        x: 8px;
+        y: root.comment-y;
+        width: add-row.preferred-width;
+        height: 20px;
+        border-radius: Tokens.radius-xs;
+        opacity: (root.hovered || pen.has-hover) && root.entry.span == 1 ? 1 : 0;
+        background: pen.has-hover ? Dark.clip-sheen : transparent;
+
+        pen := TouchArea {
+            mouse-cursor: pointer;
+            changed has-hover => {
+                root.pen-hovered = self.has-hover;
+            }
+            clicked => {
+                root.edit-requested();
+            }
+        }
+
+        add-row := HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            spacing: 6px;
+
+            AppIcon {
+                y: (parent.height - self.height) / 2;
+                commands: Icons.pencil;
+                stroke-color: Dark.on-stage-muted;
+                size: 14px;
+                active: pen.has-hover;
+            }
+
+            Text {
+                text: ClipLabels.add-comment;
+                vertical-alignment: center;
+                font-size: Tokens.type-label-size;
+                font-weight: Tokens.type-label-weight;
+                color: Dark.on-stage-muted;
+            }
+        }
+    }
+
+    // The history screen's editor: Enter commits, Esc or a blur discards
+    // (task3430). Empty is a legal commit -- it is how a comment is removed.
+    // Sits where the comment line does, its box pulled 8px in from the sides
+    // (task3850; the focus halo that inset once cleared is gone).
+    if root.editing: InlineEdit {
+        label: root.entry.comment == "" ? ClipLabels.add-comment : ClipLabels.edit-comment;
+        x: 8px;
+        width: root.width - 16px;
+        y: root.when-y - 2px - self.height;
+        text: root.entry.comment;
+        hint: "Enter";
+        init => {
+            self.begin-edit();
+        }
+        committed(value) => {
+            root.comment-committed(value);
+        }
+        // Guarded on this tile's own edit state (task3430): the teardown that
+        // follows `editing` going false delivers a cancel, by which time the
+        // pane may have opened another tile's editor.
+        cancelled => {
+            if (root.editing) {
+                root.edit-cancelled();
+            }
+        }
+    }
+
+    // App and time (DS `.lb-clip__when`): the monogram off the file name, or
+    // the time alone for a name that says no app.
+    HorizontalLayout {
+        x: 12px;
+        y: root.when-y;
+        width: root.width - 24px;
+        height: 18px;
+        spacing: 6px;
+        alignment: start;
+
+        if root.entry.has-app-icon || root.entry.app-letter != "": AppMark {
+            y: (parent.height - self.height) / 2;
+            size: 14px;
+            icon: root.entry.app-icon;
+            has-icon: root.entry.has-app-icon;
+            letter: root.entry.app-letter;
+            hue: root.entry.app-hue;
+            fit: ImageFit.contain;
+        }
+
+        Text {
+            text: root.entry.date;
+            vertical-alignment: center;
+            overflow: elide;
+            font-size: Tokens.type-caption-size;
+            color: Dark.on-stage-muted;
+        }
+    }
+
+    // The scrub position (round20 §7 追記, kept by the DS ClipCard): a 3px
+    // `accent` line on the bottom edge, following the pointer ahead of the
+    // frames.
+    if root.scrubbing: Rectangle {
+        x: 1px;
+        y: parent.height - 1px - self.height;
+        width: parent.width - 2px;
+        height: 3px;
+        border-bottom-left-radius: 7px;
+        border-bottom-right-radius: 7px;
+        background: Dark.clip-sheen;
+        clip: true;
+
+        Rectangle {
+            x: 0;
+            width: parent.width * Math.clamp(root.scrub-ratio, 0, 1);
+            height: 100%;
+            background: Tokens.accent;
+        }
+    }
+
+    // The card's edge, drawn *over* its contents (task1330: a child paints
+    // over its parent's border). Inside 1px white 8%; selected -- or acted on
+    // by a menu or an editor -- inside 2px `accent`. Fill-less, so it takes
+    // no clicks.
+    Rectangle {
+        border-radius: Tokens.radius-md;
+        border-width: (root.highlighted || root.selected) ? 2px : 1px;
+        border-color: (root.highlighted || root.selected) ? Tokens.accent : Dark.line;
+        animate border-color {
+            duration: Tokens.duration-fast;
+            easing: Motion.easing-reveal;
+        }
+    }
+
+    // The 「…」 (DS `.lb-clip__more`): top right 6 / 6, `IconBtn` sm `stage`,
+    // while hovered or while its menu is open. On a `stage-veil` plate, the
+    // history tile's fix (t260927-9a17): the bare `stage` glyph vanished on a
+    // bright picture. It fades in and out on `duration-fast` (t260928-6080
+    // F17), and `visible` follows the fade, so a card the pointer is not on
+    // has no invisible hit target in its corner (bb89's reason). Reading
+    // `opacity` in `visible` also keeps the animation read every frame.
+    more := StagePlate {
+        x: parent.width - self.width - 6px;
+        y: 6px;
+        shown: root.entry.span == 1 && (root.hovered || root.highlighted || self.has-hover);
+        icon: Icons.more;
+        label: ClipLabels.more-actions;
+        // The card is the Tab stop; its menu is Shift+F10 (t260928-d9b4).
+        tab-stop: false;
+        clicked => {
+            root.more-requested(self.x + self.width / 2, self.y + self.height);
+        }
+    }
+}
+
+// The strings this pane needs that are not per-row. Pushed from Rust like
+// every other label global.
+export global ClipLabels {
+    in property <string> add-comment;
+    // The stage's comment row's accessible name once it has a comment
+    // (t261104-1fe9).
+    in property <string> edit-comment;
+    in property <string> week;
+    in property <string> month;
+    in property <string> search-placeholder;
+    // The empty folder's second line (DS ClipsScreen).
+    in property <string> empty-sub;
+    // The selection bar (t260927-bb89, the history's `SelectionBar`).
+    in property <string> clear-selection;
+    in property <string> hold-to-delete;
+    // 「N 件」, the bar's strong half (t260928-13e9); the rest is the pane's
+    // `selection-text`. Here so it needs no forwarding through `app.slint`.
+    in property <string> selection-count;
+    // The 「…」's accessible name (t260928-13e9).
+    in property <string> more-actions;
+    // The top row's button, and the empty state's action (t260928-6080 F20).
+    in property <string> open-folder;
+    // The folder would not read (t260928-6080 F9): `empty-text` is then
+    // 「一覧を取得できませんでした」 and `empty-sub` the reason. Here rather
+    // than on the pane so the flag needs no forwarding through `app.slint`.
+    in property <bool> list-failed;
+}

@@ -1,0 +1,551 @@
+// The recording-state and storage pieces (t261025-19a4: moved out of
+// `controls.slint` unchanged): the storage meter and its note, the history and
+// clip selection bar, and the Tally with its lamp. Read by the title bar, the
+// rail, the history, the clips and the settings.
+
+import { Tokens } from "tokens.slint";
+import { Icons, AppIcon } from "icons.slint";
+import { AppMark, Btn, BtnVariant, InlineNote } from "controls.slint";
+
+// The 135deg hatch the DS draws for protected storage (`accent` with
+// `accent-pressed` stripes, 3px each). slint has no repeating gradient, so the
+// stripes are paths laid side by side; the caller clips them.
+component Hatch inherits Rectangle {
+    in property <length> band: 3px;
+
+    // A 45deg stripe `band` thick is `band * sqrt 2` wide on the horizontal.
+    property <length> run: root.band * 1.41421;
+
+    background: Tokens.accent;
+
+    for i in Math.ceil(root.width / (2 * root.run)) + 2: Path {
+        x: i * 2 * root.run - root.height;
+        width: root.height + root.run;
+        height: root.height;
+        viewbox-width: (root.height + root.run) / 1px;
+        viewbox-height: root.height / 1px;
+        fill: Tokens.accent-pressed;
+        commands: "M0 " + (root.height / 1px) + "L" + (root.height / 1px) + " 0L"
+            + ((root.height + root.run) / 1px) + " 0L" + (root.run / 1px) + " "
+            + (root.height / 1px) + "Z";
+    }
+}
+
+// The DS StorageMeter: how close the buffer is to the auto-delete ceiling.
+// `used` in `accent`, the protected part of it hatched; past 90% of the limit
+// the used part and the label go `warning` with its icon. Numbers in mono,
+// 「17.2 / 50.0 GB」. `compact` is the history footer's one-line form.
+// The full StorageMeter's warning line, under it (t260928-e309 F10): a layout,
+// not a Rectangle, so a wrapped second line is measured and the row grows.
+export component StorageNote inherits HorizontalLayout {
+    in property <string> text;
+
+    spacing: 6px;
+
+    AppIcon {
+        y: 1px;
+        commands: Icons.warning;
+        stroke-color: Tokens.warning;
+        size: 14px;
+    }
+
+    Text {
+        horizontal-stretch: 1;
+        text: root.text;
+        font-size: Tokens.type-caption-size;
+        color: Tokens.warning;
+        wrap: word-wrap;
+    }
+}
+
+// The meter's numbers, 「17.2 / 50.0 GB」 (DS `.lb-meter__value`): the used
+// amount 600 `ink`, the rest `ink-muted`, both mono. The full and the compact
+// meter both draw it.
+component MeterLabel inherits HorizontalLayout {
+    in property <string> used;
+    in property <string> rest;
+
+    Text {
+        text: root.used;
+        vertical-alignment: center;
+        font-family: Tokens.font-family-mono;
+        font-size: Tokens.type-caption-size;
+        font-weight: Tokens.type-body-strong-weight;
+        color: Tokens.ink;
+    }
+
+    Text {
+        text: root.rest;
+        vertical-alignment: center;
+        font-family: Tokens.font-family-mono;
+        font-size: Tokens.type-caption-size;
+        color: Tokens.ink-muted;
+    }
+}
+
+export component StorageMeter inherits Rectangle {
+    in property <float> used;
+    in property <float> protected-size;
+    in property <float> limit: 1;
+    in property <string> unit: "GB";
+    in property <string> label: "録画バッファ";
+    // Legend words; the defaults are the DS's.
+    in property <string> protected-label: "保護";
+    in property <string> deletable-label: "自動削除の対象";
+    in property <string> free-label: "上限まで";
+    in property <bool> compact;
+    // A warning line with its icon beside the compact meter (t260928-e309 F10,
+    // DS 知らせ方: 続けると困ること → その場所の近くに warning の 1 行); empty
+    // draws nothing. The full meter's caller puts it under the meter instead
+    // (`StorageNote`): a wrapped line inside this Rectangle is measured one line
+    // tall and runs over the row below.
+    in property <string> note;
+
+    property <float> used-ratio: root.limit > 0 ? Math.min(root.used / root.limit, 1) : 0;
+    property <float> protected-ratio: root.used > 0 ? Math.min(root.protected-size / root.used, 1) : 0;
+    property <bool> near: root.limit > 0 && root.used / root.limit >= 0.9;
+    property <length> track-height: root.compact ? 6px : 8px;
+
+    pure function amount(n: float) -> string {
+        return n >= 100 ? n.to-fixed(0) : n.to-fixed(1);
+    }
+
+    min-height: meter-body.min-height;
+    preferred-height: meter-body.preferred-height;
+    min-width: root.compact ? 180px : 120px;
+
+    meter-body := VerticalLayout {
+        spacing: Tokens.space-2;
+        alignment: start;
+
+        // Full form: label and value over the track.
+        if !root.compact: HorizontalLayout {
+            spacing: Tokens.space-3;
+
+            HorizontalLayout {
+                horizontal-stretch: 1;
+                spacing: 6px;
+                alignment: start;
+
+                if root.near: AppIcon {
+                    y: (parent.height - self.height) / 2;
+                    commands: Icons.warning;
+                    stroke-color: Tokens.warning;
+                    size: 14px;
+                }
+
+                Text {
+                    text: root.label;
+                    vertical-alignment: center;
+                    font-size: Tokens.type-label-size;
+                    font-weight: Tokens.type-label-weight;
+                    color: root.near ? Tokens.warning : Tokens.ink;
+                }
+            }
+
+            MeterLabel {
+                used: root.amount(root.used);
+                rest: " / " + root.amount(root.limit) + " " + root.unit;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Tokens.space-3;
+
+            Rectangle {
+                horizontal-stretch: root.compact ? 0 : 1;
+                min-width: root.compact ? 180px : 0px;
+                max-width: root.compact ? 180px : 100000px;
+                y: (parent.height - self.height) / 2;
+                height: root.track-height;
+                border-radius: root.track-height / 2;
+                background: Tokens.line-strong;
+                clip: true;
+
+                Rectangle {
+                    x: 0;
+                    width: parent.width * root.used-ratio;
+                    border-radius: root.track-height / 2;
+                    background: root.near ? Tokens.warning : Tokens.accent;
+                    clip: true;
+
+                    Hatch {
+                        x: 0;
+                        width: parent.width * root.protected-ratio;
+                    }
+                }
+            }
+
+            if root.compact: HorizontalLayout {
+                spacing: Tokens.space-2;
+
+                if root.near: AppIcon {
+                    y: (parent.height - self.height) / 2;
+                    commands: Icons.warning;
+                    stroke-color: Tokens.warning;
+                    size: 14px;
+                }
+
+                Text {
+                    text: root.label;
+                    vertical-alignment: center;
+                    font-size: Tokens.type-label-size;
+                    font-weight: Tokens.type-label-weight;
+                    color: root.near ? Tokens.warning : Tokens.ink;
+                }
+
+                MeterLabel {
+                    used: root.amount(root.used);
+                    rest: " / " + root.amount(root.limit) + " " + root.unit;
+                }
+
+                if root.note != "": HorizontalLayout {
+                    spacing: 6px;
+
+                    AppIcon {
+                        y: (parent.height - self.height) / 2;
+                        commands: Icons.warning;
+                        stroke-color: Tokens.warning;
+                        size: 14px;
+                    }
+
+                    Text {
+                        text: root.note;
+                        vertical-alignment: center;
+                        font-size: Tokens.type-caption-size;
+                        color: Tokens.warning;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+
+        if !root.compact: HorizontalLayout {
+            spacing: Tokens.space-4;
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 2px;
+                    clip: true;
+
+                    Hatch {
+                        band: 2px;
+                    }
+                }
+
+                Text {
+                    text: root.protected-label + " " + root.amount(root.protected-size) + " " + root.unit;
+                    font-size: Tokens.type-caption-size;
+                    color: Tokens.ink-muted;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 2px;
+                    background: Tokens.accent;
+                }
+
+                Text {
+                    text: root.deletable-label + " " + root.amount(root.used - root.protected-size) + " " + root.unit;
+                    font-size: Tokens.type-caption-size;
+                    color: Tokens.ink-muted;
+                }
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                horizontal-alignment: right;
+                text: root.free-label + " " + root.amount(Math.max(0, root.limit - root.used)) + " " + root.unit;
+                font-size: Tokens.type-caption-size;
+                color: Tokens.ink-muted;
+            }
+        }
+    }
+}
+
+// The history's selection bar (t260927-9a17, DS HistoryScreen), shared with the
+// clip screen (t260927-bb89): 「N 件を選択 · X GB」 on the left, then on the
+// right ghost 「選択を解除」, the protect toggle, and the danger-quiet
+// hold-to-discard (DS `screens.jsx`: count, gap, the buttons; t260928-5f3b F7).
+// A warning line left of the discard says a protected session is in the pile;
+// a recording in it disables the discard and says why instead.
+//
+// DS `.lb-selbar`: 「N 件」 600 `ink`, the rest 400 `ink-muted`. A caller that
+// sends `count` (「2 件」) gets that split, `text` then being the rest
+// (「を選択 · 8.3 GB」); one that sends only `text` gets it whole in `ink`.
+export component SelectionBar inherits HorizontalLayout {
+    in property <string> count;
+    in property <string> text;
+    in property <string> clear-label;
+    // "" leaves the protect button out (a caller with nothing to protect).
+    in property <string> protect-label;
+    in property <string> discard-label;
+    in property <string> hold-hint;
+    // Warning ink, or "".
+    in property <string> warning-text;
+    // Why the discard is refused, or "" when it is not.
+    in property <string> refused-text;
+    // The keyboard's own hold (Delete): true while the key is down. Routed
+    // through a property because the caller's key scope cannot reach an
+    // element inside the `if` this bar usually sits in.
+    in property <bool> key-held;
+    callback clear();
+    callback protect();
+    callback discard();
+
+    spacing: Tokens.space-2;
+    alignment: stretch;
+
+    // `Btn.hold-start` does not look at `disabled` (only the pointer and its
+    // own keys do), so a refused discard is refused here too.
+    changed key-held => {
+        if (root.key-held && root.refused-text == "") {
+            discard-btn.hold-start();
+        } else {
+            discard-btn.hold-cancel();
+        }
+    }
+
+    // One run of words: the two halves sit flush, not the bar's 8 apart.
+    HorizontalLayout {
+        horizontal-stretch: 0;
+
+        if root.count != "": Text {
+            text: root.count;
+            vertical-alignment: center;
+            font-size: Tokens.type-label-size;
+            font-weight: Tokens.type-body-strong-weight;
+            color: Tokens.ink;
+        }
+
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            font-size: Tokens.type-label-size;
+            font-weight: root.count != "" ? 400 : 500;
+            color: root.count != "" ? Tokens.ink-muted : Tokens.ink;
+        }
+    }
+
+    Rectangle {
+        horizontal-stretch: 1;
+    }
+
+    Btn {
+        y: (parent.height - self.height) / 2;
+        label: root.clear-label;
+        variant: BtnVariant.ghost;
+        clicked => {
+            root.clear();
+        }
+    }
+
+    if root.protect-label != "": Btn {
+        y: (parent.height - self.height) / 2;
+        label: root.protect-label;
+        icon: Icons.lock;
+        clicked => {
+            root.protect();
+        }
+    }
+
+    // Muted when it says why the discard is refused, `warning` otherwise.
+    if root.refused-text != "" || root.warning-text != "": InlineNote {
+        horizontal-stretch: 0;
+        icon: Icons.warning;
+        text: root.refused-text != "" ? root.refused-text : root.warning-text;
+        warning: root.refused-text == "";
+    }
+
+    discard-btn := Btn {
+        y: (parent.height - self.height) / 2;
+        label: root.discard-label;
+        icon: Icons.discard;
+        variant: BtnVariant.danger-quiet;
+        hold: true;
+        hold-hint: root.hold-hint;
+        disabled: root.refused-text != "";
+        hold-complete => {
+            root.discard();
+        }
+    }
+}
+
+export enum TallyState { live, standby, off }
+
+// The DS tally lamp: 8px. `live` is lit `live` with the `glow-live` halo,
+// `standby` a hollow 1.5px `ink-muted` ring, `off` an `ink-faint` dot -- the
+// shape tells them apart as well as the colour. `blink` is for the nav lamp
+// only (決めたこと 7): one blink on the screen at most. It follows
+// `Tokens.tally-blink`, which a timer in `shell.rs` writes under 60 times a
+// second while something records and the window is on screen (t261026-e5c3);
+// reduce-motion keeps it lit.
+export component TallyLamp inherits Rectangle {
+    in property <TallyState> state: TallyState.live;
+    in property <bool> blink;
+
+    property <bool> blinking: root.blink && root.state == TallyState.live && !Tokens.reduce-motion;
+
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: root.state == TallyState.live
+        ? Tokens.live
+        : root.state == TallyState.off ? Tokens.ink-faint : transparent;
+    border-width: root.state == TallyState.standby ? 1.5px : 0px;
+    border-color: Tokens.ink-muted;
+    drop-shadow-blur: root.state == TallyState.live ? Tokens.glow-live-blur : 0px;
+    drop-shadow-color: Tokens.glow-live-color;
+    // `lb-tally`: 1 -> 0.5 -> 1 over `duration-tally`, eased in and out --
+    // a cosine is that curve's shape (`timeline::tally_blink`).
+    opacity: root.blinking ? Tokens.tally-blink : 1.0;
+}
+
+// The DS Tally: the recording state as a lamp and words, always together.
+// Only the DS's `plain` variant in the `live` state is drawn -- the title
+// bar's: no ground, no edge, `ink-muted` words, and it never turns into a
+// button on hover (決めたこと 7). The capsule / badge / stage / dot variants
+// and the standby / off states had no caller and went (t261101-4ea7; the DS
+// card still has them). Only the lamp and the word 「録画中」 are red.
+// Left of `target` (t260928-5f3b F9, DS Tally README): `app-icon`, the
+// captured exe's own icon; when that could not be read, the `AppMonogram` of
+// `app-letter` / `app-hue` (`ui_state::sessions::monogram_*`, the same letter
+// and hue the history shows); a whole screen (`app-monitor`) takes the
+// `monitor` glyph instead, as the history's `AppMark` does (user ruling
+// 2026-09-28, t260928-b780). Several captures at once pass `app-icons`
+// instead: up to three, 2px apart, after the rule, each with the same three
+// rungs.
+export struct TallyApp {
+    icon: image,
+    letter: string,
+    hue: int,
+    monitor: bool,
+}
+
+// One 16px app mark of the Tally: an `AppMark` fed from a `TallyApp`.
+component TallyMark inherits AppMark {
+    in property <TallyApp> app;
+
+    icon: root.app.icon;
+    letter: root.app.letter;
+    hue: root.app.hue;
+    monitor: root.app.monitor;
+}
+
+export component Tally inherits Rectangle {
+    // Replaces the word 「録画中」.
+    in property <string> label;
+    in property <string> target;
+    in property <image> app-icon;
+    in property <string> app-letter;
+    in property <int> app-hue;
+    in property <bool> app-monitor;
+    in property <[TallyApp]> app-icons;
+    in property <string> detail;
+
+    property <string> word: root.label != "" ? root.label : "録画中";
+    property <color> text-ink: Tokens.ink-muted;
+    property <length> text-size: 12px;
+    // Plex sits high in its box: the words drop, the lamp and icon stay
+    // (DS optical centre, size-only: 11-12px drop 1px; README ~:64, t260928-4ac5 follow-up).
+    property <length> text-nudge: 1px;
+
+    height: 28px;
+    width: tally-row.preferred-width;
+
+    tally-row := HorizontalLayout {
+        spacing: Tokens.space-2;
+        alignment: center;
+
+        TallyLamp {
+            y: (parent.height - self.height) / 2;
+            state: TallyState.live;
+        }
+
+        Text {
+            text: root.word;
+            y: root.text-nudge;
+            vertical-alignment: center;
+            font-family: Tokens.font-family;
+            font-size: root.text-size;
+            font-weight: Tokens.type-body-strong-weight;
+            color: Tokens.live-text;
+        }
+
+        if root.target != "" || root.app-icons.length > 1: Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: 1px;
+            height: 12px;
+            background: Tokens.line-strong;
+        }
+
+        if root.app-icons.length > 1: HorizontalLayout {
+            spacing: 2px;
+
+            // Three at most: slint cannot slice a model, so one slot each.
+            TallyMark {
+                y: (parent.height - self.height) / 2;
+                app: root.app-icons[0];
+                ink: root.text-ink;
+            }
+
+            TallyMark {
+                y: (parent.height - self.height) / 2;
+                app: root.app-icons[1];
+                ink: root.text-ink;
+            }
+
+            if root.app-icons.length > 2: TallyMark {
+                y: (parent.height - self.height) / 2;
+                app: root.app-icons[2];
+                ink: root.text-ink;
+            }
+        }
+
+        if root.target != "": HorizontalLayout {
+            spacing: 6px;
+
+            if root.app-icons.length <= 1 && (root.app-monitor || root.app-icon.width > 0 || root.app-letter != ""): TallyMark {
+                y: (parent.height - self.height) / 2;
+                app: {
+                    icon: root.app-icon,
+                    letter: root.app-letter,
+                    hue: root.app-hue,
+                    monitor: root.app-monitor,
+                };
+                ink: root.text-ink;
+            }
+
+            Text {
+                max-width: 260px;
+                text: root.target;
+                y: root.text-nudge;
+                vertical-alignment: center;
+                overflow: elide;
+                font-family: Tokens.font-family;
+                font-size: root.text-size;
+                font-weight: 500;
+                color: root.text-ink;
+            }
+        }
+
+        if root.detail != "": Text {
+            text: root.detail;
+            vertical-alignment: center;
+            font-family: Tokens.font-family-mono;
+            font-size: root.text-size;
+            color: Tokens.ink-muted;
+        }
+    }
+}
