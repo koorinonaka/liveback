@@ -1,0 +1,45 @@
+// The picker's row model (task124, reduced to a model file by task170).
+//
+// All strings and all "which of these nothings is it" decisions come from
+// Rust (`ui_state`), which is where the tests are; the `.slint` side only maps
+// them onto elements.
+
+export enum TileMedia {
+    // Waiting for the first thumbnail request to come back.
+    loading,
+    // The request came back with nothing, and always will for this window.
+    none,
+    ready,
+}
+
+export struct TargetTile {
+    id: string,
+    // A window's title, or a screen's number with メイン on the primary one
+    // (`ui_state::targets::tile_title`, t260927-711d).
+    title: string,
+    // A screen's resolution, drawn in its own tag top-right; "" for a window.
+    resolution: string,
+    // Why this target cannot be picked, in the middle of the sunk tile; "" when
+    // it can.
+    blocked-reason: string,
+    disabled: bool,
+    // The target being recorded right now: REC, the live edge, and a press
+    // that stops it instead of starting one (task175).
+    recording: bool,
+    // A screen rather than a window: which icon stands in without a picture.
+    screen: bool,
+    media: TileMedia,
+    thumbnail: image,
+    // Asked of Rust rather than derived from `app-icon` here: an empty `image`
+    // has no property the `.slint` side can test that also reads as intent.
+    has-icon: bool,
+    app-icon: image,
+    // A window's stand-in when `has-icon` is false (t260928-08df): the
+    // history's monogram, off the same name (`ui_state::sessions`).
+    app-letter: string,
+    app-hue: int,
+    // Whether a launch of this target's app records itself (task1980 /
+    // task3670), and the badge's word. Read-only state here.
+    auto-capture: bool,
+    auto-capture-label: string,
+}
